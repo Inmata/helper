@@ -116,10 +116,10 @@ class RoomGameTests(unittest.TestCase):
 class DialoguePayloadTests(unittest.TestCase):
     class Client:
         def __init__(self):
-            self.payload = None
+            self.user = None
 
         def complete_text(self, system, user, **options):
-            self.payload = json.loads(user)
+            self.user = user
             return "好"
 
     def snapshot(self):
@@ -128,9 +128,10 @@ class DialoguePayloadTests(unittest.TestCase):
     def test_room_game_is_injected_only_when_given(self):
         client = self.Client()
         Dialogue(client).reply(self.snapshot(), room_game={"current": "一心一意", "next_char": "意"})
-        self.assertEqual(client.payload["room_game"], {"current": "一心一意", "next_char": "意"})
+        self.assertIn("【本群接龙进度】", client.user)
+        self.assertIn("current=一心一意", client.user)
         Dialogue(client).reply(self.snapshot())
-        self.assertNotIn("room_game", client.payload)
+        self.assertNotIn("【本群接龙进度】", client.user)
 
     def test_system_tells_the_model_not_to_judge_the_chain(self):
         # 规则必须写进提示词，避免大模型自己编造接龙进度。

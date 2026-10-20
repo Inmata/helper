@@ -1,13 +1,12 @@
 """真正艾特机器人后，用本群人格回复当前发言者。"""
-from datetime import datetime, timezone
+from .._shared import idiom_state
 
-from wxbot_framework.dialogue import Dialogue
-from wxbot_framework.llm import LLMError
-from wxbot_framework.members import SnapshotExpired
-from wxbot_framework.mentions import strip_at_labels
-from wxbot_framework.personality import personality_text
-from wxbot_framework.summary import split_text
-from wxbot_framework.text import FOUR_CHINESE
+from wxbot_framework.conversation.dialogue import Dialogue
+from wxbot_framework.integrations.llm import LLMError
+from wxbot_framework.conversation.members import SnapshotExpired
+from wxbot_framework.messaging.mentions import strip_at_labels
+from wxbot_framework.conversation.personality import personality_text
+from wxbot_framework.conversation.summary import split_text
 from wxbot_framework.commands import is_control
 
 SELF_QUERY_HINTS = ("我是谁", "知道我是谁", "认识我吗", "我叫什么", "我的身份", "我是哪位")
@@ -35,36 +34,25 @@ class Plugin:
             except Exception as error:
                 ctx.logger.warning("读取接龙进度失败：%s", error)
                 return None
-        current = state.get("current") if isinstance(state, dict) else None
-        if not isinstance(current, str) or not FOUR_CHINESE.fullmatch(current):
+        if idiom_state.current_and_used(state) is None:
             return None
-        used, idle = state.get("used"), state.get("idle_seconds", 1800)
-        if (not isinstance(used, list) or current not in used or
-                type(idle) is not int or not 60 <= idle <= 86400):
+        idle = state.get("idle_seconds", 1800)
+        if type(idle) is not int or not 60 <= idle <= 86400:
             return None
-        try:
-            saved = datetime.fromisoformat(state.get("updated_at"))
-        except (TypeError, ValueError):
+        age = idiom_state.updated_age(state)
+        if age is None:
             return None
-        if saved.tzinfo is None:
-            saved = saved.replace(tzinfo=timezone.utc)
-        age = (datetime.now(timezone.utc) - saved).total_seconds()
         return state if 0 <= age <= idle else None
 
     @staticmethod
     def is_move(text, state):
         """四字且首字等于当前接字，就是要交给接龙插件判定的答案。"""
-        return bool(FOUR_CHINESE.fullmatch(text) and text[0] == state["current"][-1])
+        return idiom_state.is_move(text, state["current"])
 
     @staticmethod
     def game_context(state):
-        current = state["current"]
-        used = [word for word in state.get("used", []) if isinstance(word, str)][-USED_SAMPLE:]
-        context = {"current": current, "next_char": current[-1], "used": used}
-        for key in ("rounds", "goal", "hints_left", "swaps_left"):
-            if type(state.get(key)) is int:
-                context[key] = state[key]
-        return context
+        """只读投影；字段解释见 plugins/_shared/idiom_state.py。"""
+        return idiom_state.game_context(state, sample=USED_SAMPLE)
 
     def on_message(self, message, ctx):
         if (message.type != 1 or not message.is_group or message.chat_id not in self.members.groups or

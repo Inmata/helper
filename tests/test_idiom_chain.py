@@ -7,10 +7,10 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from plugins.idiom_chain import FEATURE, Plugin, HELP
-from wxbot_framework.llm import LLMError
+from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.sdk import Message
-from wxbot_framework.personality import PersonalityState
-from wxbot_framework.ordering import MessageWatermarks
+from wxbot_framework.conversation.personality import PersonalityState
+from wxbot_framework.messaging.ordering import MessageWatermarks
 from plugins.idiom_chain.judge import Verdict
 
 ROOM = "12345678@chatroom"

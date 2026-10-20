@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 from plugins.mention_chat import Plugin
-from wxbot_framework.dialogue import SYSTEM, Dialogue
-from wxbot_framework.members import ConversationSnapshot
+from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
+from wxbot_framework.conversation.members import ConversationSnapshot
 from wxbot_framework.sdk import Message
 
 ROOM = "12345678@chatroom"

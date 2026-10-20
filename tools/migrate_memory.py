@@ -12,11 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from wxbot_framework.app.bootstrap import open_knowledge
 from wxbot_framework.config import ConfigStore
-from wxbot_framework.knowledge import KnowledgeStore
-from wxbot_framework.members import MemberStore
 from wxbot_framework.locking import InstanceLock
-from wxbot_framework.maintenance import maintenance_options
 from wxbot_framework.timeutil import DEFAULT_DISPLAY_TIMEZONE
 
 HOURLY_DEFAULTS = {
@@ -77,13 +75,8 @@ def _migrate_locked(config_path):
     config.setdefault("plugins", {}).setdefault("knowledge", {})["enabled"] = True
     save_config(members_path, members_data)
     save_config(config_path, config)
-    members = MemberStore.from_config(config, config_path.parent)
+    members, knowledge = open_knowledge(config, config_path.parent)
     try:
-        members.initialize()
-        knowledge = KnowledgeStore(members, display_timezone=config["display_timezone"])
-        upgrade = maintenance_options(config)["upgrade_file"]
-        knowledge.initialize(config_path.parent / config["memory"]["seed_file"],
-                             upgrade_file=config_path.parent / upgrade if upgrade else None)
         return knowledge.status()
     finally:
         members.close()

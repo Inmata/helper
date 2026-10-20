@@ -9,11 +9,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from wxbot_framework.authorization import LOCAL_EDITOR
+from wxbot_framework.app.bootstrap import open_knowledge
 from wxbot_framework.config import ConfigStore
-from wxbot_framework.knowledge import KnowledgeStore
 from wxbot_framework.locking import InstanceLock
-from wxbot_framework.maintenance import MaintenanceService, maintenance_options
-from wxbot_framework.members import MemberStore
+from wxbot_framework.app.maintenance import MaintenanceService
 
 
 def main():
@@ -30,13 +29,8 @@ def main():
         config = ConfigStore(args.config).load()
         options = maintenance_options(config)
         with InstanceLock(ROOT / ".runtime/bot.lock"):
-            members = MemberStore.from_config(config, args.config.resolve().parent)
-            if members is None:
-                raise ValueError("尚未配置成员目录")
-            members.initialize()
-            knowledge = KnowledgeStore(members)
-            upgrade = options["upgrade_file"]
-            knowledge.initialize(upgrade_file=args.config.resolve().parent / upgrade if upgrade else None)
+            # 维护命令不导入知识种子，保持离线执行只做本次请求的改动。
+            members, knowledge = open_knowledge(config, args.config.resolve().parent, seed=False)
             service = MaintenanceService(knowledge, options=options)
             print(service.execute(args.command, LOCAL_EDITOR, explicit_room=args.room))
         return 0

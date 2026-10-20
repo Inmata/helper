@@ -154,12 +154,12 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
     if not generic and target != "filehelper":
         raise ValueError("旧自测桥接仅支持文件传输助手")
     if generic:
-        from wxbot_framework.text import validate_target
+        from wxbot_framework.messaging.text import validate_target
         validate_target(target)
     if mentions is not None:
         if not generic or mode != "--dispatch":
             raise ValueError("艾特成员列表仅用于通用文本发送")
-        from wxbot_framework.text import validate_mentions
+        from wxbot_framework.messaging.text import validate_mentions
         mentions = validate_mentions(target, mentions)
     if mode not in ("--arm", "--dispatch", "--receive", "--listen", "--remove", "--probe-at"):
         raise RuntimeError("不支持的原生桥接操作")

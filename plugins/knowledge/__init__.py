@@ -1,7 +1,7 @@
 """知识查询与维护；权限始终由实际消息作者判断。"""
 from wxbot_framework.commands import command_text, help_text
-from wxbot_framework.members import MemberError, parse_aliases
-from wxbot_framework.summary import split_text
+from wxbot_framework.conversation.members import MemberError, parse_aliases
+from wxbot_framework.conversation.summary import split_text
 from wxbot_framework.timeutil import format_local
 
 
@@ -32,7 +32,7 @@ class Plugin:
             if not self.members.is_admin(sender):
                 raise MemberError("只有管理员可以关联人物")
             targets = [wxid for wxid in message.data.get("at_members", ()) if wxid != self.members.account]
-            from wxbot_framework.mentions import strip_at_labels
+            from wxbot_framework.messaging.mentions import strip_at_labels
             if targets:
                 name = strip_at_labels(argument).strip()
                 if len(targets) != 1 or not name:

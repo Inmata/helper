@@ -8,10 +8,10 @@ from unittest.mock import Mock
 import test_chat_summary as daily
 from plugins.mention_chat import Plugin as ChatPlugin
 from plugins.personality import Plugin as PersonalityPlugin
-from wxbot_framework.members import MemberError
-from wxbot_framework.mentions import parse_at_members, strip_at_labels
-from wxbot_framework.personality import FIXED_NAME, PersonalityState, prepare_switch, game_reply
-from wxbot_framework.runtime import BotApplication
+from wxbot_framework.conversation.members import MemberError
+from wxbot_framework.messaging.mentions import parse_at_members, strip_at_labels
+from wxbot_framework.conversation.personality import FIXED_NAME, PersonalityState, prepare_switch, game_reply
+from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.sdk import Message
 
 ROOM, CAT, ROBOT, OTHER = daily.ROOM, daily.CAT, daily.ROBOT, daily.OTHER

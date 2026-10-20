@@ -1,0 +1,29 @@
+sequenceDiagram
+    participant WX as bridge
+    participant App as BotApplication
+    participant In as ingress
+    participant M as MemberStore/History
+    participant R as Maintenance
+    participant P as Plugins
+    participant S as ServiceFacade
+
+    Note over WX,S: 本文件为完整顺序源；docs/images/message-flow-3.png 是省略维护分流与人格兼容步骤的主链路图。
+
+    WX->>App: message
+    App->>In: submit
+    In->>R: owner DM? maintenance queue
+    In->>In: chat_allowlist filter
+    In->>P: capture
+    In->>M: record
+    M-->>In: inserted?
+    In->>App: notify learner
+    In->>M: prepare_reset
+    In->>R: group maintenance command?
+    In->>P: prepare_switch
+    In->>P: dispatch
+    P->>M: snapshot
+    P->>S: send_text(delivery_guard)
+    S->>S: validate session / wait pacing / re-check guard
+    S->>WX: send
+
+    Note over In,P: capture before record

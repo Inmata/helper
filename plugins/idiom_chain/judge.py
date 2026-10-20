@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from wxbot_framework.llm import LLMError
-from wxbot_framework.text import FOUR_CHINESE
+from wxbot_framework.integrations.llm import LLMError
+from wxbot_framework.messaging.text import FOUR_CHINESE
 from .lexicon import Lexicon
 
 SYSTEM = """你是成语接龙裁判。判断 candidate 是否为真实的四字成语，允许真实但不常见的成语，禁止生造。

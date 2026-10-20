@@ -9,16 +9,16 @@ from unittest.mock import Mock, patch
 import test_chat_summary as daily
 from plugins.knowledge import Plugin as KnowledgePlugin
 from plugins.chat_summary import parse
-from wxbot_framework.controls import prepare_reset
+from wxbot_framework.conversation.controls import prepare_reset
 from wxbot_framework.feature_config import feature_options
-from wxbot_framework.hourly import HourlyScheduler
-from wxbot_framework.knowledge import KnowledgeStore
-from wxbot_framework.llm import LLMError
-from wxbot_framework.members import MemberError
-from wxbot_framework.memory_worker import MemoryWorker
+from wxbot_framework.memory.hourly import HourlyScheduler
+from wxbot_framework.memory.knowledge import KnowledgeStore
+from wxbot_framework.integrations.llm import LLMError
+from wxbot_framework.conversation.members import MemberError
+from wxbot_framework.memory.worker import MemoryWorker
 from wxbot_framework.config import ConfigStore
-from wxbot_framework.runtime import BotApplication
-from wxbot_framework.room_state import RoomStateStore
+from wxbot_framework.app.runtime import BotApplication
+from wxbot_framework.conversation.room_state import RoomStateStore
 
 ROOM, CAT, OTHER, ROBOT = daily.ROOM, daily.CAT, daily.OTHER, daily.ROBOT
 
@@ -44,7 +44,7 @@ class MemoryTests(unittest.TestCase):
     def put(self, kb, content="常聊吉他", *, wxid=CAT, slot="爱好"):
         self.record("一起聊吉他", sender=wxid)
         entity = kb.member_entity(ROOM, wxid)
-        with kb._lock, kb._db():
+        with kb.lock, kb.connection():
             item = kb.put(ROOM, entity["id"], slot, "本人陈述", content, tags=["吉他"])
         return item
 
@@ -91,7 +91,7 @@ class MemoryTests(unittest.TestCase):
         self.record("没绑定也能存", sender="wxid_new")
         self.store.register("新朋友", ROOM, "wxid_new")
         self.assertEqual(self.store.history("新朋友", ROOM)[0]["text"], "没绑定也能存")
-        self.assertTrue(self.store._connection().execute("SELECT first_seen FROM room_members WHERE wxid='wxid_new'").fetchone()[0])
+        self.assertTrue(self.store.connection().execute("SELECT first_seen FROM room_members WHERE wxid='wxid_new'").fetchone()[0])
 
     def test_binding_reminder_seven_day_cooldown_and_binding_stops_it(self):
         self.assertTrue(self.store.binding_reminder_due(ROOM, "wxid_new"))
@@ -134,7 +134,7 @@ class MemoryTests(unittest.TestCase):
         valid = self.put(kb)
         self.put(kb, "无效引用", wxid=OTHER)
         missing = kb.member_entity(ROOM, OTHER)["id"]
-        with kb._db() as db:
+        with kb.connection() as db:
             db.execute("DELETE FROM knowledge_entities WHERE id=?", (missing,))
         entity = kb.member_entity(ROOM, CAT)["id"]
         for query, options in (("吉他", {}), ("", {"entity_id": entity})):
@@ -150,7 +150,7 @@ class MemoryTests(unittest.TestCase):
             if isinstance(foreign, KnowledgeStore):
                 foreign.initialize()
                 foreign = foreign.entity(ROOM, "其他账号人物", pinned=True)
-            with kb._db() as db:
+            with kb.connection() as db:
                 db.execute("UPDATE knowledge_items SET entity_id=? WHERE id=?", (foreign["id"], bad))
             with self.subTest(entity=foreign["id"]):
                 self.assertEqual([item["id"] for item in kb.search(ROOM, "吉他")], [valid])
@@ -200,7 +200,7 @@ class MemoryTests(unittest.TestCase):
         entity_id = item["entity_id"]
         kb.edit(ROOM, item["id"], CAT, forget=True)
         kb.quarantine_person(ROOM, f"#{entity_id}", CAT)
-        with kb._lock, kb._db() as db:
+        with kb.lock, kb.connection() as db:
             db.execute("UPDATE knowledge_entities SET pinned=0,aliases='[]' WHERE id=?", (entity_id,))
         before = kb.admin_entity(ROOM, f"#{entity_id}")
         seed.write_text(json.dumps({"groups": {ROOM: [{"name": "种子人物", "aliases": ["新别名"],
@@ -233,7 +233,7 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn("person:本群", keys)
         self.assertIn("group:本群", keys)
         group = kb.group_entity(ROOM)
-        count = kb._db().execute("SELECT COUNT(*) FROM knowledge_items WHERE entity_id=? AND slot='群梗'",
+        count = kb.connection().execute("SELECT COUNT(*) FROM knowledge_items WHERE entity_id=? AND slot='群梗'",
                                  (group["id"],)).fetchone()[0]
         self.assertEqual(count, 1)
         self.assertEqual(len(kb.search(ROOM, "摸鱼")), 1)
@@ -247,7 +247,7 @@ class MemoryTests(unittest.TestCase):
             {"name": "人物乙", "aliases": ["外号B"], "memories": []},
         ]}}), encoding="utf-8")
         kb.import_seed(seed)
-        with kb._lock, kb._db() as db:
+        with kb.lock, kb.connection() as db:
             db.execute("UPDATE knowledge_entities SET aliases='' WHERE account=? AND room=? AND name='人物甲'", (ROBOT, ROOM))
             db.execute("""UPDATE knowledge_entities SET aliases='["Zeg", "外号A", "外号B"]'
                 WHERE account=? AND room=? AND name='人物乙'""", (ROBOT, ROOM))
@@ -309,7 +309,7 @@ class MemoryTests(unittest.TestCase):
         first = self.record("这是群梗：摸鱼", sender=CAT, sequence=1)
         second = self.record("又开始摸鱼了", sender=OTHER, sequence=2)
         first_id, second_id = self.store.message_id(first), self.store.message_id(second)
-        with kb._lock, kb._db():
+        with kb.lock, kb.connection():
             item = kb.put(ROOM, group["id"], "摸鱼梗", "群内玩笑", "本群把偷懒叫摸鱼",
                           sources=[{"id": first_id, "sender_id": CAT, "received_at": "2026-10-10"},
                                    {"id": second_id, "sender_id": OTHER, "received_at": "2026-10-10"}])
@@ -317,7 +317,7 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(kb.admin_item(ROOM, item)["status"], "candidate")
         third = self.record("摸鱼摸鱼", sender=CAT, sequence=3)
         third_id = self.store.message_id(third)
-        with kb._lock, kb._db():
+        with kb.lock, kb.connection():
             kb.put(ROOM, group["id"], "摸鱼梗", "群内玩笑", "本群把偷懒叫摸鱼",
                     sources=[{"id": third_id, "sender_id": CAT, "received_at": "2026-10-10"}])
         self.assertEqual(len(kb.search(ROOM, "摸鱼")), 1)
@@ -328,30 +328,30 @@ class MemoryTests(unittest.TestCase):
         group = kb.group_entity(ROOM)
         msg = self.record("只有一条证据")
         msg_id = self.store.message_id(msg)
-        with kb._lock, kb._db():
+        with kb.lock, kb.connection():
             item = kb.put(ROOM, group["id"], "孤立梗", "群内玩笑", "只有一条证据的梗",
                           sources=[{"id": msg_id, "sender_id": CAT, "received_at": "2026-10-10"}])
         self.assertEqual(kb.admin_item(ROOM, item)["status"], "candidate")
-        with kb._lock, kb._db() as db:
+        with kb.lock, kb.connection() as db:
             db.execute("UPDATE knowledge_items SET updated_at='2026-01-01T00:00:00+00:00' WHERE id=?", (item,))
         self.assertEqual(kb.archive_stale_candidates(ROOM), 1)
         archived = kb.admin_item(ROOM, item)
         self.assertEqual(archived["status"], "archived")
         self.assertEqual(archived["content"], "只有一条证据的梗")
-        self.assertTrue(kb._db().execute("SELECT 1 FROM knowledge_sources WHERE item_id=?", (item,)).fetchone())
+        self.assertTrue(kb.connection().execute("SELECT 1 FROM knowledge_sources WHERE item_id=?", (item,)).fetchone())
 
     def test_new_evidence_refreshes_group_candidate_and_prevents_archive(self):
         kb = self.kb()
         group = kb.group_entity(ROOM)
         first = self.record("第一条证据", sender=CAT, sequence=1)
-        with kb._lock, kb._db():
+        with kb.lock, kb.connection():
             item = kb.put(ROOM, group["id"], "持续话题", "群内玩笑", "持续有证据的话题",
                           sources=[{"id": self.store.message_id(first), "sender_id": CAT,
                                     "received_at": "2026-10-10"}])
-        with kb._lock, kb._db() as db:
+        with kb.lock, kb.connection() as db:
             db.execute("UPDATE knowledge_items SET updated_at='2026-01-01T00:00:00+00:00' WHERE id=?", (item,))
         second = self.record("第二条证据", sender=OTHER, sequence=2)
-        with kb._lock, kb._db():
+        with kb.lock, kb.connection():
             kb.put(ROOM, group["id"], "持续话题", "群内玩笑", "持续有证据的话题",
                    sources=[{"id": self.store.message_id(second), "sender_id": OTHER,
                              "received_at": "2026-10-10"}])
@@ -364,16 +364,16 @@ class MemoryTests(unittest.TestCase):
         kb = self.kb()
         group = kb.group_entity(ROOM)
         first = self.record("旧证据", sender=CAT, sequence=1)
-        with kb._lock, kb._db():
+        with kb.lock, kb.connection():
             item = kb.put(ROOM, group["id"], "复活话题", "群内玩笑", "曾被归档的话题",
                           sources=[{"id": self.store.message_id(first), "sender_id": CAT,
                                     "received_at": "2026-10-10"}])
-        with kb._lock, kb._db() as db:
+        with kb.lock, kb.connection() as db:
             db.execute("UPDATE knowledge_items SET updated_at='2026-01-01T00:00:00+00:00' WHERE id=?", (item,))
         self.assertEqual(kb.archive_stale_candidates(ROOM), 1)
         self.assertEqual(kb.admin_item(ROOM, item)["status"], "archived")
         second = self.record("新证据", sender=OTHER, sequence=2)
-        with kb._lock, kb._db():
+        with kb.lock, kb.connection():
             kb.put(ROOM, group["id"], "复活话题", "群内玩笑", "曾被归档的话题",
                    sources=[{"id": self.store.message_id(second), "sender_id": OTHER,
                              "received_at": "2026-10-10"}])
@@ -406,7 +406,6 @@ class MemoryTests(unittest.TestCase):
         kb = self.kb()
         plugin = KnowledgePlugin()
         plugin.on_load(self.ctx)
-        self.ctx._knowledge = kb
         plugin.on_message(self.record("@机器人\u2005/help"), self.ctx)
         self.assertIn("/记忆", "".join(row[1] for row in self.backend.sent))
 
@@ -414,7 +413,6 @@ class MemoryTests(unittest.TestCase):
         kb = self.kb()
         plugin = KnowledgePlugin()
         plugin.on_load(self.ctx)
-        self.ctx._knowledge = kb
         plugin.on_message(self.record("@机器人\u2005/help", sender=OTHER), self.ctx)
         text = "".join(row[1] for row in self.backend.sent)
         self.assertIn("/记忆", text)
@@ -438,7 +436,6 @@ class MemoryTests(unittest.TestCase):
         kb = self.kb()
         plugin = KnowledgePlugin()
         plugin.on_load(self.ctx)
-        self.ctx._knowledge = kb
         person = kb.entity(ROOM, "朱宏旭", aliases=["小朱"], pinned=True)
         kb.add_memory(ROOM, person["id"], "身份", "人工确认", "群里的吉他手", CAT)
         plugin.on_message(self.record("@机器人\u2005/档案 小朱"), self.ctx)
@@ -454,12 +451,12 @@ class MemoryTests(unittest.TestCase):
             db.execute("CREATE TABLE sample(value TEXT)")
             db.execute("INSERT INTO sample VALUES('保留数据')")
             db.commit()
-        from wxbot_framework.database import backup_before_migration
+        from wxbot_framework.storage.database import backup_before_migration
         with closing(sqlite3.connect(legacy)) as db:
             backup = backup_before_migration(db, legacy)
         with closing(sqlite3.connect(backup)) as db:
             self.assertEqual(db.execute("SELECT value FROM sample").fetchone()[0], "保留数据")
-        self.assertIsNone(backup_before_migration(self.store._connection(), self.store.path))
+        self.assertIsNone(backup_before_migration(self.store.connection(), self.store.path))
 
     def test_invalid_background_config_is_rejected(self):
         for config in ({"memory": []}, {"hourly_chat": {"start_hour": 24}},
@@ -484,7 +481,7 @@ class MemoryTests(unittest.TestCase):
     def test_correcting_a_joke_does_not_turn_it_into_a_real_event(self):
         kb = self.kb()
         entity = kb.entity(ROOM, "示例哥", pinned=True)
-        with kb._lock, kb._db():
+        with kb.lock, kb.connection():
             item_id = kb.put(ROOM, entity["id"], "归来", "群内玩笑", "离线归来梗")
         kb.edit(ROOM, item_id, CAT, content="只是夸张的上线贺告")
         self.assertEqual(kb.search(ROOM, "示例哥")[0]["kind"], "群内玩笑")
@@ -562,7 +559,7 @@ class MemoryTests(unittest.TestCase):
         app = BotApplication(self.root, ConfigStore(config_path))
         app._connect = Mock()
         client = Mock(complete_json=Mock(return_value={"entities": [], "memories": []}))
-        with patch("wxbot_framework.llm.LLMClient.from_file", return_value=client):
+        with patch("wxbot_framework.integrations.llm.LLMClient.from_file", return_value=client):
             app.run(seconds=0.35)
         self.assertFalse(app.memory_worker.thread.is_alive())
         self.assertFalse(app.hourly_scheduler.thread.is_alive())
@@ -595,8 +592,8 @@ class HourlyTests(unittest.TestCase):
         scheduler.tick()
 
     def candidate_statuses(self, scheduler):
-        with scheduler.knowledge._lock:
-            return [row[0] for row in scheduler.knowledge._db().execute(
+        with scheduler.knowledge.lock:
+            return [row[0] for row in scheduler.knowledge.connection().execute(
                 "SELECT status FROM proactive_candidates WHERE account=? AND room=? ORDER BY id",
                 (ROBOT, ROOM))]
 
@@ -688,7 +685,7 @@ class HourlyTests(unittest.TestCase):
 
     def test_previous_run_scheduled_candidate_is_marked_missed(self):
         scheduler = self.scheduler(run_id="new-run")
-        with scheduler.knowledge._lock, scheduler.knowledge._db() as db:
+        with scheduler.knowledge.lock, scheduler.knowledge.connection() as db:
             db.execute("""INSERT INTO proactive_candidates
                 (account,room,run_id,due_at,status,anchor_id,context_generation,created_at,updated_at)
                 VALUES(?,?,?,?,'scheduled',0,0,?,?)""",
@@ -734,7 +731,7 @@ class HourlyTests(unittest.TestCase):
     def test_recent_chat_retrieves_relevant_long_term_knowledge(self):
         scheduler = self.scheduler()
         entity = scheduler.knowledge.entity(ROOM, "吉他话题", pinned=True)
-        with scheduler.knowledge._lock, scheduler.knowledge._db():
+        with scheduler.knowledge.lock, scheduler.knowledge.connection():
             scheduler.knowledge.put(ROOM, entity["id"], "练习", "群内玩笑", "每天都说从明天练吉他", tags=["吉他"])
         self.activity(scheduler)
         payload = json.loads(scheduler.model.client.complete_json.call_args.args[1])
@@ -780,7 +777,7 @@ class HourlyTests(unittest.TestCase):
         scheduler = self.scheduler(daily_limit=1)
         start = self.now.astimezone(daily.timezone(timedelta(hours=8))).replace(
             hour=1, minute=0, second=0, microsecond=0)
-        with scheduler.knowledge._lock, scheduler.knowledge._db() as db:
+        with scheduler.knowledge.lock, scheduler.knowledge.connection() as db:
             db.execute("""INSERT INTO proactive_candidates
                 (account,room,run_id,due_at,status,anchor_id,context_generation,
                  created_at,updated_at,sent_at)
@@ -789,13 +786,13 @@ class HourlyTests(unittest.TestCase):
         self.activity(scheduler)
         scheduler.model.client.complete_json.assert_not_called()
         self.assertEqual(self.backend.sent, [])
-        candidate = scheduler.knowledge._db().execute("""SELECT status,error FROM proactive_candidates
+        candidate = scheduler.knowledge.connection().execute("""SELECT status,error FROM proactive_candidates
             WHERE account=? AND room=? ORDER BY id DESC LIMIT 1""", (ROBOT, ROOM)).fetchone()
         self.assertEqual(tuple(candidate), ("filtered", "daily-limit"))
 
     def test_cooldown_blocks_model_but_filtered_and_failed_attempts_do_not(self):
         scheduler = self.scheduler(daily_limit=6, cooldown_minutes=45)
-        with scheduler.knowledge._lock, scheduler.knowledge._db() as db:
+        with scheduler.knowledge.lock, scheduler.knowledge.connection() as db:
             db.execute("""INSERT INTO proactive_candidates
                 (account,room,run_id,due_at,status,anchor_id,context_generation,
                  created_at,updated_at,sent_at)
@@ -804,11 +801,11 @@ class HourlyTests(unittest.TestCase):
                  self.now.isoformat(), self.now.isoformat(), self.now.isoformat()))
         self.activity(scheduler)
         scheduler.model.client.complete_json.assert_not_called()
-        candidate = scheduler.knowledge._db().execute("""SELECT status,error FROM proactive_candidates
+        candidate = scheduler.knowledge.connection().execute("""SELECT status,error FROM proactive_candidates
             WHERE account=? AND room=? ORDER BY id DESC LIMIT 1""", (ROBOT, ROOM)).fetchone()
         self.assertEqual(tuple(candidate), ("filtered", "cooldown"))
 
-        with scheduler.knowledge._lock, scheduler.knowledge._db() as db:
+        with scheduler.knowledge.lock, scheduler.knowledge.connection() as db:
             db.execute("UPDATE proactive_candidates SET status='failed' WHERE run_id='recent'")
         self.now += timedelta(minutes=1)
         scheduler.next_candidate[ROOM] = self.now
@@ -819,7 +816,7 @@ class HourlyTests(unittest.TestCase):
     def test_daily_limit_resets_at_beijing_midnight(self):
         scheduler = self.scheduler(daily_limit=1)
         previous = datetime(2026, 10, 10, 15, 30, tzinfo=timezone.utc)  # 北京23:30。
-        with scheduler.knowledge._lock, scheduler.knowledge._db() as db:
+        with scheduler.knowledge.lock, scheduler.knowledge.connection() as db:
             db.execute("""INSERT INTO proactive_candidates
                 (account,room,run_id,due_at,status,anchor_id,context_generation,
                  created_at,updated_at,sent_at)
@@ -847,7 +844,7 @@ class HourlyTests(unittest.TestCase):
         scheduler.next_candidate[ROOM] = self.now
         scheduler.tick()
         scheduler.model.client.complete_json.assert_not_called()
-        candidate = scheduler.knowledge._db().execute("""SELECT status,activity_count,speaker_count,error
+        candidate = scheduler.knowledge.connection().execute("""SELECT status,activity_count,speaker_count,error
             FROM proactive_candidates WHERE account=? AND room=? ORDER BY id DESC LIMIT 1""",
             (ROBOT, ROOM)).fetchone()
         self.assertEqual(tuple(candidate), ("filtered", 2, 1, "insufficient-activity"))

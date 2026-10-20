@@ -1,0 +1,319 @@
+"""插件发现、独立消息队列和生命周期管理。"""
+from __future__ import annotations
+
+import copy
+import importlib.util
+import json
+import logging
+import queue
+import sys
+import threading
+import types
+import uuid
+from dataclasses import replace
+from pathlib import Path
+
+from ..config import validate_name
+from ..sdk import PluginContext, LegacyService
+from ..messaging.ordering import MessageWatermarks
+from .manifest import CONTRIBUTOR_FALLBACK, spec_for
+
+logger = logging.getLogger("Plugins")
+
+
+class PluginRecord:
+    def __init__(self, spec, instance, context, module_name, queue_size):
+        self.spec, self.instance, self.context = spec, instance, context
+        self.module_name = module_name
+        self.queue = queue.Queue(maxsize=queue_size)
+        self.stop_event = threading.Event()
+        self.callback_lock = threading.RLock()
+        self.active = True
+        self.handled = self.errors = self.dropped = 0
+        self.last_error = ""
+        self.thread = threading.Thread(target=self._run, name=f"Plugin.{spec.name}", daemon=True)
+
+    def enqueue(self, message):
+        if not self.active:
+            return
+        try:
+            self.queue.put_nowait(message)
+        except queue.Full:
+            self.dropped += 1
+            if self.dropped == 1 or self.dropped % 100 == 0:
+                self.context.logger.warning("插件队列已满，累计丢弃 %d 条", self.dropped)
+
+    def _run(self):
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    message = self.queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                try:
+                    with self.callback_lock:
+                        if not self.active:
+                            continue
+                        try:
+                            if self.spec.api == "legacy":
+                                service = LegacyService(self.context._service, message.session_id)
+                                self.instance.on_message(message.protocol, copy.deepcopy(dict(message.data)), service)
+                            else:
+                                self.instance.on_message(message, self.context)
+                            self.handled += 1
+                        except BaseException as error:
+                            self.errors += 1
+                            self.last_error = str(error)
+                            self.context.logger.exception("插件处理消息失败；继续处理后续消息")
+                finally:
+                    self.queue.task_done()
+        finally:
+            self.unload()
+
+    def unload(self):
+        try:
+            if self.spec.api == "v1" and callable(getattr(self.instance, "on_unload", None)):
+                self.instance.on_unload(self.context)
+        except (Exception, SystemExit):
+            self.context.logger.exception("插件资源释放失败")
+        finally:
+            for name in list(sys.modules):
+                if name == self.module_name or name.startswith(self.module_name + "."):
+                    sys.modules.pop(name, None)
+
+    def deactivate(self, *, force=False):
+        # 热重载遇到正在执行的长回调时保留原插件，避免两份实例同时回复。
+        acquired = self.callback_lock.acquire(timeout=0 if force else 2)
+        if not acquired and not force:
+            raise RuntimeError(f"插件 {self.spec.name} 正在处理消息，请稍后重试")
+        try:
+            self.active = False
+            self.stop_event.set()
+        finally:
+            if acquired:
+                self.callback_lock.release()
+
+    def join(self):
+        """有界等待线程退出；返回是否已退出，供停止流程报告未完成。"""
+        self.thread.join(timeout=3)
+        if self.thread.is_alive():
+            self.context.logger.warning("插件退出仍在等待回调或 on_unload；主程序继续清理连接")
+            return False
+        return True
+
+
+class PluginManager:
+    def __init__(self, directory, store, service, capabilities, queue_size=128, *, member_store=None,
+                 knowledge_store=None, room_state_store=None):
+        self.directory = Path(directory).resolve()
+        self.store, self.service = store, service
+        self.capabilities = frozenset(capabilities)
+        self.queue_size = queue_size
+        self._lock = threading.RLock()
+        self.records = {}
+        self.load_errors = {}
+        self.config = store.load()
+        self.member_store = member_store
+        self.knowledge_store = knowledge_store
+        self.room_state_store = room_state_store
+        self._message_watermarks = MessageWatermarks()
+
+    def is_active(self, name):
+        with self._lock:
+            record = self.records.get(name)
+            return bool(record and record.active)
+
+    def discover(self):
+        specs = {}
+        for directory in sorted(self.directory.iterdir()):
+            if not directory.is_dir() or directory.name.startswith("_"):
+                continue
+            if not (directory / "__init__.py").is_file():
+                continue
+            try:
+                spec = spec_for(directory, self.directory)
+            except Exception as error:
+                self.load_errors[directory.name] = str(error)
+                logger.error("插件 %s 无法发现：%s", directory.name, error)
+                continue
+            specs[spec.name] = spec
+        return specs
+
+    def contributions(self):
+        """按发现顺序确定插件贡献；缺失的署名回退仓库默认维护者。"""
+        rows = []
+        for spec in sorted(self.discover().values(), key=lambda item: item.name):
+            author = spec.author or CONTRIBUTOR_FALLBACK
+            pr_author = spec.pull_request_author or author
+            contributors = tuple(spec.contributors) or (author,)
+            rows.append({"plugin": spec.name, "author": author, "pull_request_author": pr_author,
+                         "contributors": contributors, "description": spec.description})
+        return rows
+
+    def contribution_rows(self, names=None):
+        """供公告使用；指定插件时严格保持声明顺序。"""
+        by_name = {row["plugin"]: row for row in self.contributions()}
+        if names is not None:
+            return [by_name.get(name, {"plugin": name}) for name in names]
+        order = list(dict.fromkeys([*names, *sorted(by_name)]))
+        return [by_name[name] for name in order if name in by_name]
+
+    def _prepare(self, spec):
+        missing = spec.requires - self.capabilities
+        if missing:
+            raise RuntimeError(f"缺少后端能力：{', '.join(sorted(missing))}")
+        options = self.config.get("plugins", {}).get(spec.name, {})
+        context = PluginContext(spec.name, options, self.service, self.capabilities,
+                                llm_config_path=self.store.path.parent / self.config.get("llm_config_file", "llm_config.json"),
+                                member_store=self.member_store, knowledge_store=self.knowledge_store,
+                                room_state_store=self.room_state_store,
+                                display_timezone=self.config.get("display_timezone", "Asia/Shanghai"),
+                                message_watermarks=self._message_watermarks)
+        # 每次使用独立模块名并重新编译源文件，热重载不复用旧入口字节码。
+        # 插件目录作为伪包：插件内的相对导入（如 plugins/_shared）与热重载都依赖它。
+        # 每次加载都刷新路径，避免复用其它插件目录留下的陈旧伪包。
+        package = sys.modules.get("_wxbot_plugins")
+        if package is None:
+            package = types.ModuleType("_wxbot_plugins")
+            sys.modules[package.__name__] = package
+        package.__path__ = [str(self.directory)]
+        module_name = f"_wxbot_plugins.{spec.name}_{uuid.uuid4().hex}"
+        module_spec = importlib.util.spec_from_file_location(module_name, spec.path,
+                                                            submodule_search_locations=[str(spec.path.parent)])
+        module = importlib.util.module_from_spec(module_spec)
+        sys.modules[module_name] = module
+        record = None
+        try:
+            exec(compile(spec.path.read_bytes(), str(spec.path), "exec"), module.__dict__)
+            instance = module.Plugin()
+            if not callable(getattr(instance, "on_message", None)):
+                raise TypeError("Plugin 必须实现 on_message")
+            record = PluginRecord(spec, instance, context, module_name, self.queue_size)
+            if spec.api == "v1" and callable(getattr(instance, "on_load", None)):
+                instance.on_load(context)
+            return record
+        except BaseException:
+            if record is not None:
+                record.unload()
+            else:
+                for name in list(sys.modules):
+                    if name == module_name or name.startswith(module_name + "."):
+                        sys.modules.pop(name, None)
+            raise
+
+    def load_one(self, name):
+        validate_name(name)
+        spec = self.discover().get(name)
+        if spec is None:
+            raise ValueError(f"未找到插件：{name}")
+        candidate = self._prepare(spec)
+        previous = self.records.get(name)
+        try:
+            with self._lock:
+                if previous is not None:
+                    previous.deactivate()
+                self.records[name] = candidate
+                candidate.thread.start()
+            if previous is not None:
+                previous.join()
+            self.load_errors.pop(name, None)
+            logger.info("已加载插件：%s (%s)", name, spec.api)
+        except Exception:
+            candidate.unload()
+            raise
+
+    def disable(self, name, *, persist=True):
+        validate_name(name)
+        with self._lock:
+            record = self.records.get(name)
+            if record is not None:
+                record.deactivate()
+            if persist:
+                try:
+                    self.config = self.store.set_enabled(name, False)
+                except Exception:
+                    # 回调已停止，明确报告配置保存错误；不会重新启动半关闭实例。
+                    self.records.pop(name, None)
+                    raise
+            self.records.pop(name, None)
+        if record is not None:
+            record.join()
+        logger.info("已停用插件：%s", name)
+
+    def enable(self, name):
+        if name not in self.discover():
+            raise ValueError(f"未找到插件：{name}")
+        self.config = self.store.set_enabled(name, True)
+        self.load_one(name)
+
+    def reload(self, name=None):
+        self.config = self.store.load()
+        specs = self.discover()
+        if name is not None:
+            validate_name(name)
+            if name not in specs and name not in self.records:
+                raise ValueError(f"未找到插件：{name}")
+        targets = [name] if name else sorted(set(specs) | set(self.records))
+        for target in targets:
+            try:
+                if target not in specs or not self.config.get("plugins", {}).get(target, {}).get("enabled", True):
+                    self.disable(target, persist=False)
+                else:
+                    self.load_one(target)
+            except (Exception, SystemExit) as error:
+                self.load_errors[target] = str(error)
+                logger.exception("插件 %s 加载失败，其他插件继续运行", target)
+
+    def capture(self, message):
+        return self._message_watermarks.capture(message)
+
+    def dispatch(self, message):
+        # 同时支持直接分发（测试/嵌入入口）；正常入口已在落库前 capture。
+        message = self.capture(message)
+        with self._lock:
+            records = tuple(self.records.values())
+        if message.is_group and self.room_state_store is not None:
+            try:
+                states = self.room_state_store.snapshot(message.chat_id)
+            except Exception:
+                logger.warning("读取群功能快照失败，消息继续分发", exc_info=True)
+                states = {}
+            message = replace(message, data=types.MappingProxyType({**message.data, "room_states": states}))
+        for record in records:
+            record.enqueue(message)
+
+    def status(self):
+        specs = self.discover()
+        with self._lock:
+            rows = []
+            for name in sorted(set(specs) | set(self.records)):
+                record = self.records.get(name)
+                spec = specs.get(name)
+                missing = spec.requires - self.capabilities if spec else frozenset()
+                rows.append({"name": name, "active": bool(record and record.active),
+                             "enabled": self.config.get("plugins", {}).get(name, {}).get("enabled", True),
+                             "api": spec.api if spec else "unknown", "missing_capabilities": sorted(missing),
+                             "handled": record.handled if record else 0, "errors": record.errors if record else 0,
+                             "dropped": record.dropped if record else 0,
+                             "error": self.load_errors.get(name) or (record.last_error if record else "")})
+            return rows
+
+    def shutdown(self):
+        """停用全部插件并等待退出；返回超时仍未退出的插件名。
+
+        已退出的记录被移除，再次调用不会重复执行卸载；超时未退出的记录保留，
+        待其线程结束后再次调用可完成收尾。
+        """
+        with self._lock:
+            records = tuple(self.records.values())
+            for record in records:
+                record.deactivate(force=True)
+        pending = []
+        for record in records:
+            if record.join():
+                with self._lock:
+                    if self.records.get(record.spec.name) is record:
+                        self.records.pop(record.spec.name, None)
+            else:
+                pending.append(record.spec.name)
+        return pending

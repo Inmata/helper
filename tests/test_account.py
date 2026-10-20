@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from wxbot_framework.account import (APP_GLOBAL_RVA, APP_VTABLE_RVA, CONTEXT_VTABLE_RVA,
                                      APP_CONTEXT_GETTER_RVA, IDENTITY_GETTER_RVA, read_current_account,
                                      select_account_process, read_current_profile)
-from wxbot_framework.text import TextRouter
+from wxbot_framework.messaging.text import TextRouter
 
 BASE, APP, CONTEXT, HEAP = 0x100000000, 0x300000000, 0x400000000, 0x500000000
 SELF = "wxid_framework_current"

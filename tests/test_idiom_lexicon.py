@@ -4,7 +4,7 @@ import unittest
 
 from plugins.idiom_chain.lexicon import Lexicon, WORDS
 from plugins.idiom_chain.judge import IdiomJudge
-from wxbot_framework.text import FOUR_CHINESE
+from wxbot_framework.messaging.text import FOUR_CHINESE
 
 
 class LexiconTests(unittest.TestCase):

@@ -1,0 +1,18 @@
+graph TD
+    main[main.py] --> app[app/]
+    app --> engine[plugin_engine]
+    app --> conversation[conversation]
+    app --> memory[memory]
+    app --> messaging[messaging]
+    app --> integrations[integrations]
+    memory --> conversation
+    conversation --> storage[storage]
+    memory --> storage
+    engine --> sdk[sdk]
+    plugins[plugins/] --> sdk
+    plugins --> shared["plugins/_shared"]
+    app --> storage
+    app --> sdk
+
+    %% 禁止方向：底层不得导入 app，由 tests/test_architecture.py 静态检查。
+    storage -.->|forbidden| app

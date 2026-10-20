@@ -7,9 +7,9 @@ import ctypes as c
 from collections import deque
 
 from filehelper_service import NativeFileHelperService, ReceivedTextMessage
-from wxbot_framework.mentions import parse_at_members
+from wxbot_framework.messaging.mentions import parse_at_members
 from run_selftest import TEXT_DLL, K, check, modules, wechat_candidates, run
-from wxbot_framework.text import TextRouter, validate_target, validate_mentions
+from wxbot_framework.messaging.text import TextRouter, validate_target, validate_mentions
 from wxbot_framework.account import read_current_account, read_current_profile, select_account_process, validate_account
 from wxbot_framework.contacts import read_chatroom_members, read_contact_name
 

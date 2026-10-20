@@ -1,6 +1,9 @@
 """新增后台功能的配置校验；不开启时不创建线程或请求模型。"""
 import math
 
+from .messaging.text import validate_target
+from .plugin_engine.manifest import announcement_text
+
 
 def feature_options(config):
     if not isinstance(config.get("memory", {}), dict) or not isinstance(config.get("hourly_chat", {}), dict):
@@ -65,3 +68,58 @@ def feature_options(config):
     hourly = {"enabled": config.get("hourly_chat", {}).get("enabled", False),
               **{key: value for key, value in hourly.items() if key != "enabled"}}
     return memory, hourly
+
+
+def maintenance_options(config, *, contributors=None):
+    """维护入口的纯选项校验：只读配置，不建库、不启线程、不请求模型。"""
+    options = config.get("maintenance", {})
+    if not isinstance(options, dict):
+        raise ValueError("maintenance 应为 JSON 对象")
+    options = {"default_room": None, "upgrade_file": None, "announcement": None,
+               "announcements": [], **options}
+    if options["default_room"] is not None:
+        validate_target(options["default_room"])
+        if not options["default_room"].endswith("@chatroom"):
+            raise ValueError("维护默认目标必须是群 ID")
+    path = options["upgrade_file"]
+    if path is not None and (not isinstance(path, str) or not path.strip() or "\0" in path):
+        raise ValueError("upgrade_file 应为本地文件路径或 null")
+    legacy = options["announcement"]
+    announcements = options["announcements"]
+    if not isinstance(announcements, list):
+        raise ValueError("maintenance.announcements 应为公告数组")
+    if legacy is not None and announcements:
+        raise ValueError("maintenance.announcement 与 announcements 不能同时配置")
+    if legacy is not None:
+        announcements = [legacy]
+    seen = set()
+    normalized = []
+    for notice in announcements:
+        if not isinstance(notice, dict):
+            raise ValueError("每份公告应为 JSON 对象")
+        notice_id, room = notice.get("id"), notice.get("room")
+        text = notice.get("text")
+        plugins = notice.get("plugins", [])
+        if (not isinstance(notice_id, str) or not notice_id.strip() or len(notice_id) > 80 or
+                not isinstance(room, str)):
+            raise ValueError("公告需要 id、room")
+        validate_target(room)
+        if not room.endswith("@chatroom") or notice_id in seen:
+            raise ValueError("公告目标群或 ID 不正确/重复")
+        if text is not None and (not isinstance(text, str) or "\0" in text):
+            raise ValueError("公告 text 应为字符串或 null")
+        if not isinstance(plugins, list) or not all(isinstance(name, str) and name for name in plugins):
+            raise ValueError("公告 plugins 应为插件名数组")
+        if len(set(plugins)) != len(plugins):
+            raise ValueError("公告 plugins 不能重复")
+        text_bytes = len((text or "").encode("utf-8"))
+        if text_bytes > 900:
+            raise ValueError("公告正文不能超过 900 个 UTF-8 字节")
+        seen.add(notice_id)
+        normalized.append({"id": notice_id, "room": room, "plugins": list(plugins), "text": text})
+    options["announcement"] = legacy
+    options["announcements"] = normalized
+    for notice in normalized:
+        if len(announcement_text(notice, contributors).encode("utf-8")) > 900:
+            raise ValueError(f"公告 {notice['id']} 含插件贡献后超过 900 个 UTF-8 字节")
+    return options

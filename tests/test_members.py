@@ -1,18 +1,19 @@
 """成员绑定、持久记录和插件共用接口验证，不连接微信。"""
 import json
 import logging
-import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from support.recyclable_tempdir import RecyclableTemporaryDirectory
+
 from plugins.member_identity import Plugin
-from wxbot_framework.knowledge import KnowledgeStore
-from wxbot_framework.members import MemberError, MemberStore, name_key
+from wxbot_framework.memory.knowledge import KnowledgeStore
+from wxbot_framework.conversation.members import MemberError, MemberStore, name_key
 from wxbot_framework.sdk import Message, PluginContext, ServiceFacade
-from wxbot_framework.runtime import BotApplication
+from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.config import ConfigStore
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,7 +25,7 @@ ROBOT, SMALL, JING = "wxid_robot", "wxid_small", "wxid_jing"
 class MemberTests(unittest.TestCase):
     def setUp(self):
         SCRATCH.mkdir(parents=True, exist_ok=True)
-        self.temporary = tempfile.TemporaryDirectory(dir=SCRATCH)
+        self.temporary = RecyclableTemporaryDirectory(dir=SCRATCH)
         self.root = Path(self.temporary.name).resolve()
         self.assertTrue(self.root.is_relative_to(SCRATCH.resolve()))
         self.options = {"database_file": "data.sqlite3", "history_enabled": True, "owner_wxid": SMALL,

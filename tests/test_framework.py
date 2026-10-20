@@ -7,18 +7,19 @@ import os
 from pathlib import Path
 import shutil
 import sys
-import tempfile
 import threading
 import time
 import unittest
 import uuid
 from unittest.mock import Mock
 
-from wxbot_framework.backend import CAPABILITIES
+from support.recyclable_tempdir import RecyclableTemporaryDirectory
+
+from wxbot_framework.integrations.wechat import CAPABILITIES
 from wxbot_framework.config import ConfigStore
 from wxbot_framework.locking import InstanceLock
-from wxbot_framework.plugins import PluginManager
-from wxbot_framework.runtime import BotApplication
+from wxbot_framework.plugin_engine.manager import PluginManager
+from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.sdk import Message, PluginContext, ServiceFacade
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,7 +67,7 @@ class FrameworkTests(unittest.TestCase):
         self.previous_logging = logging.root.manager.disable
         logging.disable(logging.CRITICAL)
         SCRATCH.mkdir(parents=True, exist_ok=True)
-        self.temporary = tempfile.TemporaryDirectory(dir=SCRATCH)
+        self.temporary = RecyclableTemporaryDirectory(dir=SCRATCH)
         self.root = Path(self.temporary.name).resolve()
         self.assertTrue(self.root.is_relative_to(SCRATCH.resolve()))
         shutil.copytree(ROOT / "plugins", self.root / "plugins")
@@ -285,7 +286,7 @@ class FrameworkTests(unittest.TestCase):
             pass
 
     def test_plugins_reply_to_friend_and_group_conversations(self):
-        from wxbot_framework.text import TextRouter
+        from wxbot_framework.messaging.text import TextRouter
         router = TextRouter()
         router.convert("wxid_self", "filehelper", "init")
         self.manager.reload()

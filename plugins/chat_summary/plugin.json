@@ -3,5 +3,6 @@
   "api": "v1",
   "description": "总结个人或全群最近N条、或今天的聊天，默认200条，可跨天",
   "entry": "__init__.py",
+  "services": ["llm"],
   "requires": ["group.text.receive", "group.text.send"]
 }

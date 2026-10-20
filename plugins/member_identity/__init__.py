@@ -1,7 +1,7 @@
 """兼容群内 /绑定 入口；日常群友微信昵称已自动读取，人物绑定统一由管理员执行。"""
-from wxbot_framework.members import MemberError
+from wxbot_framework.conversation.members import MemberError
 from wxbot_framework.commands import command_text
-from wxbot_framework.mentions import strip_at_labels
+from wxbot_framework.messaging.mentions import strip_at_labels
 
 
 class Plugin:

@@ -1,9 +1,9 @@
 ﻿"""按指定条数或今天的范围总结，默认跨天最近200条。"""
 from dataclasses import replace
 from wxbot_framework.commands import command_text, effective_text
-from wxbot_framework.llm import LLMError
-from wxbot_framework.members import MemberError, SnapshotExpired
-from wxbot_framework.summary import ChatSummarizer, split_text
+from wxbot_framework.integrations.llm import LLMError
+from wxbot_framework.conversation.members import MemberError, SnapshotExpired
+from wxbot_framework.conversation.summary import ChatSummarizer, split_text
 from wxbot_framework.timeutil import format_local
 
 USAGE = "用法：/总结群聊 [1—5000条或今天]；/总结 昵称 [1—5000条或今天]"

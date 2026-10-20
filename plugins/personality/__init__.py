@@ -1,6 +1,6 @@
 """兼容旧指令，只提示固定风格，不改变状态。"""
-from wxbot_framework.members import SnapshotExpired
-from wxbot_framework.personality import switch_ack
+from wxbot_framework.conversation.members import SnapshotExpired
+from wxbot_framework.conversation.personality import switch_ack
 
 
 class Plugin:

@@ -34,11 +34,11 @@ class ConfigStore:
         validate_display_timezone(data.get("display_timezone", DEFAULT_DISPLAY_TIMEZONE))
         from .feature_config import feature_options
         feature_options(data)
-        from .maintenance import maintenance_options
+        from .feature_config import maintenance_options
         maintenance_options(data)
         if data.get("backend", "native_filehelper") not in ("native_filehelper", "native_text"):
             raise ValueError("backend 应为 native_filehelper 或 native_text")
-        from .pacing import TextSendDelay
+        from .messaging.pacing import TextSendDelay
         TextSendDelay.from_config(data.get("text_send_delay"))
         llm_file = data.get("llm_config_file", "llm_config.json")
         if not isinstance(llm_file, str) or not llm_file.strip() or "\0" in llm_file:
@@ -52,7 +52,7 @@ class ConfigStore:
         allowed = data.get("chat_allowlist", [])
         if not isinstance(allowed, list):
             raise ValueError("chat_allowlist 应为微信 ID 或群 ID 列表；空列表表示所有会话")
-        from .text import validate_target
+        from .messaging.text import validate_target
         for target in allowed:
             validate_target(target)
         pid = data.get("wechat_pid")

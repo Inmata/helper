@@ -1,0 +1,16 @@
+flowchart TD
+    A[1 stop] --> B[2 cancel sends]
+    B --> C[3 disconnect bridge]
+    C --> D[4 wait workers]
+    D --> E[5 wait plugins]
+    E --> F[6 close DB]
+    D -.->|not finished| G[keep DB open]
+    E -.->|not finished| G
+    C -.->|not finished| G
+
+    %% 线程归属：
+    %% BotConsole       app/runtime.py
+    %% Maintenance      app/maintenance.py
+    %% MemoryLearner    memory/worker.py
+    %% HourlyChat       memory/hourly.py
+    %% Plugin.<name>    plugin_engine/manager.py

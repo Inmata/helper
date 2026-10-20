@@ -1,20 +1,21 @@
 """真实分发队列的轮次边界测试：阻塞判定/发送，接收时间全部相同。"""
 import json
 from pathlib import Path
-import tempfile
 import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
 
+from support.recyclable_tempdir import RecyclableTemporaryDirectory
+
 from plugins.idiom_chain.judge import Verdict
-from wxbot_framework.backend import CAPABILITIES
+from wxbot_framework.integrations.wechat import CAPABILITIES
 from wxbot_framework.config import ConfigStore
-from wxbot_framework.members import MemberStore
-from wxbot_framework.ordering import MessageWatermarks
-from wxbot_framework.plugins import PluginManager
-from wxbot_framework.room_state import RoomStateStore
-from wxbot_framework.runtime import BotApplication
+from wxbot_framework.conversation.members import MemberStore
+from wxbot_framework.messaging.ordering import MessageWatermarks
+from wxbot_framework.plugin_engine.manager import PluginManager
+from wxbot_framework.conversation.room_state import RoomStateStore
+from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.sdk import Message, ServiceFacade
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,7 +55,7 @@ class OrderingTests(unittest.TestCase):
     def setUp(self):
         scratch = ROOT / ".runtime/tests"
         scratch.mkdir(parents=True, exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(dir=scratch)
+        self.temp = RecyclableTemporaryDirectory(dir=scratch)
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         path = self.root / "members.json"

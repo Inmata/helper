@@ -8,7 +8,7 @@ import time
 import unittest
 
 from wxbot_framework.sdk import Message
-from wxbot_framework.text import TextRouter, validate_target
+from wxbot_framework.messaging.text import TextRouter, validate_target
 
 ROOT = Path(__file__).resolve().parent.parent
 NATIVE = ROOT / "native"

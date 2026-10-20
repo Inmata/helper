@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import struct
 
-from .text import SYSTEM_PEERS, validate_target
+from .messaging.text import SYSTEM_PEERS, validate_target
 
 # 由该版本的反汇编及当前进程核对；使用前后端已校验核心 DLL SHA256。
 APP_GLOBAL_RVA = 0xB912690

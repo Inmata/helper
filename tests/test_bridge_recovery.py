@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from tools.recover_bridge import cleanup_loaded
-from wxbot_framework.runtime import BotApplication
+from wxbot_framework.app.runtime import BotApplication
 
 
 class BridgeRecoveryTests(unittest.TestCase):
@@ -55,6 +55,8 @@ class ShutdownTests(unittest.TestCase):
         app = object.__new__(BotApplication)
         app.stop_event = threading.Event()
         app.service, app.members, app.plugins = Mock(), Mock(), Mock()
+        # 插件引擎公开报告尚未退出的插件名；默认全部已退出。
+        app.plugins.shutdown = Mock(return_value=[])
         app.maintenance_router, app.hourly_scheduler, app.memory_worker = Mock(), Mock(), Mock()
         app.last_cleanup = {"dll_unloaded": True}
         app._disconnect = Mock(return_value=True)
@@ -82,6 +84,13 @@ class ShutdownTests(unittest.TestCase):
             app.stop()
         app.memory_worker.close.assert_called_once()
         app.plugins.shutdown.assert_called_once()
+        app.members.close.assert_not_called()
+
+    def test_pending_plugin_shutdown_reports_incomplete_and_keeps_database(self):
+        app = self.app()
+        app.plugins.shutdown = Mock(return_value=["slow"])
+        with self.assertRaisesRegex(RuntimeError, "slow"):
+            app.stop()
         app.members.close.assert_not_called()
 
     def test_repeated_ctrl_c_during_cleanup_is_guarded_and_handler_restored(self):

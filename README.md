@@ -94,12 +94,15 @@ quit
 
 ## 目录
 
-```text
-main.py                  统一入口
-wxbot_framework/         框架、成员目录、消息缓存、大模型客户端
-plugins/                 各功能插件和开发模板
-native/                  原生桥接源码、两个必要 DLL、版本指纹和 MinHook
-tests/                  本地测试
-tools/                   本地配置初始化和发布前检查
-```
+| 目录 / 文件 | 职责 |
+|---|---|
+| `main.py` | 统一入口 |
+| `wxbot_framework/` | 框架：`app` 应用层、`conversation` 会话、`memory` 记忆、`messaging` 消息、`plugin_engine` 插件引擎、`storage` 存储、`integrations` 适配 |
+| `plugins/` | 各功能插件、共享只读契约（`_shared`）和开发模板（`_template`） |
+| `native/` | 原生桥接源码、两个必要 DLL、版本指纹和 MinHook |
+| `tests/` | 本地测试 |
+| `tools/` | 本地配置初始化和发布前检查 |
+| `.spec/project/` | 架构与关键行为规范 |
+
+目录职责、依赖方向、一条消息的完整路径与扩展步骤见[架构与阅读指南](架构与阅读指南.md)。
 

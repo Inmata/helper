@@ -6,4 +6,4 @@
 
 固定风格用于对话、个人及全群总结和接龙点评；事实、来源、JSON字段和游戏规则优先。
 
-提示词位于 `wxbot_framework/personality.py`，修改共享模块后应重启机器人。
+提示词位于 `wxbot_framework/conversation/personality.py`，修改共享模块后应重启机器人。

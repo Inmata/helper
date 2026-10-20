@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import math
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import sys
 
+from wxbot_framework.app import checks
 from wxbot_framework.config import ConfigStore
 from wxbot_framework.locking import InstanceLock
-from wxbot_framework.runtime import BotApplication
+from wxbot_framework.app.runtime import BotApplication
 
 ROOT = Path(__file__).resolve().parent
 
@@ -47,48 +47,7 @@ def main():
             parser.error("请先在本地 bot_config.json 中将 wechat_account 占位符改为自己的机器人账号 ID")
         app = BotApplication(ROOT, store)
         if args.check or args.list_plugins:
-            if args.check and (app.memory_options["enabled"] or app.hourly_options["enabled"]):
-                if app.members is None or not app.members.history_enabled or app.members.daily_clear:
-                    raise ValueError("长期记忆需要 history_enabled=true、daily_clear=false")
-                from wxbot_framework.llm import LLMClient
-                LLMClient.from_file(store.path.parent / config.get("llm_config_file", "llm_config.json"))
-            seed = store.path.parent / app.memory_options["seed_file"]
-            if args.check and seed.is_file():
-                from wxbot_framework.knowledge import read_seed
-                read_seed(seed)
-            upgrade = app.maintenance_options["upgrade_file"]
-            if args.check and upgrade:
-                from wxbot_framework.upgrades import read_upgrade
-                if app.knowledge is None:
-                    raise ValueError("资料修订需要成员目录和知识库")
-                read_upgrade(app.knowledge, store.path.parent / upgrade)
-            if args.check:
-                if app.maintenance_options["default_room"]:
-                    if app.maintenance is None:
-                        raise ValueError("维护目标需要成员目录")
-                    app.maintenance.room()
-                if app.maintenance_options["announcements"]:
-                    if app.maintenance is None:
-                        raise ValueError("更新公告需要成员目录")
-                    for notice in app.maintenance_options["announcements"]:
-                        app.maintenance.room(explicit=notice["room"])
-            specs = app.plugins.discover()
-            if app.plugins.load_errors:
-                raise ValueError(str(app.plugins.load_errors))
-            for spec in specs.values():
-                enabled = config.get("plugins", {}).get(spec.name, {}).get("enabled", True)
-                if args.check and enabled:
-                    for source in spec.path.parent.rglob("*.py"):
-                        compile(source.read_bytes(), str(source), "exec")
-                    if spec.name in ("idiom_chain", "chat_summary", "mention_chat"):
-                        from wxbot_framework.llm import LLMClient
-                        LLMClient.from_file(store.path.parent / config.get("llm_config_file", "llm_config.json"))
-                print(json.dumps({"name": spec.name, "enabled": enabled, "api": spec.api,
-                                  "description": spec.description,
-                                  "missing_capabilities": sorted(spec.requires - app.plugins.capabilities)}, ensure_ascii=False))
-            if args.check:
-                print("配置与插件语法检查通过")
-            return 0
+            return checks.run(app, store, config, check=args.check)
         configure_logging(config)
         with InstanceLock(ROOT / ".runtime/bot.lock"):
             app.run(seconds=args.run_seconds)

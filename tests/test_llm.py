@@ -1,13 +1,14 @@
 """大模型协议和错误处理验证；使用假响应，不消耗实际 API。"""
 import io
 import json
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
-from wxbot_framework.llm import LLMClient, LLMError
+from support.recyclable_tempdir import RecyclableTemporaryDirectory
+
+from wxbot_framework.integrations.llm import LLMClient, LLMError
 from plugins.idiom_chain.judge import IdiomJudge
 
 
@@ -30,7 +31,7 @@ class LLMTests(unittest.TestCase):
         return io.BytesIO(json.dumps({"choices": [{"message": {"content": content}, **extra}]}).encode())
 
     def test_official_json_request_and_utf8(self):
-        with patch("wxbot_framework.llm.urlopen", return_value=self.response('{"idiom":"一心一意"}')) as call:
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response('{"idiom":"一心一意"}')) as call:
             self.assertEqual(self.client.complete_json("只返回 JSON", "中文"), {"idiom": "一心一意"})
         request = call.call_args.args[0]
         self.assertEqual(request.full_url, "https://api.deepseek.com/chat/completions")
@@ -43,7 +44,7 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(call.call_args.kwargs["timeout"], 20)
 
     def test_config_from_utf8_bom_file(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with RecyclableTemporaryDirectory() as directory:
             path = Path(directory) / "llm.json"
             path.write_text(json.dumps(self.options), encoding="utf-8-sig")
             self.assertEqual(LLMClient.from_file(path).model, "deepseek-flash")
@@ -69,7 +70,7 @@ class LLMTests(unittest.TestCase):
     def test_server_and_connection_errors_hide_sensitive_details(self):
         for error in (HTTPError("https://example.com", 401, "dummy-test-key", {}, None),
                       URLError("dummy-test-key"), TimeoutError("dummy-test-key")):
-            with self.subTest(error=type(error).__name__), patch("wxbot_framework.llm.urlopen", side_effect=error):
+            with self.subTest(error=type(error).__name__), patch("wxbot_framework.integrations.llm.urlopen", side_effect=error):
                 with self.assertRaises(LLMError) as caught:
                     self.client.complete_json("JSON", "测试")
                 self.assertNotIn("dummy-test-key", str(caught.exception))
@@ -77,30 +78,30 @@ class LLMTests(unittest.TestCase):
     def test_malformed_or_truncated_model_results(self):
         for content in ("", "[]", None):
             with (self.subTest(content=content),
-                  patch("wxbot_framework.llm.urlopen", side_effect=lambda *a, _c=content, **k: self.response(_c))):
+                  patch("wxbot_framework.integrations.llm.urlopen", side_effect=lambda *a, _c=content, **k: self.response(_c))):
                 with self.assertRaises(LLMError):
                     self.client.complete_json("JSON", "测试")
-        with patch("wxbot_framework.llm.urlopen", side_effect=lambda *a, _c="not json", **k: self.response(_c)) as call:
+        with patch("wxbot_framework.integrations.llm.urlopen", side_effect=lambda *a, _c="not json", **k: self.response(_c)) as call:
             with self.assertRaisesRegex(LLMError, "补救"):
                 self.client.complete_json("JSON", "测试")
         self.assertEqual(call.call_count, 2)
-        with patch("wxbot_framework.llm.urlopen", return_value=self.response("{}", finish_reason="length")):
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("{}", finish_reason="length")):
             with self.assertRaisesRegex(LLMError, "截断"):
                 self.client.complete_json("JSON", "测试")
-        with patch("wxbot_framework.llm.urlopen", return_value=io.BytesIO(b'{"choices":[null]}')):
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=io.BytesIO(b'{"choices":[null]}')):
             with self.assertRaises(LLMError):
                 self.client.complete_json("JSON", "测试")
 
     def test_broken_json_is_repaired_once_within_the_same_budget(self):
         responses = [self.response("这不是 JSON"), self.response('{"reply":"好了"}')]
-        with patch("wxbot_framework.llm.urlopen", side_effect=responses) as call:
+        with patch("wxbot_framework.integrations.llm.urlopen", side_effect=responses) as call:
             self.assertEqual(self.client.complete_json("JSON", "测试"), {"reply": "好了"})
         self.assertEqual(call.call_count, 2)
         repair = json.loads(call.call_args.args[0].data)["messages"]
         self.assertEqual([row["role"] for row in repair[-2:]], ["assistant", "user"])
 
     def test_broken_json_fails_after_a_single_repair(self):
-        with patch("wxbot_framework.llm.urlopen",
+        with patch("wxbot_framework.integrations.llm.urlopen",
                    side_effect=lambda *a, **k: self.response("还不是 JSON")) as call:
             with self.assertRaisesRegex(LLMError, "补救"):
                 self.client.complete_json("JSON", "测试")
@@ -108,13 +109,13 @@ class LLMTests(unittest.TestCase):
 
     def test_auth_errors_are_not_retried(self):
         error = HTTPError("https://example.com", 401, "dummy-test-key", {}, None)
-        with patch("wxbot_framework.llm.urlopen", side_effect=error) as call:
+        with patch("wxbot_framework.integrations.llm.urlopen", side_effect=error) as call:
             with self.assertRaisesRegex(LLMError, "密钥"):
                 self.client.complete_json("JSON", "测试")
         self.assertEqual(call.call_count, 1)
 
     def test_text_completion_needs_no_json_and_carries_real_roles(self):
-        with patch("wxbot_framework.llm.urlopen", return_value=self.response("直接说话的正文")) as call:
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("直接说话的正文")) as call:
             result = self.client.complete_text("系统", "当前", history=[{"role": "user", "content": "上一问"},
                                                                     {"role": "assistant", "content": "上一答"}])
         self.assertEqual(result, "直接说话的正文")

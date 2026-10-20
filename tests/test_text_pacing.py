@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from wxbot_framework.pacing import TextSendDelay
+from wxbot_framework.messaging.pacing import TextSendDelay
 from wxbot_framework.sdk import CapabilityError, LegacyService, Message, PluginContext, ServiceFacade
 
 
@@ -44,7 +44,7 @@ class RecordingCancel:
 class TextPacingTests(unittest.TestCase):
     def test_character_groups_include_chinese_symbols_and_short_text(self):
         pacing = TextSendDelay.from_config()
-        with patch("wxbot_framework.pacing.random.uniform", return_value=0.2):
+        with patch("wxbot_framework.messaging.pacing.random.uniform", return_value=0.2):
             self.assertAlmostEqual(pacing.seconds_for("你好🌸 abc！"), 0.2)
             self.assertAlmostEqual(pacing.seconds_for("字" * 10), 0.2)
             self.assertAlmostEqual(pacing.seconds_for("字" * 11), 0.4)
@@ -68,7 +68,7 @@ class TextPacingTests(unittest.TestCase):
         ctx = PluginContext("test", {}, service, {"text.send"})
         legacy = LegacyService(service, backend.session_id)
         message = Message(text="test", chat_id="wxid_friend", session_id=backend.session_id)
-        with patch("wxbot_framework.pacing.random.uniform", return_value=0.2):
+        with patch("wxbot_framework.messaging.pacing.random.uniform", return_value=0.2):
             ctx.reply(message, "你好")
             ctx.send_text("12345@chatroom", "群聊")
             legacy.send_text("filehelper", "旧插件")

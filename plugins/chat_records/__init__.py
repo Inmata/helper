@@ -1,6 +1,6 @@
 """独立处理清空，避免排在耗时的模型请求后面。"""
 from wxbot_framework.commands import command_text
-from wxbot_framework.controls import prepare_reset
+from wxbot_framework.conversation.controls import prepare_reset
 class Plugin:
     def on_load(self, ctx):
         self.members = ctx.members

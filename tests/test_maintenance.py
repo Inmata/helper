@@ -7,16 +7,18 @@ from unittest.mock import Mock
 import test_chat_summary as daily
 from wxbot_framework.authorization import LOCAL_EDITOR
 from wxbot_framework.config import ConfigStore
-from wxbot_framework.knowledge import KnowledgeStore
+from wxbot_framework.memory.knowledge import KnowledgeStore
 from wxbot_framework.locking import InstanceLock
-from wxbot_framework.maintenance import MaintenanceRouter, MaintenanceService, maintenance_options
-from wxbot_framework.members import MemberError, MemberStore
-from wxbot_framework.memory_worker import MemoryWorker
-from wxbot_framework.runtime import BotApplication
+from wxbot_framework.app.control import RuntimeControl
+from wxbot_framework.app.maintenance import MaintenanceRouter, MaintenanceService
+from wxbot_framework.feature_config import maintenance_options
+from wxbot_framework.conversation.members import MemberError, MemberStore
+from wxbot_framework.memory.worker import MemoryWorker
+from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.sdk import Message
-from wxbot_framework.upgrades import (
-    AnnouncementQueue, StartupNotice, announcement_contributions, apply_upgrade,
-)
+from wxbot_framework.app.announcements import AnnouncementQueue, StartupNotice
+from wxbot_framework.app.upgrades import apply_upgrade
+from wxbot_framework.plugin_engine.manifest import announcement_contributions
 
 ROOM, OTHER_ROOM, OWNER, OTHER, ROBOT = daily.ROOM, daily.OTHER_ROOM, daily.CAT, daily.OTHER, daily.ROBOT
 
@@ -47,7 +49,7 @@ class MaintenanceTests(unittest.TestCase):
         k = self.kb()
         self.record("别人的发言", OTHER)
         entity = k.member_entity(ROOM, OTHER)
-        with k._db():
+        with k.connection():
             item = k.put(ROOM, entity["id"], "爱好", "本人陈述", "喜欢鼓")
         service = MaintenanceService(k)
         for author in (OTHER, ROBOT, "local-cli", "维护者昵称"):
@@ -94,7 +96,7 @@ class MaintenanceTests(unittest.TestCase):
             app.maintenance_router.process(queued)
             self.assertEqual(self.backend.sent[-1][0], OWNER)
             self.assertIn(ROOM, self.backend.sent[-1][1])
-            self.assertEqual(app.members._connection().execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
+            self.assertEqual(app.members.connection().execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
             app._emit(Message("/管理 状态", OTHER, sender_id=OTHER, session_id="test"))
             self.assertTrue(app.maintenance_router.queue.empty())
         finally:
@@ -136,23 +138,23 @@ class MaintenanceTests(unittest.TestCase):
         k.confirm_clear(ROOM, code, OWNER)
         self.assertFalse(self.store.snapshot_is_current(snapshot))
         self.assertEqual(k.search(ROOM, "示例甲"), [])
-        with k._db():
+        with k.connection():
             rejected = k.put(ROOM, entity["id"], "爱好", "他人提及", "旧话重提",
-                             sources=[dict(k._db().execute("SELECT * FROM messages WHERE id=?", (old_message,)).fetchone())])
+                             sources=[dict(k.connection().execute("SELECT * FROM messages WHERE id=?", (old_message,)).fetchone())])
             stale = k.put(ROOM, entity["id"], "爱好", "他人提及", "旧任务", expected_epoch=0)
             seeded = k.put(ROOM, entity["id"], "爱好", "群内玩笑", "旧种子", origin="seed:old")
         self.assertIsNone(rejected)
         self.assertIsNone(stale)
         self.assertIsNone(seeded)
         new_message = self.record("示例甲现在喜欢钢琴")
-        with k._db():
+        with k.connection():
             current = k.put(ROOM, entity["id"], "爱好", "他人提及", "喜欢钢琴",
-                            sources=[dict(k._db().execute("SELECT * FROM messages WHERE id=?", (new_message,)).fetchone())])
+                            sources=[dict(k.connection().execute("SELECT * FROM messages WHERE id=?", (new_message,)).fetchone())])
         self.assertNotEqual(old_item, current)
         self.assertEqual(k.search(ROOM, "示例甲")[0]["content"], "喜欢钢琴")
         self.assertEqual(k.admin_item(ROOM, old_item)["status"], "archived")
-        self.assertEqual(k._db().execute("SELECT COUNT(*) FROM messages").fetchone()[0], 2)
-        self.assertTrue(k._db().execute("SELECT 1 FROM knowledge_sources WHERE item_id=?", (old_item,)).fetchone())
+        self.assertEqual(k.connection().execute("SELECT COUNT(*) FROM messages").fetchone()[0], 2)
+        self.assertTrue(k.connection().execute("SELECT 1 FROM knowledge_sources WHERE item_id=?", (old_item,)).fetchone())
 
     def test_clear_confirmation_checks_owner_room_expiry_and_changed_records(self):
         k = self.kb()
@@ -199,7 +201,7 @@ class MaintenanceTests(unittest.TestCase):
         k.confirm_clear(ROOM, code, OWNER)
         new_item = k.restore_memory(ROOM, item, OWNER)
         self.assertNotEqual(new_item, item)
-        self.assertTrue(k._db().execute("SELECT 1 FROM knowledge_entity_edits WHERE action='restore-archive'").fetchone())
+        self.assertTrue(k.connection().execute("SELECT 1 FROM knowledge_entity_edits WHERE action='restore-archive'").fetchone())
 
     def test_startup_notice_sent_once_across_recreated_service(self):
         k = self.kb()
@@ -315,7 +317,7 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(facade.send_text.call_count, 2)
         self.assertTrue(queue.resend("uncertain"))
         self.assertEqual(facade.send_text.call_count, 3)
-        attempts = k._db().execute("""SELECT status FROM startup_notice_attempts
+        attempts = k.connection().execute("""SELECT status FROM startup_notice_attempts
             WHERE account=? AND room=? AND notice_id='uncertain' ORDER BY id""",
             (ROBOT, ROOM)).fetchall()
         self.assertEqual([row[0] for row in attempts], ["unknown", "sent"])
@@ -354,7 +356,7 @@ class MaintenanceTests(unittest.TestCase):
         queue = AnnouncementQueue(k, offline, [notice], run_id="waiting-run")
         self.assertFalse(queue.send())
         self.assertEqual(queue.status("waiting")["status"], "waiting")
-        attempts = k._db().execute("SELECT COUNT(*) FROM startup_notice_attempts").fetchone()[0]
+        attempts = k.connection().execute("SELECT COUNT(*) FROM startup_notice_attempts").fetchone()[0]
         self.assertEqual(attempts, 0)
 
     def test_profile_upgrade_splits_people_and_preserves_item_ids_and_sources(self):
@@ -372,7 +374,7 @@ class MaintenanceTests(unittest.TestCase):
         self.assertFalse(apply_upgrade(k, path))
         self.assertEqual(k.admin_item(ROOM, item)["entity_id"], k.find_person(ROOM, "示例乙")["id"])
         self.assertIn("示例乙", k.admin_item(ROOM, item)["content"])
-        self.assertTrue(k._db().execute("SELECT 1 FROM knowledge_sources WHERE item_id=?", (item,)).fetchone())
+        self.assertTrue(k.connection().execute("SELECT 1 FROM knowledge_sources WHERE item_id=?", (item,)).fetchone())
         self.assertIsNone(k.find_person(ROOM, "示例丙")["wxid"])
         self.assertTrue(list((self.root / "backups").glob("*-before-profile-fix-*.sqlite3")))
 
@@ -394,7 +396,7 @@ class MaintenanceTests(unittest.TestCase):
         }), encoding="utf-8")
         legacy_members = MemberStore(config_path, ROBOT, now=lambda: self.now)
         self.stores.append(legacy_members)
-        db = legacy_members._connection()
+        db = legacy_members.connection()
         db.executescript("""
             CREATE TABLE knowledge_entities(id INTEGER PRIMARY KEY,account TEXT NOT NULL,room TEXT NOT NULL,
                 entity_key TEXT NOT NULL,name TEXT NOT NULL,aliases TEXT NOT NULL DEFAULT '[]',wxid TEXT,
@@ -461,7 +463,7 @@ class MaintenanceTests(unittest.TestCase):
         with self.assertRaises(MemberError):
             apply_upgrade(k, path)
         self.assertEqual(k.find_person(ROOM, "旧别名")["id"], entity["id"])
-        self.assertIsNone(k._db().execute("SELECT 1 FROM applied_upgrades WHERE upgrade_id='bad'").fetchone())
+        self.assertIsNone(k.connection().execute("SELECT 1 FROM applied_upgrades WHERE upgrade_id='bad'").fetchone())
 
     def test_disconnected_queue_cannot_execute_old_management(self):
         k = self.kb()
@@ -518,7 +520,7 @@ class MaintenanceTests(unittest.TestCase):
                 "min_speakers": 2,
                 "context_limit": 200,
             })
-        service = MaintenanceService(k, app=app, options={"default_room": ROOM})
+        service = MaintenanceService(k, control=RuntimeControl(app), options={"default_room": ROOM})
         text = service.execute("状态", LOCAL_EDITOR, current_room=ROOM)
         self.assertIn(ROOM, text)
         self.assertIn("长期记忆", text)

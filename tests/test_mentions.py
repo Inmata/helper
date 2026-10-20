@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from wxbot_framework.sdk import CapabilityError, Message, PluginContext, ServiceFacade
-from wxbot_framework.text import validate_mentions
+from wxbot_framework.messaging.text import validate_mentions
 
 ROOM = "12345678@chatroom"
 MEMBER = "wxid_test_member"

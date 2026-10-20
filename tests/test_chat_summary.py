@@ -1,22 +1,24 @@
 """今日记录、午夜清理、完整分批总结与清空竞态；不连接微信或外部 API。"""
 import json
 import logging
-import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
+from support.recyclable_tempdir import RecyclableTemporaryDirectory
+
 from plugins.chat_records import Plugin as ClearPlugin
 from plugins.chat_summary import Plugin as SummaryPlugin
 from wxbot_framework.config import ConfigStore
-from wxbot_framework.llm import LLMError
-from wxbot_framework.members import MemberStore, SnapshotExpired
-from wxbot_framework.runtime import BotApplication
+from wxbot_framework.integrations.llm import LLMError
+from wxbot_framework.memory.knowledge import KnowledgeStore
+from wxbot_framework.conversation.members import MemberStore, SnapshotExpired
+from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.sdk import Message, PluginContext, ServiceFacade
-from wxbot_framework.summary import ChatSummarizer, conversation_rows, split_text
-from wxbot_framework.text import TextRouter
+from wxbot_framework.conversation.summary import ChatSummarizer, conversation_rows, split_text
+from wxbot_framework.messaging.text import TextRouter
 
 ROOT = Path(__file__).resolve().parent.parent
 ROOM, OTHER_ROOM = "123@chatroom", "456@chatroom"
@@ -41,7 +43,7 @@ class DailySummaryTests(unittest.TestCase):
     def setUp(self):
         scratch = ROOT / ".runtime/tests"
         scratch.mkdir(parents=True, exist_ok=True)
-        self.temporary = tempfile.TemporaryDirectory(dir=scratch)
+        self.temporary = RecyclableTemporaryDirectory(dir=scratch)
         self.root = Path(self.temporary.name)
         self.now = datetime(2026, 10, 10, 15, 59, 59, tzinfo=timezone.utc)  # 北京 23:59:59
         options = {"database_file": "data.sqlite3", "history_enabled": True, "daily_clear": False, "owner_wxid": CAT,
@@ -56,7 +58,11 @@ class DailySummaryTests(unittest.TestCase):
         self.backend = Backend()
         self.service = ServiceFacade(text_delay={"enabled": False})
         self.service.bind(self.backend)
-        self.ctx = PluginContext("summary", {}, self.service, [], member_store=self.store)
+        # 知识库由装配方显式创建并注入；上下文不隐式建库。
+        self.knowledge = KnowledgeStore(self.store)
+        self.knowledge.initialize()
+        self.ctx = PluginContext("summary", {}, self.service, [], member_store=self.store,
+                                 knowledge_store=self.knowledge)
         self.calls = []
         self.ctx._llm = Mock(complete_json=self.model)
         self.plugin = SummaryPlugin()

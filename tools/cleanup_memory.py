@@ -19,12 +19,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from wxbot_framework.app.bootstrap import open_knowledge
 from wxbot_framework.config import ConfigStore
-from wxbot_framework.database import backup_database
-from wxbot_framework.knowledge import KnowledgeStore
+from wxbot_framework.storage.database import backup_database
 from wxbot_framework.locking import InstanceLock
-from wxbot_framework.maintenance import maintenance_options
-from wxbot_framework.members import MemberStore
 
 # 只有整条都在讲机器人功能时才清理；群文化内容不会命中。
 POLLUTION_RULES = (
@@ -44,7 +42,7 @@ def classify_pollution(content):
 
 
 def scan(knowledge):
-    db = knowledge._db()
+    db = knowledge.connection()
     account = knowledge.account
     empty_people = [dict(row) for row in db.execute("""
         SELECT e.* FROM knowledge_entities e WHERE e.account=? AND e.entity_key LIKE 'person:%'
@@ -68,8 +66,8 @@ def scan(knowledge):
 
 
 def apply(knowledge, empty_people, polluted):
-    db = knowledge._db()
-    with knowledge._lock, db:
+    db = knowledge.connection()
+    with knowledge.lock, db:
         for entity in empty_people:
             db.execute("UPDATE knowledge_entities SET status='quarantined' WHERE id=?", (entity["id"],))
             db.execute("""INSERT INTO knowledge_entity_edits
@@ -89,19 +87,13 @@ def cleanup(config_path, *, dry_run=True):
     with InstanceLock(ROOT / ".runtime/bot.lock"):
         config = ConfigStore(Path(config_path).resolve()).load()
         directory = Path(config_path).resolve().parent
-        members = MemberStore.from_config(config, directory)
-        if members is None:
+        if config.get("members_config_file") is None:
             raise SystemExit("配置未启用成员目录，无法清理记忆库")
+        members, knowledge = open_knowledge(config, directory)
         try:
-            members.initialize()
-            knowledge = KnowledgeStore(members)
-            memory = config.get("memory") or {}
-            seed = memory.get("seed_file") or ".runtime/group_knowledge_seed.json"
-            upgrade = maintenance_options(config)["upgrade_file"]
-            knowledge.initialize(directory / seed, upgrade_file=directory / upgrade if upgrade else None)
             empty_people, polluted = scan(knowledge)
             if not dry_run:
-                backup_database(knowledge._db(), members.path, "before-cleanup")
+                backup_database(knowledge.connection(), members.path, "before-cleanup")
                 apply(knowledge, empty_people, polluted)
             return {"dry_run": dry_run,
                     "quarantine": [(e["id"], e["name"]) for e in empty_people],

@@ -9,11 +9,12 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
-from wxbot_framework.llm import LLMError
-from wxbot_framework.members import SnapshotExpired
-from wxbot_framework.mentions import strip_at_labels
-from wxbot_framework.personality import game_reply
-from wxbot_framework.text import FOUR_CHINESE, GROUP_CONTROL_COMMANDS, validate_mentions
+from wxbot_framework.integrations.llm import LLMError
+from wxbot_framework.conversation.members import SnapshotExpired
+from wxbot_framework.messaging.mentions import strip_at_labels
+from wxbot_framework.conversation.personality import game_reply
+from wxbot_framework.messaging.text import FOUR_CHINESE, GROUP_CONTROL_COMMANDS, validate_mentions
+from .._shared import idiom_state
 from .judge import IdiomJudge
 from wxbot_framework.commands import command_text, HELP_TEXT, GAME_COMMANDS
 
@@ -123,23 +124,12 @@ class Plugin:
             state = self.room_state.get(room, FEATURE)
         except Exception:
             return None
-        if not isinstance(state, dict):
+        parsed = idiom_state.current_and_used(state)
+        if parsed is None:
             return None
-        current, used = state.get("current"), state.get("used")
-        if not isinstance(current, str) or not FOUR_CHINESE.fullmatch(current):
-            return None
-        words = tuple(word for word in used if isinstance(word, str) and FOUR_CHINESE.fullmatch(word)) \
-            if isinstance(used, list) else ()
-        if current not in words:
-            return None
-        try:
-            saved = datetime.fromisoformat(state.get("updated_at"))
-        except (TypeError, ValueError):
-            return None
-        if saved.tzinfo is None:
-            saved = saved.replace(tzinfo=timezone.utc)
-        age = (datetime.now(timezone.utc) - saved).total_seconds()
-        if age < 0 or age > self.idle_seconds:
+        current, words = parsed
+        age = idiom_state.updated_age(state)
+        if age is None or age < 0 or age > self.idle_seconds:
             return None
         # 续局保留剩余空闲时间：重启本身不给这一局续命。
         game = Game(words[0], Chain(current, words), time.monotonic() - age, goal=self.goal)

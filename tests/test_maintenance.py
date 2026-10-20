@@ -322,6 +322,27 @@ class MaintenanceTests(unittest.TestCase):
             (ROBOT, ROOM)).fetchall()
         self.assertEqual([row[0] for row in attempts], ["unknown", "sent"])
 
+    def test_announcement_already_sent_is_skipped_on_next_run_and_can_be_resent(self):
+        k = self.kb()
+        notice = {"id": "once", "room": ROOM, "text": "只发一次", "plugins": []}
+        first = AnnouncementQueue(k, self.service, [notice], run_id="run-1")
+        self.assertTrue(first.send())
+        second = AnnouncementQueue(k, self.service, [notice], run_id="run-2")
+        self.assertFalse(second.send())
+        self.assertEqual(len(self.backend.sent), 1)
+        self.assertTrue(second.resend("once"))
+        self.assertEqual(len(self.backend.sent), 2)
+
+    def test_announcement_unknown_result_is_retried_on_next_run(self):
+        k = self.kb()
+        notice = {"id": "retry", "room": ROOM, "text": "需要重试", "plugins": []}
+        facade = Mock(session_id="test", send_text=Mock(side_effect=[False, True]))
+        first = AnnouncementQueue(k, facade, [notice], run_id="run-1")
+        self.assertFalse(first.send())
+        second = AnnouncementQueue(k, facade, [notice], run_id="run-2")
+        self.assertTrue(second.send())
+        self.assertEqual(facade.send_text.call_count, 2)
+
     def test_announcement_resend_requires_id_when_multiple_notices_configured(self):
         notices = [
             {"id": "one", "room": ROOM, "text": "一", "plugins": []},

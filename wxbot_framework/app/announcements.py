@@ -156,9 +156,21 @@ class AnnouncementQueue:
                 (k.account, notice["room"], notice["id"], status, timestamp))
             return row.lastrowid
 
-    def _send_one(self, notice):
+    def _already_sent(self, notice):
+        """历史记录里已确认发送成功的公告，下次启动不再重复。"""
+        k = self.knowledge
+        with k.lock:
+            row = k.connection().execute(
+                "SELECT status FROM startup_notices WHERE account=? AND room=? AND notice_id=?",
+                (k.account, notice["room"], notice["id"])).fetchone()
+        return bool(row) and row[0] == "sent"
+
+    def _send_one(self, notice, force=False):
         k, session = self.knowledge, self.service.session_id
         if notice["id"] in self._successful or notice["id"] in self._attempted:
+            return False
+        if not force and self._already_sent(notice):
+            logger.info("公告跳过：此前已发送成功（%s）", notice["id"])
             return False
         if not session:
             logger.info("公告暂缓：微信会话尚未就绪（%s）", notice["id"])
@@ -206,7 +218,7 @@ class AnnouncementQueue:
         notice = self.notice(notice_id)
         self._attempted.discard(notice["id"])
         self._successful.discard(notice["id"])
-        return self._send_one(notice)
+        return self._send_one(notice, force=True)
 
 
 def migrate_legacy_notice(notice):

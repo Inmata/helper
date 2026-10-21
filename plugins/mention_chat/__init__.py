@@ -96,6 +96,6 @@ class Plugin:
         except LLMError as error:
             ctx.logger.warning("艾特对话失败：%s", error)
             try:
-                ctx.reply(message, "暂时无法回复，请稍后再艾特我。", delivery_guard=guard)
+                ctx.reply(message, f"暂时无法回复：{error}", delivery_guard=guard)
             except SnapshotExpired:
                 pass

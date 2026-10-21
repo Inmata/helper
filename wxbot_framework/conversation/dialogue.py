@@ -107,9 +107,11 @@ class Dialogue:
         history = self._history(snapshot)
         reply = self.client.complete_text(SYSTEM, _render(payload), history=history)
         reply = self._unwrap_reply(reply)
-        if (not isinstance(reply, str) or not reply.strip() or len(reply) > 600 or
+        if isinstance(reply, str) and len(reply) > 600:
+            reply = reply[:600]  # 超长回复截断后继续发送，不整条丢弃。
+        if (not isinstance(reply, str) or not reply.strip() or
                 any(ord(char) < 32 and char not in "\n\r\t" for char in reply)):
-            raise LLMError("大模型对话结果格式不正确或过长，请重试")
+            raise LLMError("大模型对话结果格式不正确，请重试")
         return reply.strip()
 
     @staticmethod

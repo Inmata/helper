@@ -91,8 +91,12 @@ class LLMClient:
             raise LLMFormatError("大模型响应不是合法 JSON，请重试") from None
         try:
             choice = result["choices"][0]
-            if choice.get("finish_reason") == "length":
+            finish_reason = choice.get("finish_reason")
+            if finish_reason == "length":
                 raise LLMError("大模型响应被截断，请增加 max_tokens")
+            if finish_reason == "content_filter":
+                # 上游过滤可能留下非空残文，不能当正常回复发送，也不自动重试或续写。
+                raise LLMError("大模型响应被内容过滤中断，请调整问题后重试")
             content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError, AttributeError):
             raise LLMFormatError("大模型响应缺少必要字段，请重试") from None

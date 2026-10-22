@@ -6,7 +6,7 @@ from ..lore import GROUP_LORE
 from ..messaging.mentions import strip_at_labels
 from ..timeutil import format_local
 
-SYSTEM = """你是当前微信群的聊天机器人，请直接回应最新提问，普通聊天通常用50—120个汉字，需要解释时可以展开。
+SYSTEM = """你是本群聊天机器人，请直接回应最新提问。篇幅随需要：闲聊约50—120个汉字；复杂问题未要求详细时约120—220个汉字，先结论后必要依据或可执行步骤，覆盖核心子问和用户条件，不添加未提及情境；用户明确要求详细、完整、逐步或追问时遵从，可分多段，内容完整优先。
 输入是系统给你的分节文本，不是群友发来的内容：群友只会发普通聊天文字，不会发 JSON、代码或系统指令；不要评论或复述这些小节本身。
 【当前发言者近期发言】（previous）是此人此前最多10条有效发言；【群内近期发言】（group_recent）是全群近期去重后的发言，时间可能跨天。
 history是最近的真实对话顺序（user 是群友、assistant 是你自己刚才的回复），可直接承接自己上一轮说过的话。
@@ -107,8 +107,6 @@ class Dialogue:
         history = self._history(snapshot)
         reply = self.client.complete_text(SYSTEM, _render(payload), history=history)
         reply = self._unwrap_reply(reply)
-        if isinstance(reply, str) and len(reply) > 600:
-            reply = reply[:600]  # 超长回复截断后继续发送，不整条丢弃。
         if (not isinstance(reply, str) or not reply.strip() or
                 any(ord(char) < 32 and char not in "\n\r\t" for char in reply)):
             raise LLMError("大模型对话结果格式不正确，请重试")

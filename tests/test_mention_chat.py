@@ -149,6 +149,25 @@ class DialoguePayloadTests(unittest.TestCase):
 
         self.assertEqual(Dialogue(LegacyClient()).reply(self.snapshot()), "旧格式也能正常显示")
 
+    def test_reply_around_previous_limit_is_not_truncated(self):
+        class FixedClient:
+            def __init__(self, reply):
+                self.reply = reply
+
+            def complete_text(self, system, user, **options):
+                return self.reply
+
+        for length in (599, 600, 601):
+            body = "正" * length
+            with self.subTest(length=length):
+                self.assertEqual(Dialogue(FixedClient(body)).reply(self.snapshot()), body)
+
+    def test_system_sets_one_soft_length_convention(self):
+        self.assertIn("50—120", SYSTEM)
+        self.assertIn("120—220", SYSTEM)
+        self.assertIn("用户明确要求详细", SYSTEM)
+        self.assertIn("内容完整优先", SYSTEM)
+
 
 if __name__ == "__main__":
     unittest.main()

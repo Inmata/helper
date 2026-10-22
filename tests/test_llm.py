@@ -114,6 +114,28 @@ class LLMTests(unittest.TestCase):
                 self.client.complete_json("JSON", "测试")
         self.assertEqual(call.call_count, 1)
 
+    def test_content_filter_with_partial_text_is_an_error_without_retry(self):
+        partial = "第5项 配置与数据库变更\n通过条件：生产配置与测试配置彻底解耦；SQL"
+        for method in (self.client.complete_text, self.client.complete_json):
+            with (self.subTest(method=method.__name__),
+                  patch("wxbot_framework.integrations.llm.urlopen",
+                        return_value=self.response(partial, finish_reason="content_filter")) as call):
+                with self.assertRaises(LLMError) as caught:
+                    method("系统", "测试")
+                self.assertIs(type(caught.exception), LLMError)
+                self.assertIn("内容过滤", str(caught.exception))
+                self.assertNotIn(partial, str(caught.exception))
+                self.assertEqual(call.call_count, 1)
+
+    def test_other_finish_reasons_keep_returning_content(self):
+        for reason in ("stop", "unknown_reason", None):
+            extra = {} if reason is None else {"finish_reason": reason}
+            with (self.subTest(reason=reason),
+                  patch("wxbot_framework.integrations.llm.urlopen",
+                        return_value=self.response("正常正文", **extra)) as call):
+                self.assertEqual(self.client.complete_text("系统", "测试"), "正常正文")
+                self.assertEqual(call.call_count, 1)
+
     def test_text_completion_needs_no_json_and_carries_real_roles(self):
         with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("直接说话的正文")) as call:
             result = self.client.complete_text("系统", "当前", history=[{"role": "user", "content": "上一问"},

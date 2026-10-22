@@ -10,7 +10,9 @@ from plugins.mention_chat import Plugin as ChatPlugin
 from plugins.personality import Plugin as PersonalityPlugin
 from wxbot_framework.conversation.members import MemberError
 from wxbot_framework.messaging.mentions import parse_at_members, strip_at_labels
-from wxbot_framework.conversation.personality import FIXED_NAME, PersonalityState, prepare_switch, game_reply
+from wxbot_framework.conversation.dialogue import SYSTEM as CHAT_SYSTEM
+from wxbot_framework.conversation.personality import (FIXED_NAME, FIXED_PROMPT, PersonalityState,
+                                                      prepare_switch, game_reply)
 from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.sdk import Message
 
@@ -56,6 +58,13 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertIn("熟人损友", system)
         self.assertIn("必须遵守JSON字段", system)
         self.assertNotIn("每次回复控制在 20", system)
+
+    def test_length_guidance_is_defined_once_and_deferred_by_personality(self):
+        self.assertIn("120—220", CHAT_SYSTEM)
+        self.assertIn("用户明确要求详细", CHAT_SYSTEM)
+        self.assertIn("分多段", CHAT_SYSTEM)
+        self.assertIn("篇幅按功能要求决定", FIXED_PROMPT)
+        self.assertNotIn("120—220", FIXED_PROMPT)
 
     def test_group_and_own_context_are_separate_and_keep_real_at(self):
         self.store.record(self.message("本人前文", sequence=1))
@@ -153,6 +162,90 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertGreater(len(self.backend.sent), 1)
         self.assertTrue(all(len(row[1].encode("utf-8")) <= 1023 for row in self.backend.sent))
         self.assertTrue(all(row[2] == (CAT,) for row in self.backend.sent))
+
+    def test_long_reply_is_split_and_reassembled_without_loss(self):
+        body = "中" * 1200 + "[TAIL]"
+        provider = Mock(return_value=body)
+        plugin = self.setup_chat(provider)
+        plugin.on_message(self.chat(), self.ctx)
+        provider.assert_called_once()
+        self.assertGreater(len(self.backend.sent), 2)
+        bodies = []
+        for room, text, ids in self.backend.sent:
+            self.assertEqual(room, ROOM)
+            self.assertEqual(ids, (CAT,))
+            self.assertLessEqual(len(text.encode("utf-8")), 1023)
+            prefix, part = text.split("\n", 1)
+            self.assertEqual(prefix, "@测试成员 ")
+            bodies.append(part)
+        self.assertEqual("".join(bodies), body)
+        self.assertTrue(bodies[-1].endswith("[TAIL]"))
+
+    def test_multibyte_multiline_reply_round_trips_with_long_display_name(self):
+        long_name = "很长的成员昵称" * 5
+        self.store.register(long_name, ROOM, CAT)
+        body = "第一段中文🌸\n第二段 emoji 😀🎉\n" + "长" * 500 + "\n[TAIL]"
+        plugin = self.setup_chat(Mock(return_value=body))
+        plugin.on_message(self.chat(), self.ctx)
+        self.assertGreater(len(self.backend.sent), 2)
+        bodies = []
+        for room, text, ids in self.backend.sent:
+            self.assertEqual(room, ROOM)
+            self.assertEqual(ids, (CAT,))
+            self.assertLessEqual(len(text.encode("utf-8")), 1023)
+            prefix, part = text.split("\n", 1)
+            self.assertEqual(prefix, "@" + long_name + " ")
+            bodies.append(part)
+        self.assertEqual("".join(bodies), body)
+
+    def test_middle_send_failure_stops_without_resending_earlier_parts(self):
+        body = "".join(chr(0x4E00 + index) for index in range(1200))
+        plugin = self.setup_chat(Mock(return_value=body))
+        attempts = []
+
+        def send_at_text(room, text, ids):
+            attempts.append(text)
+            if len(attempts) == 2:
+                return False
+            self.backend.sent.append((room, text, ids))
+            return True
+
+        self.backend.send_at_text = send_at_text
+        with self.assertRaises(RuntimeError):
+            plugin.on_message(self.chat(), self.ctx)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(self.backend.sent), 1)
+        self.assertEqual(len(set(attempts)), 2)
+
+    def test_context_expiry_midway_stops_later_parts(self):
+        plugin = self.setup_chat(Mock(return_value="中" * 1200))
+        attempts = []
+
+        def send_at_text(room, text, ids):
+            attempts.append(text)
+            self.backend.sent.append((room, text, ids))
+            self.store.reset_context(ROOM)
+            return True
+
+        self.backend.send_at_text = send_at_text
+        plugin.on_message(self.chat(), self.ctx)
+        self.assertEqual(len(attempts), 1)
+
+    def test_detail_request_calls_the_main_model_once_with_full_history(self):
+        self.store.record(self.message("前面聊了甲", sequence=1))
+        self.store.record(self.message("机器人说过乙", sequence=2, data={"bot_generated": True}))
+        provider = Mock(return_value="详细回答。")
+        plugin = self.setup_chat(provider)
+        ask = "请详细展开刚才的讨论，继续展开也可以"
+        plugin.on_message(self.chat(ask, sequence=3), self.ctx)
+        provider.assert_called_once()
+        sent = provider.call_args.args[1]
+        self.assertIn("详细展开", sent)
+        self.assertIn("继续展开", sent)
+        history = provider.call_args.kwargs["history"]
+        self.assertEqual([row["role"] for row in history], ["user", "assistant"])
+        self.assertIn("前面聊了甲", history[0]["content"])
+        self.assertEqual(history[1]["content"], "机器人说过乙")
 
     def test_invalid_model_reply_preserves_context(self):
         plugin = self.setup_chat(Mock(return_value=""))

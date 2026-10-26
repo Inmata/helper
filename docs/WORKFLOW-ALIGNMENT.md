@@ -3,7 +3,7 @@
 
 ## 对齐依据
 
-- 生成时间：2026-10-26；workflow 0.5.1；基准提交 `f035630`。同日按裁决重组 spec 与文档（未提交）：`.spec/project/` 与 `架构与阅读指南.md` 已移入回收站，备份在 `backups/spec-restructure-20261026/`。
+- 生成时间：2026-10-26；workflow 0.5.1；基准提交 `f035630`。同日按裁决重组 spec 与文档，提交 `685f57e`：删除 `.spec/project/` 与 `架构与阅读指南.md`，原文见父提交 `f035630`。
 - 已读文件（大小 B / mtimeMs）：
 
 | 路径 | 大小 | mtimeMs | 读取范围 |
@@ -65,7 +65,7 @@
 | 入口检查 | `python -B main.py --config <合成配置> --check` | 不建库、不注入微信、不请求模型 |
 | 插件清单 | `python -B main.py --config <合成配置> --list-plugins` | 同上 |
 | 依赖边界 | `tests/test_architecture.py`（AST 静态检查） | 含在全量测试中 |
-| spec 漂移 | `workflow spec check --project <根>` | 需 git；spec 未提交时报 drift |
+| spec 漂移 | `workflow spec check --project <根>` | 需 git；spec 改动须提交后才不报 drift |
 | 发布前检查 | `python tools/check_publication.py [--private-markers-file <文件>]` | 只报告问题类型，不输出密钥 |
 | 启动 | `start_bot.ps1 [-RunSeconds N] [-Python <路径>]` | 需微信 4.1.15.13 登录；真实环境 |
 | 原生桥接构建 | `native/build_bridges.ps1` | 未读，需 MSVC（推断） |

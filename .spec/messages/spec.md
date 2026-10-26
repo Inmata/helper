@@ -14,7 +14,7 @@ related:
 把一条收到的消息按固定顺序交给成员库、维护通道与插件。这里不做业务判断，
 也不决定回复内容。
 
-![消息主链路：编号 1–8 为一次接收的主要步骤](../../../docs/images/message-flow-3.png)
+![消息主链路：编号 1–8 为一次接收的主要步骤](../../docs/images/message-flow-3.png)
 
 图注：图为从 `bridge` 到 `ServiceFacade` 的主链路；`ingress` 内的 allowlist 过滤、快速上下文清空、维护分流与人格兼容步骤未展开，完整顺序见规则 1。
 

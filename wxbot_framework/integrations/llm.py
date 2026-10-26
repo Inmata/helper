@@ -47,6 +47,17 @@ class LLMClient:
             raise ValueError("timeout_seconds 应为 1–60 秒")
         if type(self.max_tokens) is not int or not 128 <= self.max_tokens <= 4096:
             raise ValueError("max_tokens 应为 128–4096 的整数")
+        # 聊天专用参数可选；未配置时沿用全局值，行为与数值保持不变。
+        self.chat_timeout = options.get("chat_timeout_seconds", self.timeout)
+        self.chat_max_tokens = options.get("chat_max_tokens", self.max_tokens)
+        self.detail_max_tokens = options.get("detail_max_tokens", self.chat_max_tokens)
+        if (type(self.chat_timeout) not in (int, float) or not math.isfinite(self.chat_timeout)
+                or not 1 <= self.chat_timeout <= 180):
+            raise ValueError("chat_timeout_seconds 应为 1–180 秒")
+        if type(self.chat_max_tokens) is not int or not 128 <= self.chat_max_tokens <= 4096:
+            raise ValueError("chat_max_tokens 应为 128–4096 的整数")
+        if type(self.detail_max_tokens) is not int or not 128 <= self.detail_max_tokens <= 4096:
+            raise ValueError("detail_max_tokens 应为 128–4096 的整数")
 
     @classmethod
     def from_file(cls, path):
@@ -136,10 +147,16 @@ class LLMClient:
                     return fixed
         raise LLMFormatError("大模型输出不是合法的 JSON 对象，已尝试补救")
 
-    def complete_text(self, system, user, *, history=(), max_tokens=None):
-        """普通聊天走纯文本输出：模型不必生成 JSON，格式错误不再影响正常对话。"""
-        budget = self.max_tokens if max_tokens is None else max_tokens
+    def complete_text(self, system, user, *, history=(), max_tokens=None, detail=False):
+        """普通聊天走纯文本输出：模型不必生成 JSON，格式错误不再影响正常对话。
+
+        使用聊天专用超时；预算优先级：显式 max_tokens > detail 预算 > 聊天预算。
+        """
+        if max_tokens is not None:
+            budget = max_tokens
+        else:
+            budget = self.detail_max_tokens if detail else self.chat_max_tokens
         if type(budget) is not int or not 128 <= budget <= 4096:
             raise ValueError("任务 max_tokens 应为128—4096的整数")
         messages = self._messages(system, user, history)
-        return self._post(messages, budget, json_mode=False, timeout=self.timeout)
+        return self._post(messages, budget, json_mode=False, timeout=self.chat_timeout)

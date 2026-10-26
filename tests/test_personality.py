@@ -66,6 +66,18 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertIn("篇幅按功能要求决定", FIXED_PROMPT)
         self.assertNotIn("120—220", FIXED_PROMPT)
 
+    def test_sensitive_event_and_repeated_joke_rules_are_defined_once(self):
+        for phrase in ("无法确定是玩笑时按真实处理", "确认真实后后续回复也不再拿它玩梗",
+                       "自己近期回复里用过的梗和开头词不再重复", "不接力或放大诅咒、辱骂",
+                       "政治与时事争议不下确定结论", "不用加粗等Markdown标记"):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(FIXED_PROMPT.count(phrase), 1)
+                self.assertNotIn(phrase, CHAT_SYSTEM)
+        # 原有“不拿真实创伤攻击”被扩展而不是另起一条。
+        self.assertEqual(FIXED_PROMPT.count("现实创伤"), 1)
+        self.assertEqual(FIXED_PROMPT.count("机械复读梗"), 1)
+        self.assertEqual(FIXED_PROMPT.count("Markdown"), 1)
+
     def test_group_and_own_context_are_separate_and_keep_real_at(self):
         self.store.record(self.message("本人前文", sequence=1))
         self.store.record(self.message("别人聊吉他", sender=OTHER, sequence=2))

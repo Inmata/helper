@@ -37,6 +37,7 @@
 | docs/RAG接入计划.md | RAG 方案、工作包 0～12、验收；当前仅步骤 0 完成 | RAG 相关任务 |
 | docs/Jev中文相关性评测.md | Jev 小样本结果与局限 | 调 Jev 阈值或复跑评测 |
 | docs/艾特回复质量待办.md | 艾特回复已知质量反例（complex06/09、normal07/10）与 2026-10-22 评测局限 | 改艾特回复提示词或质量 |
+| docs/艾特回复质量改进计划.md | 10-22—10-26 真实群聊复盘缺陷 D1—D10、工作包与 spec 影响；已实施、审查、评测并部署，真实群效果待观察 | 实施或复核艾特回复质量改进 |
 | plugins/*/README.md | 各插件说明 | 改对应插件 |
 
 ## 全量文档清单
@@ -51,6 +52,7 @@
 | docs/RAG接入计划.md | 计划 | 已读 |
 | docs/Jev中文相关性评测.md | 计划 | 只读标题 |
 | docs/艾特回复质量待办.md | 计划 | 已读 |
+| docs/艾特回复质量改进计划.md | 计划 | 已读（本会话编写） |
 | docs/diagrams/*.mmd | 产品 | 存在但未读（PNG 为准） |
 | native/README.md | 产品 | 存在但未读，按需查阅 |
 | plugins/idiom_chain/README.md | 产品 | 已读 |
@@ -67,7 +69,7 @@
 | 入口检查 | `python -B main.py --config <合成配置> --check` | 不建库、不注入微信、不请求模型 |
 | 插件清单 | `python -B main.py --config <合成配置> --list-plugins` | 同上 |
 | 依赖边界 | `tests/test_architecture.py`（AST 静态检查） | 含在全量测试中 |
-| spec 漂移 | `workflow spec check --project <根>` | 需 git；spec 改动须提交后才不报 drift |
+| workflow spec 漂移 | `workflow spec check --project <根>` | 需 git；工作区管辖代码与 spec 同步修改可通过，提交时需一并包含 |
 | 发布前检查 | `python tools/check_publication.py [--private-markers-file <文件>]` | 只报告问题类型，不输出密钥 |
 | 启动 | `start_bot.ps1 [-RunSeconds N] [-Python <路径>]` | 需微信 4.1.15.13 登录；真实环境 |
 | 原生桥接构建 | `native/build_bridges.ps1` | 未读，需 MSVC（推断） |

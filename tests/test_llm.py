@@ -136,6 +136,54 @@ class LLMTests(unittest.TestCase):
                 self.assertEqual(self.client.complete_text("系统", "测试"), "正常正文")
                 self.assertEqual(call.call_count, 1)
 
+    def test_chat_fields_fall_back_to_global_values(self):
+        self.assertEqual((self.client.chat_timeout, self.client.chat_max_tokens, self.client.detail_max_tokens),
+                         (20, 512, 512))
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("正文")) as call:
+            self.client.complete_text("系统", "测试")
+        self.assertEqual(json.loads(call.call_args.args[0].data)["max_tokens"], 512)
+        self.assertEqual(call.call_args.kwargs["timeout"], 20)
+
+    def test_chat_task_uses_its_own_timeout_and_budgets(self):
+        client = LLMClient({**self.options, "chat_timeout_seconds": 60, "chat_max_tokens": 512,
+                            "detail_max_tokens": 2048})
+        self.assertEqual((client.chat_timeout, client.chat_max_tokens, client.detail_max_tokens), (60, 512, 2048))
+        for detail, expected in ((False, 512), (True, 2048)):
+            with (self.subTest(detail=detail),
+                  patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("正文")) as call):
+                self.assertEqual(client.complete_text("系统", "测试", detail=detail), "正文")
+            self.assertEqual(json.loads(call.call_args.args[0].data)["max_tokens"], expected)
+            self.assertEqual(call.call_args.kwargs["timeout"], 60)
+
+    def test_detail_budget_falls_back_to_chat_budget(self):
+        client = LLMClient({**self.options, "chat_max_tokens": 640})
+        self.assertEqual(client.detail_max_tokens, 640)
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("正文")) as call:
+            client.complete_text("系统", "测试", detail=True)
+        self.assertEqual(json.loads(call.call_args.args[0].data)["max_tokens"], 640)
+
+    def test_explicit_max_tokens_wins_over_detail(self):
+        client = LLMClient({**self.options, "detail_max_tokens": 2048})
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("正文")) as call:
+            client.complete_text("系统", "测试", max_tokens=300, detail=True)
+        self.assertEqual(json.loads(call.call_args.args[0].data)["max_tokens"], 300)
+
+    def test_complete_json_keeps_global_timeout_and_budget(self):
+        client = LLMClient({**self.options, "chat_timeout_seconds": 60, "chat_max_tokens": 900,
+                            "detail_max_tokens": 2048, "max_tokens": 512})
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("{}")) as call:
+            self.assertEqual(client.complete_json("JSON", "测试"), {})
+        self.assertEqual(json.loads(call.call_args.args[0].data)["max_tokens"], 512)
+        self.assertEqual(call.call_args.kwargs["timeout"], 20)
+
+    def test_chat_field_validation(self):
+        for change in ({"chat_timeout_seconds": 0}, {"chat_timeout_seconds": 181},
+                       {"chat_timeout_seconds": True}, {"chat_timeout_seconds": float("nan")},
+                       {"chat_max_tokens": 127}, {"chat_max_tokens": 4097}, {"chat_max_tokens": True},
+                       {"detail_max_tokens": 1}, {"detail_max_tokens": 4097}, {"detail_max_tokens": "2048"}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                LLMClient({**self.options, **change})
+
     def test_text_completion_needs_no_json_and_carries_real_roles(self):
         with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("直接说话的正文")) as call:
             result = self.client.complete_text("系统", "当前", history=[{"role": "user", "content": "上一问"},

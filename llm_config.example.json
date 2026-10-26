@@ -3,5 +3,8 @@
   "api_key": "",
   "model": "deepseek-flash",
   "timeout_seconds": 20,
-  "max_tokens": 512
+  "max_tokens": 512,
+  "chat_timeout_seconds": 60,
+  "chat_max_tokens": 512,
+  "detail_max_tokens": 2048
 }

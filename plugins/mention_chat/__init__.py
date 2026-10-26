@@ -1,4 +1,7 @@
 """真正艾特机器人后，用本群人格回复当前发言者。"""
+import threading
+import time
+
 from .._shared import idiom_state
 
 from wxbot_framework.conversation.dialogue import Dialogue
@@ -12,9 +15,48 @@ from wxbot_framework.commands import is_control
 SELF_QUERY_HINTS = ("我是谁", "知道我是谁", "认识我吗", "我叫什么", "我的身份", "我是哪位")
 GAME_FEATURE = "idiom_chain"
 USED_SAMPLE = 10
+# 提问含这些词时视为明确要求详细回答，使用 detail_max_tokens 预算。
+DETAIL_HINTS = ("详细", "详解", "细说", "展开", "具体说说", "完整", "全文", "全篇", "原文", "一步一步", "逐步")
+
+
+def wants_detail(query):
+    return any(hint in query for hint in DETAIL_HINTS)
 
 
 class Plugin:
+    def __init__(self):
+        # 同一群、同一发言者、相同提问的回复在生成或发送期间不重复生成。
+        # key -> (首次提问到达时刻, 生成开始时刻, 生成结束时刻)；生成中时结束时刻为 None。
+        self._pending = {}
+        self._pending_lock = threading.Lock()
+
+    def _claim(self, key, arrived_at):
+        """认领本次生成；仍在生成中，或本次到达时首次回复尚未结束，返回 False。
+
+        分发线程串行处理消息，重复提问往往在首次回复结束后才被取出，
+        所以不能只看“是否仍在生成”，要按消息实际到达时刻判断：
+        到达时刻与结束时刻同为 time.monotonic()，到达不晚于首次结束即视为重复。
+        """
+        with self._pending_lock:
+            previous = self._pending.get(key)
+            if previous is not None:
+                ended = previous[2]
+                if ended is None or arrived_at <= ended:
+                    return False
+            self._pending[key] = (arrived_at, time.monotonic(), None)
+            return True
+
+    def _release(self, key, *, delivered):
+        """成功后保留本轮起止时刻；失败则直接清理，便于用户重试同一提问。"""
+        with self._pending_lock:
+            record = self._pending.get(key)
+            if record is None:
+                return
+            if not delivered:
+                del self._pending[key]
+                return
+            self._pending[key] = (record[0], record[1], time.monotonic())
+
     def on_load(self, ctx):
         self.members = ctx.members
         self.room_state = getattr(ctx, "room_state", None)
@@ -66,6 +108,11 @@ class Plugin:
         game = self.room_game(message.chat_id, ctx, message=message)
         if game and self.is_move(clean_query, game):
             return  # 答案由接龙插件判定并出题，人格不重复回复也不编造进度。
+        key = (message.chat_id, message.sender_id, clean_query)
+        if not self._claim(key, message.received_at):
+            ctx.logger.info("艾特对话跳过：相同提问仍在回复中 room=%s", message.chat_id)
+            return
+        delivered = False
         try:
             snapshot = self.members.conversation_snapshot(message)
             guard = lambda: ctx.response_guard(snapshot, personality)
@@ -79,16 +126,18 @@ class Plugin:
             people = ctx.knowledge.lookup_people(message.chat_id, clean_query)
             knowledge = list({item["id"]: item for item in own + relevant}.values())
             style = ctx.knowledge.style(message.chat_id, message.sender_id)
+            options = {"detail": True} if wants_detail(clean_query) else {}
             reply = personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(snapshot,
                                      knowledge=knowledge, style=style, speaker_profile=profile,
                                      people=people,
-                                     room_game=self.game_context(game) if game else None),
+                                     room_game=self.game_context(game) if game else None, **options),
                                      personality.name)
             display = self.members.at_display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
             budget = 1023 - len(("@" + display + "\u2005\n").encode("utf-8"))
             for part in split_text(reply, byte_limit=budget):
                 if not ctx.reply_at(message, part, display_name=display, delivery_guard=guard):
                     raise RuntimeError("原生艾特发送未成功")
+            delivered = True
             ctx.logger.info("艾特对话完成：room=%s persona=%s context=%d", message.chat_id,
                             personality.name, len(snapshot.messages))
         except SnapshotExpired:
@@ -99,3 +148,5 @@ class Plugin:
                 ctx.reply(message, f"暂时无法回复：{error}", delivery_guard=guard)
             except SnapshotExpired:
                 pass
+        finally:
+            self._release(key, delivered=delivered)

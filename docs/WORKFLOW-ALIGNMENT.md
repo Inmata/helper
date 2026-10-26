@@ -36,6 +36,7 @@
 | .spec/{announcements,mention-reply,idiom-chain}/spec.md | 启动公告、艾特回复、成语接龙 | 改对应 `code:` 文件 |
 | docs/RAG接入计划.md | RAG 方案、工作包 0～12、验收；当前仅步骤 0 完成 | RAG 相关任务 |
 | docs/Jev中文相关性评测.md | Jev 小样本结果与局限 | 调 Jev 阈值或复跑评测 |
+| docs/艾特回复质量待办.md | 艾特回复已知质量反例（complex06/09、normal07/10）与 2026-10-22 评测局限 | 改艾特回复提示词或质量 |
 | plugins/*/README.md | 各插件说明 | 改对应插件 |
 
 ## 全量文档清单
@@ -49,6 +50,7 @@
 | .spec/*/spec.md（8 个） | 产品 | 已读 |
 | docs/RAG接入计划.md | 计划 | 已读 |
 | docs/Jev中文相关性评测.md | 计划 | 只读标题 |
+| docs/艾特回复质量待办.md | 计划 | 已读 |
 | docs/diagrams/*.mmd | 产品 | 存在但未读（PNG 为准） |
 | native/README.md | 产品 | 存在但未读，按需查阅 |
 | plugins/idiom_chain/README.md | 产品 | 已读 |

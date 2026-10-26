@@ -10,6 +10,7 @@
 | 功能行为约定 | `.spec/<id>/spec.md`：messages、delivery、learning、lifecycle、announcements、mention-reply、idiom-chain |
 | RAG 目标、当前进度、下一工作包 | [docs/RAG接入计划.md](docs/RAG接入计划.md) |
 | Jev 小样本结果与局限 | [docs/Jev中文相关性评测.md](docs/Jev中文相关性评测.md) |
+| 艾特回复已知质量反例与评测局限 | [docs/艾特回复质量待办.md](docs/艾特回复质量待办.md) |
 
 ## 功能更新公告
 

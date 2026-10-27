@@ -11,6 +11,7 @@ import random
 import re
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from ..conversation.dialogue import AVOID_PHRASES
@@ -214,6 +215,10 @@ class HourlyScheduler:
                 return False
             snapshot = self.members.recent_snapshot(room, limit=self.context_limit,
                                                     before_id=anchor, context=True)
+            # 按群取当前人格（含生效的人格补充）；生效版本变化时本次主动发言作废。
+            persona = self.members.personality(room)
+            model = PersonalityLLM(self.model.client, persona,
+                                   current=lambda: self.members.personality_is_current(persona))
             topics = self.candidates.recent_topics(room)
             recent_rows = snapshot.messages[-60:]
             query = "\n".join(row["text"] for row in recent_rows)
@@ -224,12 +229,12 @@ class HourlyScheduler:
             payload = {"recent": recent, "knowledge": memories, "recent_topics": topics}
             if len(json.dumps(payload, ensure_ascii=False)) > 16000:
                 payload.pop("recent")
-                payload["recent_summary"] = ChatSummarizer(self.model).summarize(
+                payload["recent_summary"] = ChatSummarizer(model).summarize(
                     snapshot, recent_rows, current=lambda: self.members.snapshot_is_current(snapshot))
             if not self.members.snapshot_is_current(snapshot):
                 raise SnapshotExpired("主动群聊上下文已清空或跨天")
             self.candidates.update(candidate_id, "model_called")
-            result = self.model.complete_json(SYSTEM, json.dumps(payload, ensure_ascii=False), max_tokens=1024)
+            result = model.complete_json(SYSTEM, json.dumps(payload, ensure_ascii=False), max_tokens=1024)
             wants_speak, text, topic = result.get("speak"), result.get("text"), result.get("topic")
             if type(wants_speak) is not bool or not isinstance(text, str) or not isinstance(topic, str):
                 raise LLMError("主动发言结果格式不正确")
@@ -244,7 +249,14 @@ class HourlyScheduler:
             if not self.members.snapshot_is_current(snapshot):
                 raise SnapshotExpired("主动发言上下文已失效")
             gate = InterjectionGate(interjection_probe(self.members, room))
-            guard = gate.wrap(lambda: self.members.delivery_guard(snapshot))
+
+            @contextmanager
+            def combined():
+                # 聊天快照与人格快照逐段一起核对：发送途中人格被切换（含 1→2→1 往返），后续段不再发出。
+                with self.members.delivery_guard(snapshot), self.members.personality_delivery_guard(persona):
+                    yield
+
+            guard = gate.wrap(combined)
 
             def send(part):
                 # 每一段都过 delivery_guard（后续段并入插话检测）；发出一段就记录一段，插话丢弃时只记录已发出的部分。

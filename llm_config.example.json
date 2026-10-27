@@ -6,5 +6,9 @@
   "max_tokens": 512,
   "chat_timeout_seconds": 60,
   "chat_max_tokens": 512,
-  "detail_max_tokens": 2048
+  "detail_max_tokens": 2048,
+  "jev": {
+    "model": "typesafe/jev-latest",
+    "timeout_seconds": 30
+  }
 }

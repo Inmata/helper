@@ -146,7 +146,9 @@ class BotApplication:
             from ..memory.worker import MemoryWorker
             self.memory_worker = MemoryWorker(self.knowledge, client, batch_size=self.memory_options["batch_size"],
                                               flush_seconds=self.memory_options["flush_seconds"],
-                                              display_timezone=self.display_timezone)
+                                              display_timezone=self.display_timezone, jev=self._jev_client(),
+                                              persona_refresh_hours=self.memory_options["persona_refresh_hours"],
+                                              persona_days=self.memory_options["persona_days"])
             self.memory_worker.start()
         if self.hourly_options["enabled"] and not self.hourly_scheduler:
             from ..memory.hourly import HourlyScheduler
@@ -157,6 +159,17 @@ class BotApplication:
                 stale_minutes=lambda: self.hourly_options["stale_candidate_minutes"],
                 ready=lambda: self._connection_ready)
             self.hourly_scheduler.start()
+
+    def _jev_client(self):
+        """人格补充的安全筛查客户端；配置缺失时关闭归纳，只记错误类型，不回显密钥。"""
+        if not self.memory_options.get("persona_refresh_hours"):
+            return None
+        from ..integrations.jev import JevClient
+        try:
+            return JevClient.from_file(self.store.path.parent / self.config.get("llm_config_file", "llm_config.json"))
+        except Exception as error:
+            logger.warning("人格补充已关闭：Jev 配置不可用 error=%s", type(error).__name__)
+            return None
 
     def update_feature(self, section, changes):
         with self._background_lock:

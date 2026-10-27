@@ -24,7 +24,16 @@ BASE_SCHEMA = """
         generation INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(account,room));
     CREATE TABLE IF NOT EXISTS room_personalities (
         account TEXT NOT NULL, room TEXT NOT NULL, name TEXT NOT NULL,
-        generation INTEGER NOT NULL, PRIMARY KEY(account,room));
+        generation INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(account,room));
+    -- 人格补充版本：按群递增留存，生效版本记在 room_personalities.generation（0 表示基准）。
+    CREATE TABLE IF NOT EXISTS persona_versions (
+        account TEXT NOT NULL, room TEXT NOT NULL, version INTEGER NOT NULL,
+        supplement TEXT NOT NULL, created_at TEXT NOT NULL, source TEXT NOT NULL,
+        PRIMARY KEY(account,room,version));
+    -- 最近一次归纳尝试（含失败与内容未变），供调度间隔判断。
+    CREATE TABLE IF NOT EXISTS persona_runs (
+        account TEXT NOT NULL, room TEXT NOT NULL, attempted_at TEXT NOT NULL,
+        status TEXT NOT NULL, PRIMARY KEY(account,room));
     CREATE TABLE IF NOT EXISTS wechat_names (
         account TEXT NOT NULL, wxid TEXT NOT NULL, name TEXT NOT NULL, name_key TEXT NOT NULL,
         PRIMARY KEY(account,wxid));
@@ -111,6 +120,9 @@ def initialize_base_schema(db):
         db.execute("ALTER TABLE messages ADD COLUMN bot_generated INTEGER NOT NULL DEFAULT 0")
     if "context_floor" not in {row["name"] for row in db.execute("PRAGMA table_info(chat_buffers)")}:
         db.execute("ALTER TABLE chat_buffers ADD COLUMN context_floor INTEGER NOT NULL DEFAULT 0")
+    # revision：每次切换生效版（含回退、回基准）单调加一，用来识别 1→2→1 这类往返切换。
+    if "revision" not in {row["name"] for row in db.execute("PRAGMA table_info(room_personalities)")}:
+        db.execute("ALTER TABLE room_personalities ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
     for column in ("first_seen", "last_seen"):
         if column not in {row["name"] for row in db.execute("PRAGMA table_info(room_members)")}:
             db.execute(f"ALTER TABLE room_members ADD COLUMN {column} TEXT")

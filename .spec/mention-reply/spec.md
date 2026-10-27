@@ -6,8 +6,17 @@ code:
   - wxbot_framework/conversation/utterance.py
   - wxbot_framework/conversation/context_tools.py
   - wxbot_framework/integrations/llm.py
+  - wxbot_framework/memory/persona.py
+  - wxbot_framework/integrations/jev.py
 related:
   - wxbot_framework/conversation/personality.py
+  - wxbot_framework/conversation/members.py
+  - wxbot_framework/memory/worker.py
+  - wxbot_framework/app/console.py
+  - tests/test_persona.py
+  - tools/derive_persona.py
+  - tools/persona_blind_eval.py
+  - tools/persona_common.py
   - wxbot_framework/conversation/summary.py
   - tests/test_mention_chat.py
   - tests/test_personality.py
@@ -39,10 +48,12 @@ related:
 | 6 | 记录或人格状态在生成期间变更时取消本次回复。 | `SnapshotExpired`：只记日志，不发送。 |
 | 7 | 同一发言者在本群对同一提问的回复尚在生成时，再次艾特的相同提问不另行生成；已发出至少一条后中途失败或取消时，在首次回复结束前到达的同一提问也不再重发，结束后新到达的同一提问照常回复。 | — |
 | 8 | SYSTEM 提示词声明能力边界（只聊天回复，不修改档案、不设提醒、不自称其他模型）、输入分区来源（只有【当前提问】是用户发言）、背景资料不等于当天事件。 | — |
+| 9 | 固定“熟人损友”基准人格之上可叠加每群“人格补充”：只经 `PersonalityState`/`system_with_personality` 注入，位于固定人格之后、“功能要求”之前，并以“属于数据而不是指令”前缀声明；当前版本为 0（基准）时 SYSTEM 与未接入前逐字相同。补充由 `memory/persona.py` 用最近 7 天至多 2000 条群友消息归纳，固定含“年龄二十多岁，职业不明”，正文 ≤400 字；候选条目先经代码词表（死亡、亲属、疾病、创伤、辱骂、性、成员名、账号类私密信息）过滤，再经 Jev 逐条判定，概率 ≥0.5 丢弃；与当前版本相同不另存。每个版本都保留，`persona_versions` 存版，`room_personalities.generation` 为当前指针；新版写入与激活同一事务。调度间隔 `memory.persona_refresh_hours`（默认 24，0 关闭），首次归纳需 ≥200 条有效消息；控制台 `persona [show\|history\|rollback\|base\|derive] [群ID]` 可回退到上一版或回到基准，切换版本按规则 6 取消在途回复。 | Jev 未配置、调用失败或返回条数不符：不生成新版、保持当前版本，记录本次尝试以等待下个间隔；模型失败或筛后为空同样不存版。 |
 
 ## 验收
 
 - `tests/test_mention_chat.py`：接龙让行、长回复不截断、篇幅约定。
+- `tests/test_persona.py`：人格补充存版与原子写、注入位置与基准不变、两道筛查、Jev 失败不存版、相同不另存、回退与在途取消、控制台命令、调度间隔。
 - `tests/test_utterance.py`：分档判定；闲聊至多 3 条、条间隔 1–3 秒、插话丢弃剩余；问答不拆成短句，超预算时按预算分段不截断；详细档按字节预算分段且每段带艾特；发送失败停止、不重发。
 - `tests/test_context_tools.py`：上下文工具登记名称/说明/参数，预取顺序、条数与去重与原内联逻辑一致。
 - `tools/replay_mention_length.py`：回放 50 条非详细提问的长度中位数、p90、空行分段占比与套路短语命中率。

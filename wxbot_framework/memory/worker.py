@@ -18,6 +18,7 @@ from ..integrations.llm import LLMError
 from ..timeutil import format_local
 from .knowledge import KINDS, sanitized
 from .learning import LearningBatch
+from .persona import FIRST_RUN_MESSAGES, PersonaDeriver, collect_messages
 
 logger = logging.getLogger("Memory")
 INVALID_PERSON_NAMES = frozenset({"群友", "未绑定成员", "机器人", "bot"})
@@ -46,7 +47,8 @@ STYLE_SYSTEM = """根据一位群友的文本样本概括可观察的语言习�
 
 class MemoryWorker:
     def __init__(self, knowledge, client, *, batch_size=50, flush_seconds=600, clock=None,
-                 display_timezone=None):
+                 display_timezone=None, jev=None, persona_refresh_hours=24, persona_days=7,
+                 persona_limit=2000):
         self.knowledge = knowledge
         self.learning = LearningBatch(knowledge)
         self.model = PersonalityLLM(client, PersonalityState(""), current=lambda: True)
@@ -58,10 +60,21 @@ class MemoryWorker:
         self.retry_after = {}
         self.failure_counts = {}
         self.thread = None
+        # 人格补充：没有 Jev 或间隔为 0 时关闭；归纳用基准模型，不受当前人格影响。
+        self.persona_refresh_hours = persona_refresh_hours
+        self.persona = (PersonaDeriver(knowledge.members, client, jev, days=persona_days, limit=persona_limit,
+                                       stopped=self.stop_event.is_set)
+                        if jev is not None and persona_refresh_hours else None)
+        self.persona_next_check = {}
+        self.persona_thread = None
 
     def start(self):
         self.thread = threading.Thread(target=self._run, name="MemoryLearner", daemon=True)
         self.thread.start()
+        if self.persona is not None:
+            # 人格归纳单独一个线程：一次模型调用可能很慢，不能拖住记忆学习；同一时间只有这一个归纳在跑。
+            self.persona_thread = threading.Thread(target=self._run_persona, name="PersonaDeriver", daemon=True)
+            self.persona_thread.start()
 
     def notify(self):
         self.wake.set()
@@ -74,18 +87,35 @@ class MemoryWorker:
         return True
 
     def close(self):
-        self.stop_event.set()
+        # 人格归纳在提交锁内检查停止；这里持同一把锁置位，有界等待，不受数据库锁或卡住的发送影响。
+        if self.persona is None:
+            self.stop_event.set()
+        elif not self.persona.stop(self.stop_event):
+            logger.warning("人格补充提交未在时限内结束，已置停止标记继续关闭")
         self.wake.set()
-        if self.thread:
-            self.thread.join(timeout=65)
-            if self.thread.is_alive():
-                raise RuntimeError("记忆线程尚未退出，暂不关闭其数据库")
+        for thread in (self.thread, self.persona_thread):
+            if thread:
+                thread.join(timeout=65)
+                if thread.is_alive():
+                    raise RuntimeError("记忆线程尚未退出，暂不关闭其数据库")
 
     def _run(self):
         while not self.stop_event.is_set():
             self.wake.clear()
             self.tick()
             self.wake.wait(1)
+
+    def _run_persona(self):
+        while not self.stop_event.is_set():
+            self.persona_tick()
+            self.stop_event.wait(5)
+
+    def persona_tick(self):
+        """逐群检查是否到了归纳时间；停止后不再开始新的归纳。"""
+        for room in sorted(self.knowledge.members.groups):
+            if self.stop_event.is_set():
+                return
+            self.maybe_derive_persona(room)
 
     def tick(self):
         for room in sorted(self.knowledge.members.groups):
@@ -120,6 +150,31 @@ class MemoryWorker:
                 self.failure_counts[room] = failures
                 self.retry_after[room] = now + min(300, 30 * (2 ** (failures - 1)))
                 logger.warning("记忆学习暂缓：room=%s error=%s", room, type(error).__name__)
+
+    def maybe_derive_persona(self, room):
+        """距上次尝试超过 persona_refresh_hours 时归纳；尚无版本时需积累足够群友消息。"""
+        if self.persona is None:
+            return None
+        now = self.clock()
+        if now < self.persona_next_check.get(room, 0):
+            return None
+        # 判断本身要读库，最多每 10 分钟检查一次。
+        self.persona_next_check[room] = now + 600
+        members = self.knowledge.members
+        try:
+            last = members.last_persona_run(room)
+            if last and (members.now() - last[0]).total_seconds() < self.persona_refresh_hours * 3600:
+                return None
+            if not members.persona_versions(room):
+                count = len(collect_messages(members, room, days=self.persona.days, limit=FIRST_RUN_MESSAGES))
+                if count < FIRST_RUN_MESSAGES:
+                    return None
+            result = self.persona.derive(room)
+        except Exception as error:
+            logger.warning("人格补充归纳暂缓：room=%s error=%s", room, type(error).__name__)
+            return None
+        logger.info("人格补充归纳：room=%s status=%s version=%s", room, result.status, result.version)
+        return result
 
     @staticmethod
     def _refs(item, allowed):

@@ -9,6 +9,7 @@ def feature_options(config):
     if not isinstance(config.get("memory", {}), dict) or not isinstance(config.get("hourly_chat", {}), dict):
         raise ValueError("memory 和 hourly_chat 应为JSON对象")
     memory = {"enabled": False, "batch_size": 50, "flush_seconds": 600,
+              "persona_refresh_hours": 24, "persona_days": 7,
               "seed_file": ".runtime/group_knowledge_seed.json", **config.get("memory", {})}
     hourly = {
         "enabled": False,
@@ -33,6 +34,8 @@ def feature_options(config):
             raise ValueError(key + ".enabled 必须是布尔值")
     numeric = (
         (memory, "batch_size", 1, 200),
+        (memory, "persona_refresh_hours", 0, 720),
+        (memory, "persona_days", 1, 60),
         (hourly, "start_hour", 0, 23),
         (hourly, "end_hour", 1, 24),
         (hourly, "evening_start_hour", 0, 24),

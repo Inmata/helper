@@ -30,6 +30,10 @@ class SnapshotExpired(RuntimeError):
     """清空或跨天后，取消仍在生成/等待发送的总结。"""
 
 
+class PersonaSuperseded(RuntimeError):
+    """归纳期间人格被切换（生效、回退或回基准），这次归纳结果作废。"""
+
+
 BEIJING = timezone(timedelta(hours=8))
 INVISIBLE_CHARS = "\u200b\u200c\u200d\u2060\ufeff\u3164\u115f\u1160\uffa0\u2800\u00a0\u2005"
 HOMOGLYPHS = str.maketrans({
@@ -127,6 +131,20 @@ def parse_aliases(raw):
             seen.add(key)
             result.append(key)
     return result
+
+
+def _persona_data(raw):
+    """解析人格补充版本的 JSON；损坏时视为空，不让坏数据进入提示词。"""
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _persona_text(raw):
+    text = _persona_data(raw).get("text")
+    return text.strip() if isinstance(text, str) else ""
 
 
 class MemberStore:
@@ -313,8 +331,104 @@ class MemberStore:
         return self.transcript.history(name, room, limit=limit, since=since)
 
     def personality(self, room):
+        """当前群人格：基准语气加生效的人格补充版本（0 表示只用基准）。"""
         from .personality import PersonalityState
-        return PersonalityState(room)
+        with self.database.lock:
+            db = self.connection()
+            row = db.execute("SELECT generation, revision FROM room_personalities WHERE account=? AND room=?",
+                             (self.account, room)).fetchone()
+            version, revision = (row[0], row[1]) if row else (0, 0)
+            if not version:
+                return PersonalityState(room, revision=revision)
+            stored = db.execute("SELECT supplement FROM persona_versions WHERE account=? AND room=? AND version=?",
+                                (self.account, room, version)).fetchone()
+        text = _persona_text(stored[0]) if stored else ""
+        if not text:
+            return PersonalityState(room, revision=revision)
+        return PersonalityState(room, generation=version, supplement=text, revision=revision)
+
+    def persona_revision(self, room):
+        """本群人格切换计数；归纳开始时取一次，存版时比对，期间有切换就作废结果。"""
+        return self.personality(room).revision
+
+    def persona_versions(self, room):
+        """按版本号升序列出本群人格补充；active 标记当前生效版。"""
+        with self.database.lock:
+            active = self.personality(room).generation
+            rows = self.connection().execute(
+                "SELECT version, supplement, created_at, source FROM persona_versions "
+                "WHERE account=? AND room=? ORDER BY version", (self.account, room)).fetchall()
+        return [{"version": row[0], "text": _persona_text(row[1]), "data": _persona_data(row[1]),
+                 "created_at": row[2], "source": row[3], "active": row[0] == active} for row in rows]
+
+    def save_persona(self, room, data, *, source="derived", expected_revision=None):
+        """新存一版人格补充并设为生效；与当前生效版内容相同时不新存，返回 None。
+
+        data 必须含非空 text；版本号与生效指针在同一事务内写入，失败时不留半批状态。
+        expected_revision 给定时，若本群切换计数已变（归纳期间有人回退或回基准），抛 PersonaSuperseded 且不写库。
+        """
+        if room not in self.groups:
+            raise MemberError("该群不在配置中")
+        if not isinstance(data, dict) or not isinstance(data.get("text"), str) or not data["text"].strip():
+            raise MemberError("人格补充为空")
+        payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        with self.transaction() as db:
+            current = self.personality(room)
+            if expected_revision is not None and current.revision != expected_revision:
+                raise PersonaSuperseded("归纳期间人格已切换")
+            if current.generation:
+                stored = db.execute("SELECT supplement FROM persona_versions WHERE account=? AND room=? AND version=?",
+                                    (self.account, room, current.generation)).fetchone()
+                if stored and _persona_data(stored[0]) == _persona_data(payload):
+                    return None
+            version = db.execute("SELECT COALESCE(MAX(version), 0) + 1 FROM persona_versions "
+                                 "WHERE account=? AND room=?", (self.account, room)).fetchone()[0]
+            db.execute("INSERT INTO persona_versions(account,room,version,supplement,created_at,source) "
+                       "VALUES(?,?,?,?,?,?)", (self.account, room, version, payload, iso_utc(self.now()), source))
+            self._activate_persona(db, room, version)
+        return version
+
+    def activate_persona(self, room, version):
+        """切换生效版本（0 为基准）；不删除任何版本。"""
+        if room not in self.groups:
+            raise MemberError("该群不在配置中")
+        with self.transaction() as db:
+            if version and not db.execute("SELECT 1 FROM persona_versions WHERE account=? AND room=? AND version=?",
+                                          (self.account, room, version)).fetchone():
+                raise MemberError("没有这个人格补充版本")
+            self._activate_persona(db, room, version)
+        return version
+
+    def rollback_persona(self, room):
+        """回到当前生效版之前最近的一版；没有更早版本时回到基准。"""
+        with self.transaction() as db:
+            current = self.personality(room).generation
+            if not current:
+                raise MemberError("当前已是基准人格")
+            row = db.execute("SELECT MAX(version) FROM persona_versions WHERE account=? AND room=? AND version<?",
+                             (self.account, room, current)).fetchone()
+            return self.activate_persona(room, row[0] or 0)
+
+    def _activate_persona(self, db, room, version):
+        from .personality import FIXED_NAME
+        # revision 与生效指针同一条语句写入：每次切换（含切回同一版）都加一。
+        db.execute("INSERT INTO room_personalities(account,room,name,generation,revision) VALUES(?,?,?,?,1) "
+                   "ON CONFLICT(account,room) DO UPDATE SET name=excluded.name, generation=excluded.generation, "
+                   "revision=room_personalities.revision + 1",
+                   (self.account, room, FIXED_NAME, version))
+
+    def record_persona_run(self, room, status):
+        """记录最近一次归纳尝试（成功、内容未变或失败都记），供调度间隔判断。"""
+        with self.transaction() as db:
+            db.execute("INSERT INTO persona_runs(account,room,attempted_at,status) VALUES(?,?,?,?) "
+                       "ON CONFLICT(account,room) DO UPDATE SET attempted_at=excluded.attempted_at, "
+                       "status=excluded.status", (self.account, room, iso_utc(self.now()), status))
+
+    def last_persona_run(self, room):
+        with self.database.lock:
+            row = self.connection().execute("SELECT attempted_at, status FROM persona_runs WHERE account=? AND room=?",
+                                            (self.account, room)).fetchone()
+        return (parse_utc(row[0]), row[1]) if row else None
 
     def set_personality(self, room, name):
         raise MemberError("已固定为熟人损友风格，不再切换人格")

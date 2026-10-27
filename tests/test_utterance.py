@@ -343,6 +343,12 @@ class InterjectionProbeTests(unittest.TestCase):
 
         self.assertFalse(interjection_probe(NoBaseline(), "r@chatroom")())
 
+    def test_explicit_baseline_overrides_latest_id(self):
+        members = FakeMembers(11, [[{"id": 11, "bot_generated": 0, "is_self": 0}]])
+        self.assertFalse(interjection_probe(members, "r@chatroom")())  # 默认水位取 latest_id=11
+        members = FakeMembers(11, [[{"id": 11, "bot_generated": 0, "is_self": 0}]])
+        self.assertTrue(interjection_probe(members, "r@chatroom", baseline=10)())
+
     def test_magicmock_members_never_report_interjection(self):
         from unittest.mock import MagicMock
         self.assertFalse(interjection_probe(MagicMock(), "r@chatroom")())

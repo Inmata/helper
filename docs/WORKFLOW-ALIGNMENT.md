@@ -3,19 +3,21 @@
 
 ## 对齐依据
 
-- 生成时间：2026-10-26；workflow 0.5.1；基准提交 `f035630`。同日按裁决重组 spec 与文档，提交 `685f57e`：删除 `.spec/project/` 与 `架构与阅读指南.md`，原文见父提交 `f035630`。2026-10-27 增量更新：已结束的计划与评测移入 `docs/archive/`。
+- 生成时间：2026-10-26；workflow 0.5.1；基准提交 `f035630`。同日按裁决重组 spec 与文档，提交 `685f57e`：删除 `.spec/project/` 与 `架构与阅读指南.md`，原文见父提交 `f035630`。2026-10-27 增量更新：已结束的计划与评测移入 `docs/archive/`（原 `docs/艾特回复质量改进计划.md`、`docs/Jev中文相关性评测.md` 已移走）；新增 `.spec/proactive-chat/spec.md` 与 `docs/拟人化计划.md`。
 - 已读文件（大小 B / mtimeMs）：
 
 | 路径 | 大小 | mtimeMs | 读取范围 |
 | --- | --- | --- | --- |
-| AGENTS.md | 1592 | 1793064518738 | 全文 |
+| AGENTS.md | 1769 | 1793091979569 | 全文 |
 | README.md | 5780 | 1792998944207 | 全文 |
-| 使用手册.md | 36944 | 1792636669516 | 标题 + 第十七节 |
-| .spec/architecture/spec.md | 4953 | 1792998854867 | 全文 |
+| 使用手册.md | 40585 | 1793093453386 | 标题 + 第七节 + 第十七节 |
+| .spec/architecture/spec.md | 5228 | — | 全文 |
 | .spec/{messages,learning,delivery,lifecycle}/spec.md | 2002/1856/1631/2578 | 1792998865513～521 | 全文 |
-| .spec/{announcements,mention-reply,idiom-chain}/spec.md | 1958/2122/2525 | 1792998878313～922703 | 全文 |
-| docs/RAG接入计划.md | 19994 | 1792547785346 | 全文 |
+| .spec/{announcements,mention-reply,idiom-chain}/spec.md | 1958/6820/2525 | 1792998878313～1793085086494 | 全文 |
+| .spec/proactive-chat/spec.md | 6493 | 1793094015098 | 全文 |
+| docs/RAG接入计划.md | 20010 | 1793064482749 | 全文 |
 | docs/艾特回复质量待办.md | 1292 | 1793064513427 | 全文 |
+| docs/拟人化计划.md | 15318 | 1793094614036 | 全文 |
 | docs/archive/*.md（3 个） | — | — | 已结束计划与评测，2026-10-27 归档 |
 | plugins/idiom_chain/README.md | — | — | 全文 |
 | start_bot.ps1 | 1275 | 1792118903917 | 全文 |
@@ -34,7 +36,8 @@
 | 使用手册.md | 群内指令、维护命令、公告配置（第十七节）、fork 维护（第十八节） | 用户可见行为、公告 |
 | .spec/architecture/spec.md | 边界、目录职责、依赖方向、资源归属、线程、扩展落点；整体结构检查基准 | 架构变更、新增模块或依赖 |
 | .spec/{messages,delivery,learning,lifecycle}/spec.md | 消息接收、文本发送、增量学习、启动与退出 | 改对应 `code:` 文件 |
-| .spec/{announcements,mention-reply,idiom-chain}/spec.md | 启动公告、艾特回复、成语接龙 | 改对应 `code:` 文件 |
+| .spec/{announcements,mention-reply,proactive-chat,idiom-chain}/spec.md | 启动公告、艾特回复（含人格补充）、主动发言、成语接龙 | 改对应 `code:` 文件 |
+| docs/拟人化计划.md | 短句、人格归纳、主动发言三步的目标、验收与进度 | 拟人化相关任务 |
 | docs/RAG接入计划.md | RAG 方案、工作包 0～12、验收；当前仅步骤 0 完成 | RAG 相关任务 |
 | docs/艾特回复质量待办.md | 艾特回复未完成事项：真实群验收、未过样本、分支未合并 | 改艾特回复提示词或质量 |
 | docs/archive/ | 已结束的 Jev 评测、艾特回复改进计划与评测记录，只作历史参考 | 调 Jev 阈值、复跑评测或追溯改动原因 |
@@ -48,7 +51,8 @@
 | README.md | 产品 | 已读 |
 | 使用手册.md | 使用 | 部分已读 |
 | THIRD_PARTY_NOTICES.md | 发布 | 存在但未读，按需查阅 |
-| .spec/*/spec.md（8 个） | 产品 | 已读 |
+| .spec/*/spec.md（9 个） | 产品 | 已读 |
+| docs/拟人化计划.md | 计划 | 已读 |
 | docs/RAG接入计划.md | 计划 | 已读 |
 | docs/艾特回复质量待办.md | 计划 | 已读 |
 | docs/archive/{Jev中文相关性评测,艾特回复质量改进计划,艾特回复质量评测记录}.md | 归档 | 已读（Jev 仅标题） |

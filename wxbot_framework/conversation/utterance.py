@@ -183,10 +183,12 @@ class InterjectionGate:
         return guarded
 
 
-def interjection_probe(members, room):
+def interjection_probe(members, room, *, baseline=None):
     """返回“发送开始后群里是否出现了别人的新消息”的检测函数。
 
-    建立时记下群内当前最大消息序号（含机器人自己的行）；之后每次调用，读最近的非机器人行，
+    建立时记下群内当前最大消息序号（含机器人自己的行）；``baseline`` 为整数时改用它作水位
+    （如触发这一轮的那条消息自己的序号：已落库但还没分发的更新消息也算新消息）。
+    之后每次调用，读最近的非机器人行，
     只要有序号更大、且不是机器人账号自己回显的行，就算有人插话。机器人自己刚发的段落
     （bot_generated=1，或 is_self=1 的原生回显）不算插话。读不到数据时一律视为没有插话：
     宁可把后面几条发完，也不因为统计问题丢掉回复。
@@ -199,7 +201,8 @@ def interjection_probe(members, room):
             return None
         return value if type(value) is int else None
 
-    baseline = read_baseline()
+    if type(baseline) is not int:
+        baseline = read_baseline()
 
     def probe():
         if baseline is None:

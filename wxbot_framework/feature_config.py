@@ -27,6 +27,7 @@ def feature_options(config):
         "min_messages": 2,
         "min_speakers": 2,
         "context_limit": 200,
+        "quiet_minutes": 0,
         **config.get("hourly_chat", {}),
     }
     for key, settings in (("memory", memory), ("hourly_chat", hourly)):
@@ -50,6 +51,7 @@ def feature_options(config):
         (hourly, "min_messages", 1, 100),
         (hourly, "min_speakers", 1, 100),
         (hourly, "context_limit", 1, 5000),
+        (hourly, "quiet_minutes", 0, 1440),
     )
     for settings, key, lower, upper in numeric:
         if type(settings[key]) is not int or not lower <= settings[key] <= upper:

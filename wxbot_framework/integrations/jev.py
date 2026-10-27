@@ -1,4 +1,4 @@
-"""TypeSafe Jev 判断接口：批量提交 noul 题目取概率，不记录密钥或题目正文。"""
+"""TypeSafe Jev 判断接口：批量提交 noul 题目或单道 choice 题取概率，不记录密钥或题目正文。"""
 from __future__ import annotations
 
 import json
@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_MODEL = "typesafe/jev-latest"
 MAX_QUESTIONS = 64
+CHOICE_SUM_TOLERANCE = 0.05
 
 
 class JevError(RuntimeError):
@@ -82,6 +83,37 @@ class JevClient:
             if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
                 raise JevFormatError("Jev 返回的概率无效")
             result.append(float(value))
+        return result
+
+    def choice(self, state, instructions, criteria):
+        """单道 choice 题：criteria 为 {选项 id: 判据}；返回 {选项 id: 概率}，只含已声明的选项。
+
+        已声明的选项必须全部给出且概率之和约为 1，否则视为格式错误。
+        """
+        if not isinstance(state, dict):
+            raise ValueError("Jev state 必须是对象")
+        if not isinstance(instructions, str) or not instructions.strip():
+            raise ValueError("Jev choice 需要 instructions")
+        if (not isinstance(criteria, dict) or not 2 <= len(criteria) <= MAX_QUESTIONS or
+                not all(isinstance(key, str) and key.strip() and isinstance(value, str) and value.strip()
+                        for key, value in criteria.items())):
+            raise ValueError(f"Jev choice 选项应为 2–{MAX_QUESTIONS} 个非空判据")
+        answers = self._post({"model": self.model, "state": state, "questions": {
+            "q0": {"type": "choice", "instructions": instructions, "criteria": dict(criteria)}}})
+        try:
+            probabilities = answers["q0"]["probabilities"]
+        except (KeyError, TypeError):
+            raise JevFormatError("Jev 响应缺少选项概率") from None
+        if not isinstance(probabilities, dict):
+            raise JevFormatError("Jev 返回的选项概率无效")
+        result = {}
+        for key in criteria:
+            value = probabilities.get(key)
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise JevFormatError("Jev 返回的概率无效或缺少选项")
+            result[key] = float(value)
+        if abs(sum(result.values()) - 1) > CHOICE_SUM_TOLERANCE:
+            raise JevFormatError("Jev 返回的选项概率之和不为 1")
         return result
 
     def _post(self, payload):

@@ -32,10 +32,10 @@ related:
 | `app/` | 装配与显式初始化（`bootstrap.py`）、主循环（`runtime.py`）、消息顺序（`ingress.py`）、控制台、维护、检查命令、公告、资料修订 |
 | `messaging/` | 消息模型、发送、节奏、接收水位、文本与艾特工具 |
 | `plugin_engine/` | 清单、发现与加载、插件上下文 |
-| `conversation/` | 成员与历史、群状态、对话、总结、人格、清空控制 |
+| `conversation/` | 成员与历史、群状态、对话、总结、人格、清空控制、决策接缝（`planner.py`） |
 | `memory/` | 知识库与维护、增量学习、学习调度、主动发言 |
 | `storage/` | 唯一连接与事务、集中迁移 |
-| `integrations/` | 原生微信后端适配、大模型客户端 |
+| `integrations/` | 原生微信后端适配、大模型与 Jev 客户端 |
 | `plugins/_shared/` | 插件之间的只读数据契约 |
 | `plugins/_template/` | 插件模板 |
 | `native/`、`tests/`、`tools/` | 原生桥接源码与 DLL、离线测试、离线维护脚本 |
@@ -65,7 +65,8 @@ related:
 | `BotConsole` | 读取标准输入的命令行 |
 | `Maintenance` | 维护命令队列 |
 | `MemoryLearner` | 增量学习调度 |
-| `HourlyChat` | 主动发言调度 |
+| `HourlyChat` | 定时主动发言候选（冷场兜底） |
+| `ProactiveChat.timer` | 事件驱动主动发言的去抖计时（插件 `proactive_chat` 自建，`on_unload` 时停止） |
 | `Plugin.<名称>` | 每个插件的消息队列 |
 
 ## 扩展落点

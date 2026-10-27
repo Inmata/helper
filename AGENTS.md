@@ -7,7 +7,7 @@
 | --- | --- |
 | 项目用途、运行与配置入口 | [README.md](README.md)、[使用手册.md](使用手册.md) |
 | 目录职责、依赖方向、资源归属与扩展落点 | [.spec/architecture/spec.md](.spec/architecture/spec.md) |
-| 功能行为约定 | `.spec/<id>/spec.md`：messages、delivery、learning、lifecycle、announcements、mention-reply、idiom-chain |
+| 功能行为约定 | `.spec/<id>/spec.md`：messages、delivery、learning、lifecycle、announcements、mention-reply、proactive-chat、idiom-chain |
 | 拟人化（短句、人格归纳、主动发言）目标与进度 | [docs/拟人化计划.md](docs/拟人化计划.md) |
 | RAG 目标、当前进度、下一工作包（暂缓） | [docs/RAG接入计划.md](docs/RAG接入计划.md) |
 | 艾特回复未完成事项（验收、未过样本） | [docs/艾特回复质量待办.md](docs/艾特回复质量待办.md) |

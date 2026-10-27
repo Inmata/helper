@@ -1,0 +1,7 @@
+{
+  "api": "v1",
+  "author": "Inmata",
+  "description": "没人艾特时，群里一停顿就用 Jev 判断要不要像群友一样插一句；有配额、冷却与连续发言限制",
+  "services": ["llm"],
+  "requires": ["group.text.receive", "group.text.send"]
+}

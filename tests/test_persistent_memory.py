@@ -849,6 +849,88 @@ class HourlyTests(unittest.TestCase):
             (ROBOT, ROOM)).fetchone()
         self.assertEqual(tuple(candidate), ("filtered", 2, 1, "insufficient-activity"))
 
+    def test_quiet_minutes_only_speaks_after_room_goes_quiet(self):
+        scheduler = self.scheduler(quiet_minutes=5)
+        self.activity(scheduler)
+        scheduler.model.client.complete_json.assert_not_called()
+        candidate = scheduler.knowledge.connection().execute("""SELECT status,error FROM proactive_candidates
+            WHERE account=? AND room=? ORDER BY id DESC LIMIT 1""", (ROBOT, ROOM)).fetchone()
+        self.assertEqual(tuple(candidate), ("filtered", "not-quiet"))
+
+        self.now += timedelta(minutes=10)
+        scheduler.next_candidate[ROOM] = self.now
+        scheduler.tick()
+        self.assertEqual(scheduler.model.client.complete_json.call_count, 1)
+        self.assertEqual(self.candidate_statuses(scheduler)[-1], "sent")
+
+    def test_shared_speak_budget_blocks_and_records_hourly_send(self):
+        scheduler = self.scheduler()
+        budget = scheduler.members.speak_budget
+        moment = [1000.0]
+        budget.clock = lambda: moment[0]
+        self.assertIsNone(budget.reserve(ROOM))  # 事件驱动的主动发言正在本群发送
+        self.activity(scheduler)
+        self.assertEqual(self.backend.sent, [])
+        candidate = scheduler.knowledge.connection().execute("""SELECT status,error FROM proactive_candidates
+            WHERE account=? AND room=? ORDER BY id DESC LIMIT 1""", (ROBOT, ROOM)).fetchone()
+        self.assertEqual(tuple(candidate), ("filtered", "budget-busy"))
+        budget.release(ROOM, sent=True)  # 事件驱动那次已发出：定时候选计入同一份配额
+
+        other = self.scheduler(Mock(complete_json=Mock(return_value={
+            "speak": True, "topic": "新曲子", "text": "新曲子是哪首呀"})), run_id="run-two")
+        self.assertIs(other.members.speak_budget, budget)
+        self.now += timedelta(hours=3)
+        moment[0] += 30  # 仍在 60 秒间隔内：定时候选也被拒
+        self.activity(other)
+        self.assertEqual(self.candidate_statuses(other)[-1], "filtered")
+        moment[0] += 60
+        self.now += timedelta(hours=1)
+        self.activity(other)
+        self.assertEqual(self.candidate_statuses(other)[-1], "sent")
+        self.assertEqual(budget.count(ROOM), 2)
+
+    def test_member_messages_reset_shared_streak_without_plugin(self):
+        scheduler = self.scheduler()
+        budget = scheduler.members.speak_budget
+        budget.record(ROOM)
+        budget.record(ROOM)
+        self.assertEqual(budget.check(ROOM) in ("gap", "streak"), True)
+        for text in ("一", "二", "三"):
+            self.record(text, sender=CAT)  # 群友消息经成员库落库即计入，不依赖 proactive_chat 插件
+        self.assertEqual(budget.streak(ROOM), 0)
+
+    def test_member_message_arriving_during_native_send_counts_after_mark_sent(self):
+        import threading
+        scheduler = self.scheduler()
+        budget = scheduler.members.speak_budget
+        budget.configure(limit=5, window_seconds=600, gap_seconds=60, max_streak=2, streak_reset_messages=1)
+        arrivals = []
+        original = self.backend.send_text
+
+        def send_text(room, text):
+            # 原生发送发生在发送守卫（聊天记录锁）内：这时到达的群友消息只能在锁外排队。
+            thread = threading.Thread(target=lambda: self.record("发送途中到的一条", sender=OTHER, sequence=9))
+            thread.start()
+            arrivals.append(thread)
+            thread.join(timeout=0.2)
+            self.assertTrue(thread.is_alive())
+            return original(room, text)
+        self.backend.send_text = send_text
+        self.activity(scheduler)
+        arrivals[0].join(timeout=5)
+        self.assertFalse(arrivals[0].is_alive())
+        self.assertEqual(len(self.backend.sent), 1)
+        # mark_sent 在守卫内先记账，这条群友消息随后才计入（阈值 1）：连续计数被它清零，而不是反过来。
+        self.assertEqual((budget.count(ROOM), budget.streak(ROOM)), (1, 0))
+
+    def test_hourly_counts_budget_even_if_reply_recording_fails(self):
+        scheduler = self.scheduler()
+        budget = scheduler.members.speak_budget
+        with patch.object(scheduler.members, "record_bot_reply", side_effect=RuntimeError("db")):
+            self.activity(scheduler)
+        self.assertEqual(len(self.backend.sent), 1)
+        self.assertEqual(budget.count(ROOM), 1)
+
     def test_model_result_requires_boolean_speak_and_text_fields(self):
         for result in ({"topic": "旧格式", "text": "没有 speak 字段"},
                        {"speak": "yes", "topic": "错误布尔值", "text": "不应发送"},

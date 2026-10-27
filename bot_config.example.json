@@ -36,6 +36,7 @@
     "stale_candidate_minutes": 15,
     "min_messages": 2,
     "min_speakers": 2,
+    "quiet_minutes": 0,
     "context_limit": 200
   },
   "text_send_delay": {
@@ -69,6 +70,10 @@
       "idle_seconds": 1800,
       "target_rounds": 10,
       "bot_rescues": 3
+    },
+    "proactive_chat": {
+      "enabled": false,
+      "rooms": []
     },
     "id_responder": {
       "enabled": true

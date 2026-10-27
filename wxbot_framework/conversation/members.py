@@ -300,7 +300,14 @@ class MemberStore:
         return self.transcript.delivery_guard(snapshot)
 
     def record(self, message):
-        return self.transcript.record(message)
+        # 落库与计入预算在同一把聊天记录锁内完成：发送守卫持有这把锁，
+        # 守卫内发出的消息与随后到达的群友消息，在预算里的先后顺序与落库一致。
+        with self.database.lock:
+            inserted = self.transcript.record(message)
+            if inserted and not message.data.get("bot_generated") and not message.is_self:
+                # 群友新消息统一在这里计入主动发言预算，事件驱动插件关闭时定时路径的连续计数也能清零。
+                self.speak_budget.human_message(message.chat_id)
+        return inserted
 
     def record_bot_reply(self, room, text):
         return self.transcript.record_bot_reply(room, text)
@@ -310,6 +317,15 @@ class MemberStore:
 
     def latest_id(self, room):
         return self.transcript.latest_id(room)
+
+    @property
+    def speak_budget(self):
+        """本账号各群共用的主动发言预算：事件驱动与定时主动发言都经它检查和记账。"""
+        budget = self.__dict__.get("_speak_budget")
+        if budget is None:
+            from .planner import SpeakBudget
+            budget = self.__dict__.setdefault("_speak_budget", SpeakBudget())
+        return budget
 
     def recent_rows(self, room, **options):
         return self.transcript.recent_rows(room, **options)

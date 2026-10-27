@@ -19,6 +19,7 @@ class PluginContext:
         self._service = service
         self._llm_config_path = llm_config_path
         self._llm = None
+        self._jev = None
         self._members = member_store
         self._knowledge = knowledge_store
         self._room_state = room_state_store
@@ -58,6 +59,16 @@ class PluginContext:
             from ..integrations.llm import LLMClient
             self._llm = LLMClient.from_file(self._llm_config_path)
         return self._llm
+
+    @property
+    def jev(self):
+        """Jev 判断客户端：读同一份大模型配置的 "jev" 段，缺省项取主模型配置。"""
+        if self._jev is None:
+            if self._llm_config_path is None:
+                raise ValueError("尚未配置大模型文件")
+            from ..integrations.jev import JevClient
+            self._jev = JevClient.from_file(self._llm_config_path)
+        return self._jev
 
     def send_text(self, chat_id, text):
         sent = self._service.send_text(chat_id, text)

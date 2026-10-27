@@ -18,7 +18,7 @@ from ..conversation.dialogue import AVOID_PHRASES
 from ..conversation.members import BEIJING, SnapshotExpired
 from ..conversation.personality import PersonalityLLM, PersonalityState
 from ..conversation.summary import ChatSummarizer
-from ..conversation.utterance import CHAT, InterjectionGate, interjection_probe, speak as utter
+from ..conversation.utterance import CHAT, InterjectionGate, SpeakResult, interjection_probe, speak as utter
 from ..integrations.llm import LLMError
 from ..timeutil import iso_utc, parse_utc
 from .proactive import ProactiveCandidates
@@ -45,7 +45,7 @@ class HourlyScheduler:
                  evening_start_hour=18, active_min_minutes=120, active_max_minutes=180,
                  evening_min_minutes=180, evening_max_minutes=300, activity_window_minutes=180,
                  daily_limit=6, cooldown_minutes=45, stale_candidate_minutes=15,
-                 min_messages=2, min_speakers=2,
+                 min_messages=2, min_speakers=2, quiet_minutes=0,
                  context_limit=200, allowlist=(), now=None, ready=None, random_source=None,
                  run_id=None, stale_minutes=None):
         self.knowledge, self.members, self.service = knowledge, knowledge.members, service
@@ -58,6 +58,8 @@ class HourlyScheduler:
         self.stale_candidate_minutes = stale_candidate_minutes
         self.stale_minutes = stale_minutes or (lambda: self.stale_candidate_minutes)
         self.min_messages, self.min_speakers = min_messages, min_speakers
+        # 冷场兜底：>0 时只在最近 quiet_minutes 分钟内没人（含机器人）说话时才发言；0 关闭。
+        self.quiet_minutes = quiet_minutes
         self.context_limit = context_limit
         self.rooms = self.members.groups & set(allowlist) if allowlist else self.members.groups
         self.now = now or (lambda: datetime.now(timezone.utc))
@@ -213,6 +215,12 @@ class HourlyScheduler:
             if activity < self.min_messages or speakers < self.min_speakers:
                 self.candidates.update(candidate_id, "filtered", error="insufficient-activity")
                 return False
+            if self.quiet_minutes and self.members.recent_rows(
+                    room, limit=1, before_id=anchor, since=iso_utc(slot - timedelta(minutes=self.quiet_minutes)),
+                    until=iso_utc(slot), context=True, include_bot=True):
+                # 群里还在聊（或机器人刚说过）：交给事件驱动的主动发言，定时候选只在冷场时兜底。
+                self.candidates.update(candidate_id, "filtered", error="not-quiet")
+                return False
             snapshot = self.members.recent_snapshot(room, limit=self.context_limit,
                                                     before_id=anchor, context=True)
             # 按群取当前人格（含生效的人格补充）；生效版本变化时本次主动发言作废。
@@ -248,36 +256,58 @@ class HourlyScheduler:
             self.candidates.update(candidate_id, "model_called", topic=topic, message=text)
             if not self.members.snapshot_is_current(snapshot):
                 raise SnapshotExpired("主动发言上下文已失效")
-            gate = InterjectionGate(interjection_probe(self.members, room))
-
-            @contextmanager
-            def combined():
-                # 聊天快照与人格快照逐段一起核对：发送途中人格被切换（含 1→2→1 往返），后续段不再发出。
-                with self.members.delivery_guard(snapshot), self.members.personality_delivery_guard(persona):
-                    yield
-
-            guard = gate.wrap(combined)
-
-            def send(part):
-                # 每一段都过 delivery_guard（后续段并入插话检测）；发出一段就记录一段，插话丢弃时只记录已发出的部分。
-                sent = self.service.send_text(room, part, expected_session=session, delivery_guard=guard)
-                if sent:
-                    self.members.record_bot_reply(room, part)
-                return sent
-
-            try:
-                result = utter(text, tier=CHAT, byte_budget=1023, send_at=send, interjected=gate)
-            except Exception:
-                self.candidates.update(candidate_id, "unknown", topic=topic, message=text,
-                                       error="send-exception")
-                raise
-            if result.failed:
-                self.candidates.update(candidate_id, "unknown", topic=topic, message=text,
-                                       error="send-unconfirmed")
+            # 与事件驱动的主动发言共用每群预算（10 分钟配额、间隔、连续次数），同群同时只发一个。
+            budget = self.members.speak_budget
+            refused = budget.reserve(room)
+            if refused:
+                # 不记话题：没发出去的话题之后还能再说。
+                self.candidates.update(candidate_id, "filtered", error="budget-" + refused)
                 return False
-            self.candidates.update(candidate_id, "sent", topic=topic, message=text)
-            return True
+            outcome = SpeakResult()
+            try:
+                return self._deliver(room, text, topic, candidate_id, snapshot, persona, session, outcome)
+            finally:
+                budget.release(room, sent=bool(outcome.sent))
         except Exception as error:
             if self.candidates.status_of(candidate_id) != "unknown":
                 self.candidates.update(candidate_id, "failed", error=type(error).__name__)
             raise
+
+    def _deliver(self, room, text, topic, candidate_id, snapshot, persona, session, outcome):
+        gate = InterjectionGate(interjection_probe(self.members, room))
+
+        budget = self.members.speak_budget
+
+        @contextmanager
+        def combined():
+            # 聊天快照与人格快照逐段一起核对：发送途中人格被切换（含 1→2→1 往返），后续段不再发出。
+            with self.members.delivery_guard(snapshot), self.members.personality_delivery_guard(persona):
+                yield
+                # 原生发送正常返回后仍在聊天记录锁内记账（数据库锁 → 预算锁）：之后到达的群友消息才计入新一轮；
+                # 原生调用返回假值也记，是偏保守的一侧。
+                budget.mark_sent(room)
+
+        guard = gate.wrap(combined)
+
+        def send(part):
+            # 每一段都过 delivery_guard（后续段并入插话检测）；发出一段就记录一段，插话丢弃时只记录已发出的部分。
+            sent = self.service.send_text(room, part, expected_session=session, delivery_guard=guard)
+            if sent:
+                try:
+                    self.members.record_bot_reply(room, part)
+                except Exception as error:
+                    logger.warning("主动发言已发出但未能落库：room=%s error=%s", room, type(error).__name__)
+            return sent
+
+        try:
+            result = utter(text, tier=CHAT, byte_budget=1023, send_at=send, interjected=gate, result=outcome)
+        except Exception:
+            self.candidates.update(candidate_id, "unknown", topic=topic, message=text,
+                                   error="send-exception")
+            raise
+        if result.failed:
+            self.candidates.update(candidate_id, "unknown", topic=topic, message=text,
+                                   error="send-unconfirmed")
+            return False
+        self.candidates.update(candidate_id, "sent", topic=topic, message=text)
+        return True

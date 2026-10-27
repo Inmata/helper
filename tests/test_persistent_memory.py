@@ -580,7 +580,7 @@ class HourlyTests(unittest.TestCase):
     def scheduler(self, client=None, **options):
         self.now = self.now.replace(hour=2, minute=0, second=0)  # 北京10:00。
         client = client or Mock(complete_json=Mock(return_value={
-            "speak": True, "topic": "吉他练习", "text": "刚才聊到吉他，你们最近在练什么曲子？"}))
+            "speak": True, "topic": "吉他练习", "text": "刚才聊到吉他你们最近在练什么曲子？"}))
         options.setdefault("run_id", "run-one")
         return HourlyScheduler(self.kb(), self.service, client, now=lambda: self.now, **options)
 
@@ -652,7 +652,7 @@ class HourlyTests(unittest.TestCase):
         scheduler = self.scheduler()
         self.activity(scheduler)
         scheduler.model.client = Mock(complete_json=Mock(return_value={
-            "speak": True, "topic": "吉他练习", "text": "吉他又练了一会，你们下次准备弹什么？"}))
+            "speak": True, "topic": "吉他练习", "text": "吉他又练了一会你们下次准备弹什么？"}))
         self.now += timedelta(minutes=46)
         self.record("吉他又练了一会", sender=CAT)
         self.record("想换一首慢歌", sender=OTHER)

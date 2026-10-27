@@ -4,7 +4,7 @@
 
 * 明确要求详细（``DETAIL``）：按字节预算分段，段数不限，每段都带艾特，不加条间隔、不因插话丢弃；
 * 普通问答（``QA``）：单条发送，不拆；
-* 闲聊/接梗（``CHAT``）：总长 ≤40 字且能在句末标点处切成 2—3 条短句时才拆，最多 3 条；否则单条。
+* 闲聊/接梗（``CHAT``）：总长 ≤40 字且能在句末标点（只有一句时退而用逗号）处切成 2—3 条短句时才拆，最多 3 条；否则单条。
 
 不做字数硬截断：非详细档的单条正文若超出字节预算，仍用 ``split_text`` 按边界分段发完，
 这是兜底而不是常态。每一条都经调用方给的发送函数发出，调用方在发送函数里套 ``delivery_guard``，
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -95,14 +96,17 @@ def chat_parts(text):
     """闲聊拆分：总长 ≤40 且恰好 2—3 句、每句 ≤20 字时返回各句，否则返回 None。
 
     分句后去掉每句结尾的句号（群友不会在每条短消息后加句号），其他标点和字原样保留。
+    模型常用逗号把两三句连成一句：只有一句时退而在逗号处切，切出的每段同样要满足上述条件。
     """
     text = text.strip()
     if not text or len(text) > CHAT_SPLIT_MAX_CHARS:
         return None
     sentences = split_sentences(text)
+    if len(sentences) == 1:
+        sentences = [piece for piece in re.split(r"(?<=[，,])", text) if piece.strip()]
     if not 2 <= len(sentences) <= CHAT_SPLIT_MAX_PARTS:
         return None
-    parts = [sentence.rstrip("。").strip() or sentence for sentence in sentences]
+    parts = [sentence.rstrip("。，,").strip() or sentence for sentence in sentences]
     if any(len(part) > CHAT_SENTENCE_MAX_CHARS for part in parts):
         return None
     return parts

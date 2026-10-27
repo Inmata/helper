@@ -56,6 +56,13 @@ class SplitTests(unittest.TestCase):
         self.assertIsNone(chat_parts("这是一句很长的话" * 3 + "。第二句。"))
         self.assertIsNone(chat_parts("甲" * 15 + "。" + "乙" * 15 + "。" + "丙" * 15 + "。"))  # 总长 >40
 
+    def test_single_sentence_falls_back_to_comma_split(self):
+        self.assertEqual(chat_parts("行吧，那我先睡了"), ["行吧", "那我先睡了"])
+        self.assertIsNone(chat_parts("甲" * 21 + "，好"))  # 逗号段同样受每句 20 字限制
+        self.assertIsNone(chat_parts("一，二，三，四"))
+        # 已有句末标点时不再按逗号细分
+        self.assertEqual(chat_parts("好，行。睡了。"), ["好，行", "睡了"])
+
     def test_sentence_longer_than_twenty_blocks_split(self):
         self.assertIsNone(chat_parts("甲" * 21 + "。好。"))
 

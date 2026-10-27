@@ -1,5 +1,7 @@
 # Jev 中文聊天资料筛选：数据库样例实测
 
+> 已归档（2026-10-27）：评测已结束，结论仅作 RAG 后续接入参考；当前不在进行中。
+
 日期：2026-10-21。模型：固定 `jev-1.13.0`。结论：**可以继续做接入原型；0.50 的默认门槛偏宽，建议以 0.75 做下一阶段试运行，并用新样本独立验收。**
 
 20 组主样例在 0.50 下全部符合预设标签。但去掉明确排除提示后的 8 组口语补测出现 1 次误收：真实的“明早提醒我买电池”被当成可能适合引入购物旧梗，Noul 为 0.68。不能只报告主集的满分。
@@ -20,14 +22,14 @@
 
 本地证据文件（含群内资料，位于既有 Git 忽略目录）：
 
-- [主数据集：全文、来源与锁定标签](../.runtime/rag-eval/dataset.json)
-- [主集原始结果](../.runtime/rag-eval/run-2026-10-21T01-52-10-962Z/results.json)
-- [口语补测标签及全文](../.runtime/rag-eval/probe-2026-10-21T01-53-13-732Z/probe-labels.json)
-- [口语补测原始结果](../.runtime/rag-eval/probe-2026-10-21T01-53-13-732Z/results.json)
-- [12 候选批量请求](../.runtime/rag-eval/batch-2026-10-21T01-52-28-520Z/batch12.request.json)
-- [批量原始结果](../.runtime/rag-eval/batch-2026-10-21T01-52-28-520Z/results.json)
-- [机器可读统计](../.runtime/rag-eval/summary.json)
-- [复跑脚本](../tools/evaluate_jev_rag.mjs)
+- [主数据集：全文、来源与锁定标签](../../.runtime/rag-eval/dataset.json)
+- [主集原始结果](../../.runtime/rag-eval/run-2026-10-21T01-52-10-962Z/results.json)
+- [口语补测标签及全文](../../.runtime/rag-eval/probe-2026-10-21T01-53-13-732Z/probe-labels.json)
+- [口语补测原始结果](../../.runtime/rag-eval/probe-2026-10-21T01-53-13-732Z/results.json)
+- [12 候选批量请求](../../.runtime/rag-eval/batch-2026-10-21T01-52-28-520Z/batch12.request.json)
+- [批量原始结果](../../.runtime/rag-eval/batch-2026-10-21T01-52-28-520Z/results.json)
+- [机器可读统计](../../.runtime/rag-eval/summary.json)
+- [复跑脚本](../../tools/evaluate_jev_rag.mjs)
 
 每个执行目录同时保留 `.request.json` 与 `.response.txt`；请求不含 expected、标注理由、API key 或微信账号 ID。Authorization 仅在内存中构建。
 
@@ -125,8 +127,8 @@ p04 的人工边界是：当前请求需要确认/处理新提醒，旧梗不是
 
 网络经历与原始记录：
 
-1. [沙箱内首次请求](../.runtime/rag-eval/run-2026-10-21T01-51-30-014Z/results.json)失败：`fetch failed / EACCES`，未得到服务响应。
-2. [取得外部执行权限后直连](../.runtime/rag-eval/run-2026-10-21T01-51-42-107Z/01.response.txt)：服务返回 HTTP 451，正文 `Typesafe is not available in your region.`。
+1. [沙箱内首次请求](../../.runtime/rag-eval/run-2026-10-21T01-51-30-014Z/results.json)失败：`fetch failed / EACCES`，未得到服务响应。
+2. [取得外部执行权限后直连](../../.runtime/rag-eval/run-2026-10-21T01-51-42-107Z/01.response.txt)：服务返回 HTTP 451，正文 `Typesafe is not available in your region.`。
 3. 本机已有 HTTP/HTTPS 代理。使用 Node 的 `--use-env-proxy` 后全部成功，未另外配置代理或服务。
 
 共 **29 次成功 API 请求、40 次 Noul 判断**（主集 20＋补测 8＋批量 12）。成功响应 usage 合计 **23,253 input tokens**，按官方 $0.042 / 百万输入 tokens 估算约 **$0.000977**，输出 tokens 当前免费。失败请求没有 usage，不纳入此估算；这不是账户账单。[官方模型及定价](https://docs.typesafe.ai/models)
@@ -160,4 +162,4 @@ node tools/evaluate_jev_rag.mjs summary
 
 尚不能确认：Dify 能否召回该召回的片段、BGE-M3 中文召回质量、长文档分块后的效果、真实群聊比例下的 precision、群友不同的接梗偏好、正式负载下的时延、最终回答是否自然。本轮既没有腾讯文档/Dify 联调，也没有把筛选结果注入现有主模型，更没有在群里发送测试消息。
 
-下一步按 [修订计划](RAG接入计划.md) 进行实际服务接入，分开验收召回、筛选、最终回复三层；固定参数后使用未参与本次调参的新聊天样本。
+下一步按 [修订计划](../RAG接入计划.md) 进行实际服务接入，分开验收召回、筛选、最终回复三层；固定参数后使用未参与本次调参的新聊天样本。

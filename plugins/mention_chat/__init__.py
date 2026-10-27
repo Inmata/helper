@@ -5,14 +5,15 @@ import time
 from .._shared import idiom_state
 
 from wxbot_framework.conversation.dialogue import Dialogue
+from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
 from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.conversation.members import SnapshotExpired
 from wxbot_framework.messaging.mentions import strip_at_labels
 from wxbot_framework.conversation.personality import personality_text
-from wxbot_framework.conversation.summary import split_text
+from wxbot_framework.conversation.utterance import (CHAT, InterjectionGate, SpeakResult, classify_tier,
+                                                    interjection_probe, speak)
 from wxbot_framework.commands import is_control
 
-SELF_QUERY_HINTS = ("我是谁", "知道我是谁", "认识我吗", "我叫什么", "我的身份", "我是哪位")
 GAME_FEATURE = "idiom_chain"
 USED_SAMPLE = 10
 # 提问含这些词时视为明确要求详细回答，使用 detail_max_tokens 预算。
@@ -112,32 +113,33 @@ class Plugin:
         if not self._claim(key, message.received_at):
             ctx.logger.info("艾特对话跳过：相同提问仍在回复中 room=%s", message.chat_id)
             return
-        delivered = False
+        result = SpeakResult()
         try:
             snapshot = self.members.conversation_snapshot(message)
             guard = lambda: ctx.response_guard(snapshot, personality)
-            entity = ctx.knowledge.member_entity(message.chat_id, message.sender_id)
-            profile = ctx.knowledge.speaker_profile(message.chat_id, message.sender_id)
-            own = ctx.knowledge.search(message.chat_id, "", entity_id=entity["id"], limit=5, char_limit=1800)
-            if len(clean_query) <= 12 and any(hint in clean_query for hint in SELF_QUERY_HINTS):
-                relevant = []
-            else:
-                relevant = ctx.knowledge.search(message.chat_id, clean_query, limit=4, char_limit=2000)
-            people = ctx.knowledge.lookup_people(message.chat_id, clean_query)
-            knowledge = list({item["id"]: item for item in own + relevant}.values())
-            style = ctx.knowledge.style(message.chat_id, message.sender_id)
-            options = {"detail": True} if wants_detail(clean_query) else {}
+            detail = wants_detail(clean_query)
+            tools = build_default_tools(ctx.knowledge, self.members)
+            context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
+            options = {"detail": True} if detail else {"examples": context.examples}
             reply = personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(snapshot,
-                                     knowledge=knowledge, style=style, speaker_profile=profile,
-                                     people=people,
+                                     knowledge=context.knowledge, style=context.style,
+                                     speaker_profile=context.speaker_profile, people=context.people,
                                      room_game=self.game_context(game) if game else None, **options),
                                      personality.name)
             display = self.members.at_display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
             budget = 1023 - len(("@" + display + "\u2005\n").encode("utf-8"))
-            for part in split_text(reply, byte_limit=budget):
-                if not ctx.reply_at(message, part, display_name=display, delivery_guard=guard):
-                    raise RuntimeError("原生艾特发送未成功")
-            delivered = True
+            tier = classify_tier(clean_query, detail=detail)
+            # 闲聊拆分时把插话检测并入守卫：后续条在拿到守卫后、原生发送前再查一次。
+            gate = InterjectionGate(interjection_probe(self.members, message.chat_id)) if tier == CHAT else None
+            send_guard = gate.wrap(guard) if gate is not None else guard
+            speak(reply, tier=tier, byte_budget=budget, result=result,
+                  send_at=lambda part: ctx.reply_at(message, part, display_name=display, delivery_guard=send_guard),
+                  send_plain=lambda part: ctx.reply(message, part, delivery_guard=send_guard),
+                  interjected=gate)
+            if result.failed:
+                raise RuntimeError("原生艾特发送未成功")
+            if result.interrupted:
+                ctx.logger.info("闲聊拆分发送中有人插话，丢弃剩余 %d 条：room=%s", result.dropped, message.chat_id)
             ctx.logger.info("艾特对话完成：room=%s persona=%s context=%d", message.chat_id,
                             personality.name, len(snapshot.messages))
         except SnapshotExpired:
@@ -149,4 +151,5 @@ class Plugin:
             except SnapshotExpired:
                 pass
         finally:
-            self._release(key, delivered=delivered)
+            # 已发出至少一条（含守卫或异常发生在首条之后）就保留去重记录，避免排队中的同一提问重发。
+            self._release(key, delivered=bool(result.sent))

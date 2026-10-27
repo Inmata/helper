@@ -2,12 +2,15 @@
 import json
 import logging
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock, patch
 
 from plugins.mention_chat import Plugin
+from wxbot_framework.conversation import utterance
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
-from wxbot_framework.conversation.members import ConversationSnapshot
+from wxbot_framework.conversation.members import ConversationSnapshot, SnapshotExpired
+from wxbot_framework.conversation.personality import PersonalityState
 from wxbot_framework.sdk import Message
 
 ROOM = "12345678@chatroom"
@@ -162,11 +165,30 @@ class DialoguePayloadTests(unittest.TestCase):
             with self.subTest(length=length):
                 self.assertEqual(Dialogue(FixedClient(body)).reply(self.snapshot()), body)
 
-    def test_system_sets_one_soft_length_convention(self):
-        self.assertIn("50—120", SYSTEM)
-        self.assertIn("120—220", SYSTEM)
+    def test_system_sets_group_member_tone_instead_of_char_ranges(self):
+        for old in ("50—120", "120—220"):
+            self.assertNotIn(old, SYSTEM)
+        self.assertIn("像群里的一个群友那样说话", SYSTEM)
+        self.assertIn("不超过60个汉字", SYSTEM)
         self.assertIn("用户明确要求详细", SYSTEM)
         self.assertIn("内容完整优先", SYSTEM)
+        self.assertIn("不要空行分段", SYSTEM)
+
+    def test_system_lists_every_avoid_phrase_once(self):
+        from wxbot_framework.conversation.dialogue import AVOID_PHRASES
+        self.assertGreaterEqual(len(AVOID_PHRASES), 20)
+        for phrase in AVOID_PHRASES:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(SYSTEM.count(f"“{phrase}”"), 1)
+
+    def test_examples_section_is_rendered_last_and_only_when_given(self):
+        client = self.Client()
+        Dialogue(client).reply(self.snapshot(), room_game={"current": "甲"}, examples=["虚构短句一", "虚构短句二"])
+        user = client.user
+        self.assertLess(user.index("【本群接龙进度】"), user.index("【群友说话的样子】"))
+        self.assertTrue(user.endswith("- 虚构短句一\n- 虚构短句二"))
+        Dialogue(client).reply(self.snapshot())
+        self.assertNotIn("【群友说话的样子】", client.user)
 
     def test_detail_flag_is_passed_through_only_when_requested(self):
         class Recorder:
@@ -320,6 +342,187 @@ class FragmentObservationTests(unittest.TestCase):
             with self.subTest(text=text):
                 with self.assertNoLogs(self.LOGGER, "WARNING"):
                     self.assertEqual(self.reply(text), text)
+
+
+class FakeMembers:
+    """最小群成员目录：群消息序号基线为 10；``rows`` 是 recent_rows 返回的群友发言（虚构数据）。"""
+    account, groups, history_enabled = "wxid_robot", {ROOM}, True
+
+    def __init__(self):
+        self.rows = [{"id": 9, "text": "早就睡了吧", "bot_generated": 0, "is_self": 0}]
+
+    def conversation_snapshot(self, message):
+        return ConversationSnapshot(ROOM, "2026-10-16", 0, "小明", (), message.text, ())
+
+    def at_display_name(self, sender_id, chat_id):
+        return "小明"
+
+    def latest_id(self, room):
+        return 10
+
+    def recent_rows(self, room, **options):
+        return list(self.rows)
+
+    def interject(self):
+        self.rows.append({"id": 11, "text": "有人插话", "bot_generated": 0, "is_self": 0})
+
+
+class FakeCtx:
+    """记录每次发送走的是 reply_at 还是 reply；发送函数像真实发送层一样在 delivery_guard 里完成。"""
+
+    def __init__(self, members, reply):
+        self.logger = logging.getLogger("MentionTests")
+        self.members, self.reply_text = members, reply
+        self.sent = []  # (方法名, 正文)
+        self.before_guard = None  # 守卫之前的钩子，模拟发送层打字节奏等待期间进来的新消息
+        self.guard_calls, self.expire_at_call, self.fail_at_send = 0, None, None
+        self.completions = 0
+        self.knowledge = MagicMock()
+        self.knowledge.member_entity.return_value = {"id": 1}
+        self.knowledge.speaker_profile.return_value = None
+        self.knowledge.search.return_value = []
+        self.knowledge.lookup_people.return_value = []
+        self.knowledge.style.return_value = None
+        ctx = self
+
+        class Client:
+            def complete_text(self, system, user, **options):
+                ctx.completions += 1
+                return ctx.reply_text
+
+        self.client = Client()
+
+    def personality(self, message):
+        return PersonalityState(ROOM)
+
+    def llm_for(self, message, *, personality=None):
+        return self.client
+
+    @contextmanager
+    def response_guard(self, snapshot, personality):
+        self.guard_calls += 1
+        if self.expire_at_call is not None and self.guard_calls >= self.expire_at_call:
+            raise SnapshotExpired("记录已清空")
+        yield
+
+    def _send(self, method, text, delivery_guard):
+        if self.before_guard is not None:
+            self.before_guard(len(self.sent))
+        with delivery_guard():
+            if self.fail_at_send is not None and len(self.sent) + 1 >= self.fail_at_send:
+                return False
+            self.sent.append((method, text))
+            return True
+
+    def reply_at(self, message, text, *, display_name=None, delivery_guard=None):
+        return self._send("reply_at", text, delivery_guard)
+
+    def reply(self, message, text, *, delivery_guard=None):
+        return self._send("reply", text, delivery_guard)
+
+
+def mention(text, received_at=1.0):
+    return Message("@机器人 " + text, ROOM, sender_id="wxid_player", is_group=True, received_at=received_at,
+                   data={"is_at_self": True, "at_members": ("wxid_robot",)})
+
+
+class MentionDeliveryTests(unittest.TestCase):
+    """艾特回复端到端：分档、拆分、插话丢弃、守卫和去重（不连网、不调用大模型）。"""
+
+    def setUp(self):
+        sleeper = patch.object(utterance.time, "sleep")
+        self.sleep = sleeper.start()
+        self.addCleanup(sleeper.stop)
+        self.members = FakeMembers()
+
+    def build(self, reply):
+        ctx = FakeCtx(self.members, reply)
+        plugin = Plugin()
+        plugin.members, plugin.room_state = self.members, None
+        return plugin, ctx
+
+    def run_plugin(self, query, reply):
+        plugin, ctx = self.build(reply)
+        message = mention(query)
+        plugin.on_message(message, ctx)
+        return plugin, ctx, message
+
+    def test_chat_split_uses_reply_at_first_then_plain_reply(self):
+        _, ctx, _ = self.run_plugin("晚安啦", "行吧。那我先睡了。")
+        self.assertEqual(ctx.sent, [("reply_at", "行吧"), ("reply", "那我先睡了")])
+        self.assertEqual(ctx.guard_calls, 2)  # 每条单独过守卫
+        self.assertEqual(self.sleep.call_count, 1)
+        self.assertTrue(0.9 <= self.sleep.call_args.args[0] <= 3.0)  # 真实时钟只流逝了微秒级
+
+    def test_interjection_during_gap_drops_the_rest_without_error(self):
+        self.sleep.side_effect = lambda seconds: self.members.interject()
+        _, ctx, _ = self.run_plugin("晚安啦", "哈哈！真的假的？我不信。")
+        # 条间隔结束后的预检查发现插话，第二条的发送函数根本没有被调用。
+        self.assertEqual(ctx.sent, [("reply_at", "哈哈！")])
+        self.assertEqual(ctx.guard_calls, 1)
+
+    def test_interjection_after_precheck_is_caught_inside_the_guard(self):
+        plugin, ctx = self.build("哈哈！真的假的？我不信。")
+        # 预检查之后、拿到守卫之前（发送层打字节奏等待）进来新消息：守卫内的再次检查拒发，不报错。
+        ctx.before_guard = lambda sent: self.members.interject() if sent == 1 else None
+        plugin.on_message(mention("晚安啦"), ctx)
+        self.assertEqual(ctx.sent, [("reply_at", "哈哈！")])
+        self.assertEqual(ctx.guard_calls, 2)
+
+    def test_qa_is_not_split_and_sends_one_reply_at(self):
+        _, ctx, _ = self.run_plugin("今天几点开会", "可以。先点设置。再点开启。")
+        self.assertEqual(ctx.sent, [("reply_at", "可以。先点设置。再点开启。")])
+        self.sleep.assert_not_called()
+
+    def test_request_without_question_word_is_not_split(self):
+        _, ctx, _ = self.run_plugin("解释一下 TCP", "行吧。那我先睡了。")
+        self.assertEqual(ctx.sent, [("reply_at", "行吧。那我先睡了。")])
+
+    def test_detail_sends_every_segment_with_reply_at(self):
+        reply = "\n".join(f"第{index}段" + "字" * 120 for index in range(8))
+        _, ctx, _ = self.run_plugin("详细说说晚安", reply)
+        self.assertGreater(len(ctx.sent), 1)
+        self.assertTrue(all(method == "reply_at" for method, _ in ctx.sent))
+        self.assertEqual("".join(text for _, text in ctx.sent).replace("\n", ""), reply.replace("\n", ""))
+        self.sleep.assert_not_called()
+
+    def test_oversized_qa_reply_is_segmented_not_truncated(self):
+        reply = "中" * 700 + "[END]"
+        _, ctx, _ = self.run_plugin("今天几点开会", reply)
+        self.assertGreater(len(ctx.sent), 1)
+        self.assertEqual("".join(text for _, text in ctx.sent), reply)
+
+    def test_partial_send_then_guard_expiry_keeps_dedup_record(self):
+        plugin, ctx = self.build("行吧。那我先睡了。")
+        ctx.expire_at_call = 2
+        message = mention("晚安啦")
+        plugin.on_message(message, ctx)
+        self.assertEqual(ctx.sent, [("reply_at", "行吧")])
+        # 同一提问再来一次（到达时刻不晚于首次结束）不再生成，也不重发。
+        plugin.on_message(message, ctx)
+        self.assertEqual(ctx.completions, 1)
+        self.assertEqual(ctx.sent, [("reply_at", "行吧")])
+
+    def test_partial_send_then_failure_keeps_dedup_record(self):
+        plugin, ctx = self.build("行吧。那我先睡了。")
+        ctx.fail_at_send = 2
+        message = mention("晚安啦")
+        with self.assertRaises(RuntimeError):
+            plugin.on_message(message, ctx)
+        self.assertEqual(ctx.sent, [("reply_at", "行吧")])
+        plugin.on_message(message, ctx)
+        self.assertEqual(ctx.completions, 1)
+
+    def test_nothing_sent_releases_dedup_so_user_can_retry(self):
+        plugin, ctx = self.build("行吧。那我先睡了。")
+        ctx.expire_at_call = 1
+        message = mention("晚安啦")
+        plugin.on_message(message, ctx)
+        self.assertEqual(ctx.sent, [])
+        ctx.expire_at_call = None
+        plugin.on_message(message, ctx)
+        self.assertEqual(ctx.completions, 2)
+        self.assertEqual(ctx.sent[0], ("reply_at", "行吧"))
 
 
 if __name__ == "__main__":

@@ -60,11 +60,12 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertNotIn("每次回复控制在 20", system)
 
     def test_length_guidance_is_defined_once_and_deferred_by_personality(self):
-        self.assertIn("120—220", CHAT_SYSTEM)
+        for old in ("120—220", "50—120"):
+            self.assertNotIn(old, CHAT_SYSTEM)
+            self.assertNotIn(old, FIXED_PROMPT)
         self.assertIn("用户明确要求详细", CHAT_SYSTEM)
         self.assertIn("分多段", CHAT_SYSTEM)
         self.assertIn("篇幅按功能要求决定", FIXED_PROMPT)
-        self.assertNotIn("120—220", FIXED_PROMPT)
 
     def test_sensitive_event_and_repeated_joke_rules_are_defined_once(self):
         for phrase in ("无法确定是玩笑时按真实处理", "确认真实后后续回复也不再拿它玩梗",

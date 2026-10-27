@@ -3,6 +3,8 @@ title: 艾特回复
 code:
   - plugins/mention_chat/__init__.py
   - wxbot_framework/conversation/dialogue.py
+  - wxbot_framework/conversation/utterance.py
+  - wxbot_framework/conversation/context_tools.py
   - wxbot_framework/integrations/llm.py
 related:
   - wxbot_framework/conversation/personality.py
@@ -11,6 +13,10 @@ related:
   - tests/test_personality.py
   - tests/test_llm.py
   - tests/test_mention_dedupe.py
+  - tests/test_utterance.py
+  - tests/test_context_tools.py
+  - tools/humanlike_metrics.py
+  - tools/replay_mention_length.py
   - llm_config.example.json
 ---
 
@@ -27,16 +33,19 @@ related:
 |---|---|---|
 | 1 | 只响应真正的艾特：文本消息、已配置群、`is_at_self` 为真且 `at_members` 含本账号；机器人自身消息与控制命令不响应。 | — |
 | 2 | 接龙进行中时，去掉艾特标签后为四字且首字等于当前接字的消息交给接龙插件，本插件不回复。 | — |
-| 3 | 篇幅由 `Dialogue` 的 SYSTEM 提示词约束：闲聊约 50—120 个汉字，复杂问题未要求详细时约 120—220；明确要求详细时遵从，并使用聊天任务单独配置的超时与输出预算。提问对格式有明确限制（只答一个词、一句或一个选项）时优先满足格式。这是软目标，不做字符裁剪。 | — |
-| 4 | 回复按每条 1023 UTF-8 字节减去实际艾特前缀（`@显示名` + ` \n`）的预算用 `split_text` 分段，经 `ctx.reply_at` 顺序发送，不限段数。 | 某段发送失败：抛 `RuntimeError`，停止后续段，不重发已发送段。 |
+| 3 | 非详细提问按闲聊/问答分档：闲聊总长 ≤40 字时可拆成至多 3 条短句发送，问答正常单条发送、不拆成短句；不做字数硬截断；回放 50 条非详细提问时长度中位数 ≤30 字、p90 ≤70 字。SYSTEM 要求像群友一样说话，附本群真实短句示例与统计得出的套路禁用项；明确要求详细时遵从，并使用聊天任务单独配置的超时与输出预算。提问对格式有明确限制时优先满足格式。 | — |
+| 4 | 明确要求详细的回答按 1023 字节减去艾特前缀的预算分段；非详细回答（问答或闲聊）只在单条超出该预算时才按同一预算分段发完，作为不截断的兜底；闲聊拆分最多 3 条、条间隔 1–3 秒，拆分发送期间群内出现他人新消息时丢弃剩余条目。分档、拆分与发送统一经 `conversation/utterance.py`，每条单独经 `delivery_guard`；首条用 `ctx.reply_at`，闲聊后续条普通发送。条间隔指上一条发送函数返回到下一条调用之间，发送层打字节奏另计；插话在条间隔后与守卫内各查一次，被拒的条目计为丢弃而非失败；检测窗口有限：守卫之后发送层打字等待期间的新消息要到下一条发送前才能发现，已是最后一条时不再检测；非文本消息与控制指令不算插话。提问含疑问词或请求类词（解释、介绍、推荐等）判为问答。 | 某段发送失败：抛 `RuntimeError`，停止后续段，不重发已发送段。 |
 | 5 | 模型返回 `finish_reason` 为 `length` 或 `content_filter` 时抛 `LLMError`，不发送残文、不自动重试或续写；未知或缺失的结束原因照常使用。 | `LLMError`：guard 仍有效时回复“暂时无法回复：{原因}”。 |
 | 6 | 记录或人格状态在生成期间变更时取消本次回复。 | `SnapshotExpired`：只记日志，不发送。 |
-| 7 | 同一发言者在本群对同一提问的回复尚在生成时，再次艾特的相同提问不另行生成。 | — |
+| 7 | 同一发言者在本群对同一提问的回复尚在生成时，再次艾特的相同提问不另行生成；已发出至少一条后中途失败或取消时，在首次回复结束前到达的同一提问也不再重发，结束后新到达的同一提问照常回复。 | — |
 | 8 | SYSTEM 提示词声明能力边界（只聊天回复，不修改档案、不设提醒、不自称其他模型）、输入分区来源（只有【当前提问】是用户发言）、背景资料不等于当天事件。 | — |
 
 ## 验收
 
-- `tests/test_mention_chat.py`：接龙让行、长回复不截断、篇幅软约定。
+- `tests/test_mention_chat.py`：接龙让行、长回复不截断、篇幅约定。
+- `tests/test_utterance.py`：分档判定；闲聊至多 3 条、条间隔 1–3 秒、插话丢弃剩余；问答不拆成短句，超预算时按预算分段不截断；详细档按字节预算分段且每段带艾特；发送失败停止、不重发。
+- `tests/test_context_tools.py`：上下文工具登记名称/说明/参数，预取顺序、条数与去重与原内联逻辑一致。
+- `tools/replay_mention_length.py`：回放 50 条非详细提问的长度中位数、p90、空行分段占比与套路短语命中率。
 - `tests/test_personality.py`：篇幅提示只定义一次；分段字节预算、长显示名、中途发送失败或上下文失效停止后续段。
 - `tests/test_llm.py`：`content_filter` 残文报错不重试，其他结束原因照常返回；聊天任务的超时与 `max_tokens` 按配置传递，未配置时沿用全局值。
 - `tests/test_mention_dedupe.py`：同一提问生成中再次艾特不另行生成。

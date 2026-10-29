@@ -56,10 +56,17 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(action.args["probability"], 0.7)
 
     def test_streak_raises_threshold(self):
-        jev = fake_jev(reply_called=0.65, silent_irrelevant=0.35)
+        jev = fake_jev(reply_called=0.55, silent_irrelevant=0.45)
         planner = JevSpeakPlanner(jev)
         self.assertEqual(planner.decide(context(streak=0)).type, REPLY)
         self.assertEqual(planner.decide(context(streak=1)).type, WAIT)
+
+    def test_default_threshold_matches_measured_choice(self):
+        # 阈值 0.5：评测里 0.5–0.6 的判断多数适合插话；0.6 时几乎不主动说话。
+        self.assertEqual(JevSpeakPlanner(fake_jev(reply_banter=0.52, silent_irrelevant=0.48)).decide(context()).type,
+                         REPLY)
+        self.assertEqual(JevSpeakPlanner(fake_jev(reply_banter=0.42, silent_irrelevant=0.58)).decide(context()).type,
+                         WAIT)
 
     def test_low_probability_skips(self):
         action = JevSpeakPlanner(fake_jev(reply_called=0.1, silent_irrelevant=0.9)).decide(context())
@@ -172,6 +179,14 @@ class GenerateTests(unittest.TestCase):
     def test_returns_text_when_speaking(self):
         self.assertEqual(generate_proactive(self.model({"speak": True, "text": " 我在呢 "}), [(1, "P1", "在吗")]),
                          "我在呢")
+
+    def test_retry_still_similar_gives_up_instead_of_repeating(self):
+        model = MagicMock()
+        model.complete_json.side_effect = [{"speak": True, "text": "志远你今天又来裸奔了"},
+                                           {"speak": True, "text": "志远你今天又来裸奔了"}]
+        self.assertEqual(generate_proactive(model, [(1, "P1", "在吗")],
+                                            recent_bot=("志远你今天又来裸奔了",)), "")
+        self.assertEqual(model.complete_json.call_count, 2)
 
     def test_declines_and_rejects_bad_output(self):
         for result in ({"speak": False, "text": "不说"}, {"speak": True, "text": ""}, {"speak": True, "text": "@张三 你好"},
@@ -299,7 +314,8 @@ class PluginTests(unittest.TestCase):
         # _due 已取出待判断项；艾特时队列里没有这一项，仍要作废这一轮。
         self.plugin.on_message(make_message("一"), self.ctx)
         self.clock.value += 5
-        [(room, message, version)] = self.plugin._due()
+        [(room, message, version, recheck)] = self.plugin._due()
+        self.assertFalse(recheck)
 
         def mention(*args, **kwargs):
             self.plugin.on_message(make_message("@小助手 你好", is_at_self=True), self.ctx)
@@ -437,7 +453,7 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(self.plugin._due(), [])
         self.clock.value += 1.5
         due = self.plugin._due()
-        self.assertEqual([(room, message.text) for room, message, _ in due], [(ROOM, "二")])
+        self.assertEqual([(room, message.text) for room, message, _, _ in due], [(ROOM, "二")])
         for _ in range(5):
             self.plugin.on_message(make_message("刷"), self.ctx)
             self.clock.value += 2
@@ -450,6 +466,51 @@ class PluginTests(unittest.TestCase):
         self.plugin.on_message(make_message("我说的", bot_generated=True), self.ctx)
         self.clock.value += 10
         self.assertEqual(self.plugin._due(), [])
+
+    def test_wait_schedules_one_recheck_then_gives_up(self):
+        self.plugin.options = read_options({"start_hour": 0, "end_hour": 24, "wait_recheck_seconds": 20})
+        self.plugin.planner = JevSpeakPlanner(fake_jev(reply_called=0.45, silent_irrelevant=0.55))
+        self.assertFalse(self.consider())
+        self.ctx.reply.assert_not_called()
+        self.assertEqual(self.plugin._due(), [])  # 复判时刻还没到
+        self.clock.value += 21
+        [(room, message, version, recheck)] = self.plugin._due()
+        self.assertTrue(recheck)
+        self.plugin.planner.jev.choice.reset_mock()
+        self.assertFalse(self.plugin.consider(room, message, self.ctx, version=version, recheck=True))
+        self.assertEqual(self.plugin.planner.jev.choice.call_count, 1)  # 复判又得 WAIT：不再排下一轮
+        self.clock.value += 60
+        self.assertEqual(self.plugin._due(), [])
+
+    def test_new_message_cancels_pending_recheck(self):
+        self.plugin.options = read_options({"start_hour": 0, "end_hour": 24, "wait_recheck_seconds": 20})
+        self.plugin.planner = JevSpeakPlanner(fake_jev(reply_called=0.45, silent_irrelevant=0.55))
+        self.assertFalse(self.consider())
+        self.plugin.on_message(make_message("我又说一句"), self.ctx)
+        self.clock.value += 21
+        due = self.plugin._due()
+        self.assertEqual([(message.text, recheck) for _, message, _, recheck in due], [("我又说一句", False)])
+
+    def test_recheck_does_not_send_when_budget_refuses(self):
+        self.plugin.options = read_options({"start_hour": 0, "end_hour": 24, "wait_recheck_seconds": 20})
+        self.plugin.planner = JevSpeakPlanner(fake_jev(reply_called=0.45, silent_irrelevant=0.55))
+        self.assertFalse(self.consider())
+        self.plugin.budget.record(ROOM)  # 别的主动发言刚发过，间隔未满
+        self.clock.value += 21
+        [(room, message, version, _)] = self.plugin._due()
+        self.plugin.planner.jev.choice.reset_mock()
+        self.assertFalse(self.plugin.consider(room, message, self.ctx, version=version, recheck=True))
+        self.plugin.planner.jev.choice.assert_not_called()
+
+    def test_defaults_lower_threshold_and_open_the_whole_day(self):
+        options = read_options({})
+        self.assertEqual((options["threshold_percent"], options["start_hour"], options["end_hour"]), (50, 0, 24))
+        self.assertEqual(options["wait_recheck_seconds"], 20)
+
+    def test_recheck_seconds_is_validated(self):
+        for value in (4, 121, "20"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                read_options({"wait_recheck_seconds": value})
 
     def test_disabled_by_default_starts_no_thread(self):
         plugin, ctx = Plugin(), MagicMock(config={})

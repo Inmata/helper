@@ -48,16 +48,20 @@ static TestConfig receive_config{};
 static bool receive_queue_mode = false;
 
 // 只复制文件传输助手消息；Hook 内不做磁盘读写或调用 Python。
+// 扩展接收把正文缓冲扩到 8KB：引用消息的 XML 常常超过 1KB，装不下就解析不出来。
 struct ReceivedMessage {
     uint32_t size, present, type, thread_id, dropped, reserved;
     uint64_t sequence;
-    char sender[128], receiver[128], text[1024];
+    char sender[128], receiver[128];
 #ifdef WXBOT_EXTENDED_RECEIVE
+    char text[8192];
     char mention_source[4096];
+#else
+    char text[1024];
 #endif
 };
 #ifdef WXBOT_EXTENDED_RECEIVE
-static_assert(sizeof(ReceivedMessage) == 5408, "Unexpected text receive V2 ABI");
+static_assert(sizeof(ReceivedMessage) == 12576, "Unexpected text receive V3 ABI");
 #else
 static_assert(sizeof(ReceivedMessage) == 1312, "Unexpected receive ABI");
 #endif
@@ -66,11 +70,12 @@ static ReceivedMessage received_messages[64]{};
 static uint32_t receive_head = 0, receive_count = 0, receive_dropped = 0;
 static uint64_t receive_sequence = 0;
 
-static void enqueue_received(const char* sender, const char* receiver, const char* text, const char* source = nullptr) {
+static void enqueue_received(const char* sender, const char* receiver, const char* text, const char* source = nullptr,
+                             uint32_t type = 1) {
     ReceivedMessage message{};
     message.size = sizeof(message);
     message.present = 1;
-    message.type = 1;
+    message.type = type;
     message.thread_id = GetCurrentThreadId();
     std::memcpy(message.sender, sender, std::strlen(sender) + 1);
     std::memcpy(message.receiver, receiver, std::strlen(receiver) + 1);

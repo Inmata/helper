@@ -17,7 +17,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from .dialogue import AVOID_PHRASES
+from .dialogue import AVOID_PHRASES, AVOID_REPEAT
+from .repetition import too_similar
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ PERSONA_SUMMARY = "熟人损友：二十多岁、口语自然、懂群梗、能�
 # 提到机器人但没有艾特：英文 ai/bot 要求前后不是字母，避免 “said”“robot” 之类误中。
 MENTION_RE = re.compile(r"(?<![a-z])(ai|bot)(?![a-z])|机器人|人工智能", re.I)
 
-# 问法与选项沿用 tools/evaluate_proactive_jev.py 的 choice_reasons 变体（holdout 误发言 4.4%、召回 70%）。
+# 问法与选项沿用 tools/evaluate_proactive_jev.py 的 choice_reasons 变体（阈值 0.5：holdout 误发言 6.7%、召回 70%）。
 JEV_INSTRUCTIONS = ("群里的机器人是一个群友，此刻没人艾特它。看“刚刚这条”和前文，选出此刻最贴切的一项。"
                     "真人群聊里大约 87% 的时刻都应沉默，拿不准时选沉默类选项。")
 JEV_CRITERIA = MappingProxyType({
@@ -134,10 +135,10 @@ class JevSpeakPlanner(Planner):
     """用 Jev choice 题判断主动发言：reply 概率 = 各 reply_* 选项之和。
 
     阈值 = ``threshold + streak_step * streak``；达到阈值返回 reply，差不到 ``wait_margin`` 返回 wait，
-    其余 skip。Jev 超时、失败或格式错误一律 skip，不重试。
+    其余 skip。Jev 超时、失败或格式错误一律 skip，不重试。wait 最后由调用方决定要不要过一会儿复判。
     """
 
-    def __init__(self, jev, *, threshold=0.6, streak_step=0.1, wait_margin=0.2):
+    def __init__(self, jev, *, threshold=0.5, streak_step=0.1, wait_margin=0.2):
         self.jev, self.threshold, self.streak_step, self.wait_margin = jev, threshold, streak_step, wait_margin
 
     def decide(self, context):
@@ -274,17 +275,34 @@ PROACTIVE_SYSTEM = """群里没人艾特你，但现在适合你像群友一样�
 PROACTIVE_MAX_CHARS = 60
 
 
-def generate_proactive(model, lines, *, examples=(), max_tokens=512):
+def generate_proactive(model, lines, *, examples=(), recent_bot=(), local_time="", max_tokens=512):
     """生成主动发言正文；不该说、为空或格式不合时返回空串（调用方视为 skip）。
 
     model 为带人格的模型（``PersonalityLLM``），它抛出的 ``LLMError`` / 人格过期原样传播。
+    ``recent_bot`` 为机器人最近几条发言：新生成的一句与其中某条太像时，提示换角度重说一次，
+    仍然相近就放弃这次发言（重复一句不如不说）。
     """
     payload = {"recent": [{"seconds_ago": seconds, "who": who, "text": text} for seconds, who, text in lines],
                "examples": list(examples)}
-    user = "【最近聊天】（从旧到新，who=机器人 的是你自己）\n" + json.dumps(payload["recent"], ensure_ascii=False)
+    user = ""
+    if local_time:
+        user += f"【当前时间】{local_time}\n"
+    user += "【最近聊天】（从旧到新，who=机器人 的是你自己）\n" + json.dumps(payload["recent"], ensure_ascii=False)
     if payload["examples"]:
         user += "\n【群友说话的样子】\n" + json.dumps(payload["examples"], ensure_ascii=False)
-    result = model.complete_json(PROACTIVE_SYSTEM, user, max_tokens=max_tokens)
+    text = _proactive_once(model, user, max_tokens=max_tokens)
+    if not text:
+        return ""
+    repeated = too_similar(text, recent_bot)
+    if repeated is None:
+        return text
+    retried = _proactive_once(model, user, max_tokens=max_tokens,
+                              system=PROACTIVE_SYSTEM + "\n" + AVOID_REPEAT.format(text=str(repeated)[:40]))
+    return retried if retried and too_similar(retried, recent_bot) is None else ""
+
+
+def _proactive_once(model, user, *, max_tokens, system=None):
+    result = model.complete_json(system or PROACTIVE_SYSTEM, user, max_tokens=max_tokens)
     if not isinstance(result, dict) or result.get("speak") is not True or not isinstance(result.get("text"), str):
         return ""
     text = result["text"].strip()

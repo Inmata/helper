@@ -6,14 +6,36 @@ import time
 import ctypes as c
 from collections import deque
 
-from filehelper_service import NativeFileHelperService, ReceivedTextMessage
-from wxbot_framework.messaging.mentions import parse_at_members
+from filehelper_service import NativeFileHelperService, ReceivedTextMessage, ReceivedTextMessageV2
+from wxbot_framework.messaging.mentions import parse_at_members, parse_quote
 from run_selftest import TEXT_DLL, K, check, modules, wechat_candidates, run
 from wxbot_framework.messaging.text import TextRouter, validate_target, validate_mentions
 from wxbot_framework.account import read_current_account, read_current_profile, select_account_process, validate_account
 from wxbot_framework.contacts import read_chatroom_members, read_contact_name
 
 logger = logging.getLogger("NativeText")
+
+# 已编译的桥接可能是旧协议：V2 正文只有 1KB、不收引用消息。按实际导出选择接收约定，
+# 避免新代码直接对着旧 DLL 启动失败；V3 桥接重新编译后自动生效。
+V3_EXPORT = b"WxPollTextMessageV3"
+V2_EXPORT = b"WxPollTextMessageV2"
+
+
+def bridge_exports():
+    import pefile
+    with pefile.PE(str(TEXT_DLL)) as pe:
+        return {item.name for item in pe.DIRECTORY_ENTRY_EXPORT.symbols}
+
+
+def text_message_binding(exports=None):
+    """返回 (轮询导出名, 接收结构)。有 V3 用 8KB 正文，否则用旧 V2 的 1KB 正文。"""
+    try:
+        exports = exports if exports is not None else bridge_exports()
+    except Exception:  # 读不到 PE 时按最保守的旧协议走，启动阶段另有模块检查兜底
+        return V2_EXPORT, ReceivedTextMessageV2
+    if V3_EXPORT in exports:
+        return V3_EXPORT, ReceivedTextMessage
+    return V2_EXPORT, ReceivedTextMessageV2
 
 
 def run_text(mode, **options):
@@ -50,12 +72,16 @@ def find_account_process(account=None):
 
 class NativeTextService(NativeFileHelperService):
     _dll = TEXT_DLL
-    _poll_export = b"WxPollTextMessageV2"
-    _message_type = ReceivedTextMessage
+    _poll_export = V2_EXPORT
+    _message_type = ReceivedTextMessageV2
     _run = staticmethod(run_text)
 
     def __init__(self, *, account=None, **options):
         super().__init__(**options)
+        # 启动前按已编译 DLL 的实际导出选定接收协议；V3 未编译时退回 V2，引用消息暂时收不到。
+        self._poll_export, self._message_type = text_message_binding()
+        if self._poll_export != V3_EXPORT:
+            logger.info("桥接为 V2 协议：正文上限 1KB，引用消息（应用消息）暂不接收；重编桥接后自动启用 V3")
         self.preferred_account = validate_account(account) if account is not None else None
         self.router = TextRouter(include_self_groups=True)
         self.chats = {}
@@ -129,16 +155,26 @@ class NativeTextService(NativeFileHelperService):
         return members, names
 
     def _map_message(self, message):
-        if message.type != 1:
+        # 1 是文本；49 是应用消息，只有引用（refermsg）才当文本处理，其余卡片丢弃。
+        if message.type not in (1, 49):
             return None
+        raw = message.text.decode("utf-8")
+        quote = None
+        if message.type == 49:
+            quote = parse_quote(raw)
+            if quote is None:
+                return None
         previous = self.self_wxid
         previous_unparsed = self.router.unparsed_groups
-        data = self.router.convert(message.sender.decode("utf-8"), message.receiver.decode("utf-8"),
-                                   message.text.decode("utf-8"), sequence=message.sequence,
-                                   thread_id=message.thread_id)
+        data = self.router.convert(message.sender.decode("utf-8"), message.receiver.decode("utf-8"), raw,
+                                   sequence=message.sequence, thread_id=message.thread_id)
         if self.self_wxid and not previous:
             logger.info("当前账号已识别；好友和群聊文本已就绪")
         if data:
+            if quote is not None:
+                # 回复正文在被引用卡片里，群友真正说的话是 title；被引用的原文单独带给模型。
+                data["quote"] = {key: quote[key] for key in ("name", "text", "chatusr", "fromusr")}
+                data["msg"] = data["content"] = quote["title"]
             name = self._sender_wechat_name(data["sender_id"])
             if name:
                 data["sender_wechat_name"] = name
@@ -155,6 +191,10 @@ class NativeTextService(NativeFileHelperService):
             data["is_at_self"] = bool(data["room_wxid"] and self.self_wxid in data["at_members"])
             if data["at_members"]:
                 self.mention_messages += 1
+            if quote is not None:
+                logger.info("引用消息：room=%s sender=%s ref_type=%s name=%s is_at_self=%s at=%s raw=%s",
+                            data["chat_id"], data["sender_id"], quote["ref_type"], quote["name"],
+                            data["is_at_self"], data["at_members"], raw[:600])
             if data["is_self"] and any(chat == data["chat_id"] and text == data["msg"] and
                                        time.monotonic() - sent_at < 120
                                        for chat, text, sent_at in tuple(self._sent_texts)):

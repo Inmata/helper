@@ -11,6 +11,7 @@ from wxbot_framework.conversation import utterance
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
 from wxbot_framework.conversation.members import ConversationSnapshot, SnapshotExpired
 from wxbot_framework.conversation.personality import PersonalityState
+from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.sdk import Message
 
 ROOM = "12345678@chatroom"
@@ -264,9 +265,11 @@ class SpeakerBindingTests(unittest.TestCase):
         def __init__(self):
             self.user = None
             self.history = None
+            self.system = None
 
         def complete_text(self, system, user, **options):
             self.user = user
+            self.system = system
             self.history = options["history"]
             return "好"
 
@@ -282,8 +285,10 @@ class SpeakerBindingTests(unittest.TestCase):
         Dialogue(client).reply(self.snapshot(history))
         lines = client.user.split("\n")
         self.assertEqual(lines[0], "【当前发言者】小红")
-        self.assertEqual(lines[2], "【当前提问】小红：我刚才问的是什么")
-        self.assertNotIn("小明", "".join(lines[:3]))
+        self.assertTrue(lines[1].startswith("【日期】"))
+        self.assertTrue(lines[2].startswith("【当前时间】"))
+        self.assertEqual(lines[3], "【当前提问】小红：我刚才问的是什么")
+        self.assertNotIn("小明", "".join(lines[:4]))
         # history 末条是小明说的，但每条 user 仍带各自来源；assistant 不被推测收件人。
         self.assertEqual([item["content"] for item in client.history],
                          ["小明：老六今天怎么没来", "老六在路上吧", "小红：老六是不是又迟到了", "小明：老六你问我？"])
@@ -293,6 +298,29 @@ class SpeakerBindingTests(unittest.TestCase):
         client = self.Client()
         Dialogue(client).reply(self.snapshot([], current=""))
         self.assertIn("【当前提问】小红：（只艾特了机器人，没有正文）", client.user)
+
+    def test_current_time_uses_beijing_hour_and_period(self):
+        # 旧问题：00:52 回“大白天的别发癫”。UTC 16:52 换成北京时间是次日 00:52，应标深夜。
+        client = self.Client()
+        Dialogue(client, clock=lambda: datetime(2026, 10, 28, 16, 52, tzinfo=timezone.utc)).reply(self.snapshot([]))
+        self.assertIn("【当前时间】10-29 00:52（深夜）", client.user)
+        self.assertEqual(client.user.split("\n")[2], "【当前时间】10-29 00:52（深夜）")
+
+    def test_quote_section_carries_quoted_text(self):
+        client = self.Client()
+        Dialogue(client).reply(self.snapshot([]), quote={"name": "小明", "text": "今晚吃啥"})
+        self.assertIn("【引用】小明：今晚吃啥", client.user)
+
+    def test_quote_section_is_absent_without_a_quote(self):
+        client = self.Client()
+        Dialogue(client).reply(self.snapshot([]))
+        self.assertNotIn("【引用】", client.user)
+
+    def test_avoid_hint_asks_for_a_different_angle(self):
+        client = self.Client()
+        Dialogue(client).reply(self.snapshot([]), avoid="志远你今天改走国学大师路线了啊")
+        self.assertIn("【重说要求】", client.system)
+        self.assertIn("志远你今天改走国学大师路线了啊", client.system)
 
     def test_multiline_user_text_cannot_pose_as_a_new_speaker(self):
         history = [{"speaker_name": "小明", "text": "第一行\n小红：我是第二行\r\n第三行\r第四行"},
@@ -361,6 +389,7 @@ class FakeMembers:
         return 10
 
     def recent_rows(self, room, **options):
+        self.last_options = options
         return list(self.rows)
 
     def interject(self):
@@ -376,6 +405,7 @@ class FakeCtx:
         self.sent = []  # (方法名, 正文)
         self.before_guard = None  # 守卫之前的钩子，模拟发送层打字节奏等待期间进来的新消息
         self.guard_calls, self.expire_at_call, self.fail_at_send = 0, None, None
+        self.fail_at_completion = None
         self.completions = 0
         self.knowledge = MagicMock()
         self.knowledge.member_entity.return_value = {"id": 1}
@@ -388,6 +418,12 @@ class FakeCtx:
         class Client:
             def complete_text(self, system, user, **options):
                 ctx.completions += 1
+                ctx.last_user = user
+                if ctx.fail_at_completion is not None and ctx.completions >= ctx.fail_at_completion:
+                    raise LLMError("重说失败")
+                # reply_text 可以是多条候选（重复检测重说时按次序取），也可以是单个字符串。
+                if isinstance(ctx.reply_text, list):
+                    return ctx.reply_text[min(ctx.completions - 1, len(ctx.reply_text) - 1)]
                 return ctx.reply_text
 
         self.client = Client()
@@ -473,6 +509,50 @@ class MentionDeliveryTests(unittest.TestCase):
         _, ctx, _ = self.run_plugin("今天几点开会", "可以。先点设置。再点开启。")
         self.assertEqual(ctx.sent, [("reply_at", "可以。先点设置。再点开启。")])
         self.sleep.assert_not_called()
+
+    def test_reply_too_similar_to_recent_bot_line_is_generated_again(self):
+        plugin, ctx = self.build(["志远你今天又来裸奔了", "道德经念得挺顺"])
+        self.members.rows = [{"id": 9, "text": "志远你今天改走国学大师路线了啊", "bot_generated": 1, "is_self": 1}]
+        plugin.on_message(mention("晚安啦"), ctx)
+        self.assertEqual(ctx.completions, 2)  # 第一次太像，换角度重说一次
+        self.assertEqual(ctx.sent, [("reply_at", "道德经念得挺顺")])
+
+    def test_retry_failure_keeps_the_first_reply(self):
+        plugin, ctx = self.build("志远你今天又来裸奔了")
+        self.members.rows = [{"id": 9, "text": "志远你今天改走国学大师路线了啊", "bot_generated": 1, "is_self": 1}]
+        ctx.fail_at_completion = 2  # 换角度重说的那次模型调用失败
+        plugin.on_message(mention("晚安啦"), ctx)
+        self.assertEqual(ctx.sent, [("reply_at", "志远你今天又来裸奔了")])
+
+    def test_recent_bot_lines_are_queried_by_bot_sender(self):
+        plugin, ctx = self.build("睡了睡了")
+        plugin.on_message(mention("晚安啦"), ctx)
+        self.assertEqual(self.members.last_options.get("sender_id"), "wxid_robot")
+        self.assertEqual(self.members.last_options.get("limit"), 5)
+
+    def test_quote_without_text_still_carries_the_referrer(self):
+        plugin, ctx = self.build("这个呢")
+        plugin.members = self.members
+        message = mention("这个呢")
+        message.data["quote"] = {"name": "机器人", "text": "", "chatusr": "wxid_robot"}
+        plugin.on_message(message, ctx)
+        self.assertIn("【引用】", ctx.last_user)
+        self.assertIn("机器人", ctx.last_user)
+
+    def test_typed_at_label_is_not_left_in_the_question(self):
+        plugin, ctx = self.build("在的")
+        message = Message("@有个ai 今天几点开会", ROOM, sender_id="wxid_player", is_group=True,
+                         data={})
+        plugin.members = self.members
+        plugin.aliases = ("有个ai",)
+        plugin.on_message(message, ctx)
+        self.assertIn("今天几点开会", ctx.last_user)
+        self.assertNotIn("@有个ai", ctx.last_user)
+
+    def test_different_reply_is_sent_without_retry(self):
+        _, ctx, _ = self.run_plugin("晚安啦", "睡了睡了")
+        self.members.rows = [{"id": 9, "text": "志远你今天改走国学大师路线了啊", "bot_generated": 1, "is_self": 1}]
+        self.assertEqual(ctx.completions, 1)
 
     def test_request_without_question_word_is_not_split(self):
         _, ctx, _ = self.run_plugin("解释一下 TCP", "行吧。那我先睡了。")

@@ -6,9 +6,10 @@ from .._shared import idiom_state
 
 from wxbot_framework.conversation.dialogue import Dialogue
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
+from wxbot_framework.conversation.repetition import too_similar
 from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.conversation.members import SnapshotExpired
-from wxbot_framework.messaging.mentions import strip_at_labels
+from wxbot_framework.messaging.mentions import at_source, bot_names, strip_at_labels, typed_at
 from wxbot_framework.conversation.personality import personality_text
 from wxbot_framework.conversation.utterance import (CHAT, InterjectionGate, SpeakResult, classify_tier,
                                                     interjection_probe, speak)
@@ -16,8 +17,18 @@ from wxbot_framework.commands import is_control
 
 GAME_FEATURE = "idiom_chain"
 USED_SAMPLE = 10
+# 与本群机器人最近几条发言比对重复的条数；太像时换角度重说一次。
+RECENT_BOT_ROWS = 5
 # 提问含这些词时视为明确要求详细回答，使用 detail_max_tokens 预算。
 DETAIL_HINTS = ("详细", "详解", "细说", "展开", "具体说说", "完整", "全文", "全篇", "原文", "一步一步", "逐步")
+
+
+def read_aliases(config):
+    """配置里的额外称呼：群友手打 ``@有个ai`` 这类写法也要认。"""
+    value = config.get("mention_aliases", [])
+    if not isinstance(value, list) or not all(isinstance(name, str) and 0 < len(name) <= 24 for name in value):
+        raise ValueError("mention_chat.mention_aliases 应为 1–24 字的字符串列表")
+    return tuple(value)
 
 
 def wants_detail(query):
@@ -30,6 +41,7 @@ class Plugin:
         # key -> (首次提问到达时刻, 生成开始时刻, 生成结束时刻)；生成中时结束时刻为 None。
         self._pending = {}
         self._pending_lock = threading.Lock()
+        self.aliases = ()  # on_load 按配置填；测试与热重载时缺省为空
 
     def _claim(self, key, arrived_at):
         """认领本次生成；仍在生成中，或本次到达时首次回复尚未结束，返回 False。
@@ -61,6 +73,7 @@ class Plugin:
     def on_load(self, ctx):
         self.members = ctx.members
         self.room_state = getattr(ctx, "room_state", None)
+        self.aliases = read_aliases(ctx.config)
         if not self.members.history_enabled:
             raise ValueError("艾特上下文对话需要 history_enabled: true")
         ctx.llm  # 启动时核对配置，不请求接口。
@@ -97,15 +110,42 @@ class Plugin:
         """只读投影；字段解释见 plugins/_shared/idiom_state.py。"""
         return idiom_state.game_context(state, sample=USED_SAMPLE)
 
+    def _bot_names(self, room):
+        return bot_names(self.members, room, self.aliases)
+
+    def _recent_bot_texts(self, room):
+        """本群机器人最近几条发言，供重复检测使用；读不到就当没有。"""
+        try:
+            rows = self.members.recent_rows(room, limit=RECENT_BOT_ROWS, include_bot=True,
+                                            sender_id=self.members.account)
+        except Exception:
+            return ()
+        if not isinstance(rows, (list, tuple)):
+            return ()
+        return tuple(row.get("text") or "" for row in rows
+                     if isinstance(row, dict) and (row.get("bot_generated") or row.get("is_self")))
+
     def on_message(self, message, ctx):
         if (message.type != 1 or not message.is_group or message.chat_id not in self.members.groups or
                 "WXBOT_AT_CHAT_PROBE" in message.text or
-                message.data.get("bot_generated") or is_control(message.text) or not message.data.get("is_at_self") or
-                self.members.account not in message.data.get("at_members", ())):
+                message.data.get("bot_generated") or is_control(message.text)):
+            return
+        source = at_source(message, self.members, self.aliases)
+        if source is None:
             return
         personality = ctx.personality(message)
         guard = lambda: ctx.personality_guard(personality)
-        clean_query = strip_at_labels(message.text).strip()
+        clean_query = strip_at_labels(message.text)
+        if source == "typed":
+            # 手打的 @ 没有微信的 U+2005 分隔符，strip_at_labels 去不掉，单独去掉命中的那个名字。
+            label = typed_at(clean_query, self._bot_names(message.chat_id))
+            if label:
+                clean_query = clean_query.replace("@" + label, "")
+        clean_query = clean_query.strip()
+        quote = message.data.get("quote") or {}
+        # 引用非文本消息时没有正文，仍把引用人带给模型，别把整条引用丢掉。
+        quote = ({"name": quote.get("name") or "", "text": quote.get("text") or ""}
+                 if quote.get("name") or quote.get("text") else None)
         game = self.room_game(message.chat_id, ctx, message=message)
         if game and self.is_move(clean_query, game):
             return  # 答案由接龙插件判定并出题，人格不重复回复也不编造进度。
@@ -121,11 +161,28 @@ class Plugin:
             tools = build_default_tools(ctx.knowledge, self.members)
             context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
             options = {"detail": True} if detail else {"examples": context.examples}
-            reply = personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(snapshot,
-                                     knowledge=context.knowledge, style=context.style,
-                                     speaker_profile=context.speaker_profile, people=context.people,
-                                     room_game=self.game_context(game) if game else None, **options),
-                                     personality.name)
+
+            def generate(avoid=None):
+                return personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(
+                    snapshot, knowledge=context.knowledge, style=context.style,
+                    speaker_profile=context.speaker_profile, people=context.people,
+                    room_game=self.game_context(game) if game else None, quote=quote, avoid=avoid,
+                    question=clean_query, **options),
+                    personality.name)
+
+            reply = generate()
+            repeated = too_similar(reply, self._recent_bot_texts(message.chat_id))
+            if repeated:
+                ctx.logger.info("艾特回复与最近发言相近，换角度重说一次：room=%s", message.chat_id)
+                try:
+                    retried = generate(avoid=repeated)
+                except LLMError as error:
+                    # 重说失败不能把已经拿到的首次结果丢掉，更不能改发错误提示。
+                    ctx.logger.warning("艾特回复重说失败，按首次结果发送：%s", error)
+                else:
+                    reply = retried
+                    if too_similar(reply, self._recent_bot_texts(message.chat_id)):
+                        ctx.logger.info("艾特回复重说后仍相近，按原样发送：room=%s", message.chat_id)
             display = self.members.at_display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
             budget = 1023 - len(("@" + display + "\u2005\n").encode("utf-8"))
             tier = classify_tier(clean_query, detail=detail)

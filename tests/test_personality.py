@@ -9,7 +9,8 @@ import test_chat_summary as daily
 from plugins.mention_chat import Plugin as ChatPlugin
 from plugins.personality import Plugin as PersonalityPlugin
 from wxbot_framework.conversation.members import MemberError
-from wxbot_framework.messaging.mentions import parse_at_members, strip_at_labels
+from wxbot_framework.messaging.mentions import (at_source, learned_aliases, parse_at_members, parse_quote,
+                                                reset_learned_aliases, strip_at_labels, typed_at)
 from wxbot_framework.conversation.dialogue import SYSTEM as CHAT_SYSTEM
 from wxbot_framework.conversation.personality import (FIXED_NAME, FIXED_PROMPT, PersonalityState,
                                                       prepare_switch, game_reply)
@@ -136,12 +137,33 @@ class FixedPersonalityTests(unittest.TestCase):
     def test_mention_of_other_person_and_command_do_not_call_model(self):
         provider = Mock(return_value="回答")
         plugin = self.setup_chat(provider)
-        for msg in (self.chat(at_members=(OTHER,)), self.chat("/绑定 新名", sequence=101),
-                    self.chat(sequence=102, bot_generated=True), self.message("@机器人 只有文字"),
-                    Message("私聊", CAT)):
+        for msg in (self.message("@别人 你怎么看？", data={"at_members": (OTHER,), "is_at_self": True}),
+                    self.chat("/绑定 新名", sequence=101), self.chat(sequence=102, bot_generated=True),
+                    self.message("@别人 只有文字"), Message("私聊", CAT)):
             plugin.on_message(msg, self.ctx)
         provider.assert_not_called()
         self.assertEqual(self.backend.sent, [])
+
+    def test_typed_at_without_structural_mention_is_answered(self):
+        # 手打或复制粘贴的 @名字 没有微信的结构化艾特，也要当作在叫机器人。
+        provider = Mock(return_value="在呢")
+        plugin = self.setup_chat(provider)
+        plugin.aliases = ("有个ai",)
+        message = self.message("@有个ai 是不是出 bug 了")
+        self.store.record(message)
+        plugin.on_message(message, self.ctx)
+        provider.assert_called_once()
+        self.assertTrue(self.backend.sent[-1][1].startswith("@"))
+
+    def test_quote_of_bot_message_is_answered_with_quoted_text(self):
+        provider = Mock(return_value="刚才说的是晚饭")
+        plugin = self.setup_chat(provider)
+        message = self.message("这个呢", data={"quote": {"name": "机器人", "text": "今晚吃啥",
+                                                         "chatusr": ROBOT, "fromusr": ROOM}})
+        self.store.record(message)
+        plugin.on_message(message, self.ctx)
+        provider.assert_called_once()
+        self.assertIn("【引用】机器人：今晚吃啥", provider.call_args.args[1])
 
     def test_unbound_member_gets_real_id_and_binding_reminder_once(self):
         plugin = self.setup_chat()
@@ -313,6 +335,95 @@ class NativeAtReceiveTests(unittest.TestCase):
         msg.sender, msg.text = CAT.encode(), "普通私聊".encode()
         msg.mention_source = f"<msgsource><atuserlist>{ROBOT}</atuserlist></msgsource>".encode()
         self.assertFalse(service._map_message(msg)["is_at_self"])
+
+    def test_quote_message_is_mapped_to_its_reply_text(self):
+        native = daily.ROOT / "native"
+        if str(native) not in sys.path:
+            sys.path.insert(0, str(native))
+        from text_service import NativeTextService
+        from filehelper_service import ReceivedTextMessage
+        service = NativeTextService(pid=123)
+        service.router.set_account(ROBOT)
+        xml = ("<msg><appmsg><title>这个呢</title><type>57</type><refermsg><type>1</type>"
+               f"<chatusr>{ROBOT}</chatusr><displayname>机器人</displayname>"
+               "<content>今晚吃啥</content></refermsg></appmsg></msg>")
+        msg = ReceivedTextMessage(type=49, sender=ROOM.encode(), receiver=ROBOT.encode(),
+                                  text=(CAT + ":\n" + xml).encode())
+        data = service._map_message(msg)
+        self.assertEqual(data["msg"], "这个呢")
+        self.assertEqual(data["quote"]["text"], "今晚吃啥")
+        self.assertEqual(data["quote"]["chatusr"], ROBOT)
+
+
+class AddressingTests(unittest.TestCase):
+    """手打 @ 名字、引用机器人、以及从真实艾特学习别名。"""
+
+    def setUp(self):
+        reset_learned_aliases()
+
+    def tearDown(self):
+        reset_learned_aliases()
+
+    members = type("Members", (), {"account": ROBOT, "wechat_name": lambda self, wxid: "机器人",
+                                   "display_name": lambda self, wxid, room: None})()
+
+    def message(self, text, **data):
+        return Message(text, ROOM, sender_id=CAT, is_group=True, data=data)
+
+    def test_typed_at_matches_configured_alias(self):
+        self.assertEqual(typed_at("@有个ai 是不是出 bug 了", ("有个ai",)), "有个ai")
+        self.assertIsNone(typed_at("@别人 是不是出 bug 了", ("有个ai",)))
+        self.assertEqual(typed_at("@有个ai", ("有个ai",)), "有个ai")  # 只有艾特没有正文
+
+    def test_typed_at_accepts_punctuation_and_names_with_spaces(self):
+        self.assertEqual(typed_at("@有个ai，看看这个", ("有个ai",)), "有个ai")
+        self.assertEqual(typed_at("问@有个ai。", ("有个ai",)), "有个ai")
+        self.assertEqual(typed_at("@有 个ai 在吗", ("有 个ai",)), "有 个ai")
+
+    def test_typed_at_ignores_email_and_longer_names(self):
+        self.assertIsNone(typed_at("邮箱 a@bot.com 收一下", ("bot.com",)))
+        self.assertIsNone(typed_at("@有个ai2 在吗", ("有个ai",)))
+        self.assertIsNone(typed_at("@有个aiabc", ("有个ai",)))
+
+    def test_typed_at_is_recognised_without_structural_mention(self):
+        self.assertEqual(at_source(self.message("@机器人 在吗"), self.members), "typed")
+
+    def test_structural_at_teaches_the_visible_label(self):
+        message = self.message("@有个ai 你看", is_at_self=True, at_members=(ROBOT,))
+        self.assertEqual(at_source(message, self.members), "structural")
+        self.assertIn("有个ai", learned_aliases())
+        # 之后别人手打同一个名字也认。
+        self.assertEqual(at_source(self.message("@有个ai 你看"), self.members), "typed")
+
+    def test_two_labels_are_not_learned(self):
+        message = self.message("@有个ai @小明 你看", is_at_self=True, at_members=(ROBOT,))
+        at_source(message, self.members)
+        self.assertNotIn("有个ai", learned_aliases())
+
+    def test_learned_label_does_not_leak_to_another_room(self):
+        other_room = "other_room@chatroom"
+        message = self.message("@有个ai 你看", is_at_self=True, at_members=(ROBOT,))
+        at_source(message, self.members)
+        self.assertIn("有个ai", learned_aliases(ROOM))
+        self.assertEqual(learned_aliases(other_room), ())
+        other = Message("@有个ai 你看", other_room, sender_id=CAT, is_group=True, data={})
+        self.assertIsNone(at_source(other, self.members))
+
+    def test_quote_of_bot_counts_as_addressing(self):
+        message = self.message("这个呢", quote={"name": "机器人", "text": "今晚吃啥", "chatusr": ROBOT})
+        self.assertEqual(at_source(message, self.members), "quote")
+
+    def test_quote_of_someone_else_is_not_addressing(self):
+        message = self.message("这个呢", quote={"name": "小明", "text": "今晚吃啥", "chatusr": OTHER})
+        self.assertIsNone(at_source(message, self.members))
+
+    def test_quote_parser_rejects_unsafe_or_non_quote_xml(self):
+        good = "<msg><appmsg><title>好</title><type>57</type><refermsg><type>1</type><content>原文</content></refermsg></appmsg></msg>"
+        self.assertEqual(parse_quote(good)["text"], "原文")
+        for source in ("", "不是 XML", "<!DOCTYPE a [<!ENTITY x 'abc'>]><a>&x;</a>", "<msg></msg>",
+                       "<msg><appmsg><type>5</type><title>链接</title></appmsg></msg>", "x" * 9000):
+            with self.subTest(source=source[:20]):
+                self.assertIsNone(parse_quote(source))
 
 
 if __name__ == "__main__":

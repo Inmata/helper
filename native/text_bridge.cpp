@@ -244,15 +244,18 @@ static void sample_all_text(const uintptr_t* batch) {
             (batch[1] - batch[0]) / 0x78 > 512) return;
         for (uintptr_t address = batch[0]; address < batch[1]; address += 0x78) {
             const auto message = reinterpret_cast<const unsigned char*>(address);
-            if (*reinterpret_cast<const uint32_t*>(message + 0x14) != 1) continue;
-            char sender[128]{}, receiver[128]{}, text[1024]{};
+            const uint32_t type = *reinterpret_cast<const uint32_t*>(message + 0x14);
+            // 1 是文本；49 只放行带 refermsg 的引用消息，链接、文件、转发等其他卡片不要。
+            if (type != 1 && type != 49) continue;
+            char sender[128]{}, receiver[128]{}, text[8192]{};
             if (!read_pb_string(message, 8, sender, sizeof(sender)) || !valid_target(sender) ||
                 !read_pb_string(message, 0x18, receiver, sizeof(receiver)) || !valid_target(receiver) ||
                 !read_pb_string(message, 0x20, text, sizeof(text))) continue;
+            if (type == 49 && !std::strstr(text, "<refermsg")) continue;
             // 接收瞬间复制元数据，不持有任何微信消息对象或字符串指针。
             char source[4096]{};
             if (!try_read_source(message, 0x38, source, sizeof(source))) source[0] = 0;
-            enqueue_received(sender, receiver, text, source);
+            enqueue_received(sender, receiver, text, source, type);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // 布局不匹配时放弃采样，真实客户端仍按原逻辑收消息。
@@ -301,7 +304,39 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxPollTextMessage(void* parameter)
     return code;
 }
 
+// V2 调用方只分配 5408 字节（正文 1KB + 艾特来源 4KB）。队列内部是 12576 字节的 V3 结构，
+// 所以这里先取到本地再按旧布局截断复制，绝不能把新结构直接写进旧缓冲区。
+struct LegacyReceivedText {
+    uint32_t size, present, type, thread_id, dropped, reserved;
+    uint64_t sequence;
+    char sender[128], receiver[128], text[1024], mention_source[4096];
+};
+static_assert(sizeof(LegacyReceivedText) == 5408, "Unexpected V2 receive ABI");
+
 extern "C" __declspec(dllexport) DWORD WINAPI WxPollTextMessageV2(void* parameter) {
+    if (!parameter) return ERROR_INVALID_PARAMETER;
+    ReceivedMessage message{};
+    const DWORD code = WxPollFileHelperMessage(&message);
+    if (code) return code;
+    auto output = static_cast<LegacyReceivedText*>(parameter);
+    output->size = sizeof(*output);
+    output->present = message.present;
+    output->type = message.type;
+    output->thread_id = message.thread_id;
+    output->dropped = message.dropped;
+    output->reserved = message.reserved;
+    output->sequence = message.sequence;
+    std::memcpy(output->sender, message.sender, sizeof(output->sender));
+    std::memcpy(output->receiver, message.receiver, sizeof(output->receiver));
+    std::memcpy(output->text, message.text, sizeof(output->text) - 1);
+    output->text[sizeof(output->text) - 1] = 0;
+    std::memcpy(output->mention_source, message.mention_source, sizeof(output->mention_source) - 1);
+    output->mention_source[sizeof(output->mention_source) - 1] = 0;
+    return 0;
+}
+
+// 正文缓冲扩到 8KB 后的同一份队列；调用方按新的结构大小读取。
+extern "C" __declspec(dllexport) DWORD WINAPI WxPollTextMessageV3(void* parameter) {
     return WxPollFileHelperMessage(parameter);
 }
 

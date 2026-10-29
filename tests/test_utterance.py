@@ -74,6 +74,14 @@ class SplitTests(unittest.TestCase):
         self.assertEqual(plan.parts, ("行吧", "那我先睡了"))
         self.assertFalse(plan.at_all)
         self.assertTrue(plan.paced)
+        self.assertTrue(plan.gated)
+
+    def test_comma_split_is_not_interruptible(self):
+        # 只按逗号切开的本来是一句话：插话也不丢后半句，否则会留下半句。
+        plan = plan_utterance("凯恩要是能拿金球奖，违约金都够买他一只手了", CHAT, byte_budget=1000)
+        self.assertEqual(len(plan.parts), 2)
+        self.assertTrue(plan.paced)
+        self.assertFalse(plan.gated)
 
     def test_plan_qa_never_splits_even_with_sentence_ends(self):
         plan = plan_utterance("可以。先点设置。再点开启。", QA, byte_budget=1000)
@@ -207,6 +215,15 @@ class SpeakTests(unittest.TestCase):
                        send_plain=send_plain, interjected=lambda: True, sleep=lambda s: None)
         self.assertEqual([part for _, part in sent], ["哈哈！"])
         self.assertEqual(result.dropped, 2)
+
+    def test_comma_split_sends_every_part_even_when_interrupted(self):
+        sent, send_at, send_plain = self.collect()
+        waits = []
+        result = speak("行吧，那我先睡了", tier=CHAT, byte_budget=1000, send_at=send_at, send_plain=send_plain,
+                       interjected=lambda: True, sleep=waits.append)
+        self.assertEqual([part for _, part in sent], ["行吧", "那我先睡了"])
+        self.assertEqual(result.dropped, 0)
+        self.assertEqual(len(waits), 1)  # 仍然保持条间隔的节奏
 
     def test_first_send_failure_stops_and_reports(self):
         calls = []

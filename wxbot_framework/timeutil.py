@@ -72,5 +72,24 @@ def format_local(value, timezone_name=None, *, pattern="%Y-%m-%d %H:%M"):
     return parse_utc(value).astimezone(zone).strftime(pattern)
 
 
+# 说“早上/白天/深夜”时给模型的时段参照；按整点命名，夜里和凌晨都算深夜。
+PERIODS = ((0, "深夜"), (5, "清晨"), (8, "上午"), (11, "中午"), (13, "下午"), (18, "晚上"), (23, "深夜"))
+
+
+def time_period(hour):
+    label = PERIODS[0][1]
+    for start, name in PERIODS:
+        if hour >= start:
+            label = name
+    return label
+
+
+def describe_local(value=None, timezone_name=None):
+    """当前时间的可读文本：``10-28 00:52（深夜）``。"""
+    zone = display_timezone(timezone_name)
+    moment = (parse_utc(value) if value is not None else now_utc()).astimezone(zone)
+    return f"{moment.strftime('%m-%d %H:%M')}（{time_period(moment.hour)}）"
+
+
 def beijing_day(value=None):
     return parse_utc(value).astimezone(BEIJING).date().isoformat()

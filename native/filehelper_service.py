@@ -26,11 +26,33 @@ class ReceivedMessage(c.Structure):
 assert c.sizeof(ReceivedMessage) == 1312
 
 
-class ReceivedTextMessage(ReceivedMessage):
-    _fields_ = [("mention_source", c.c_char * 4096)]
+class ReceivedTextMessageV2(c.Structure):
+    """旧桥接的接收结构：正文 1KB + 艾特来源 4KB（已编译 DLL 的 V2 协议）。
+
+    字段顺序与 ``ReceivedMessage`` 相同，只追加艾特来源；ctypes 的子类同名字段是追加而不是替换，
+    所以这里整段重新声明。
+    """
+    _fields_ = [("size", c.c_uint32), ("present", c.c_uint32),
+                ("type", c.c_uint32), ("thread_id", c.c_uint32),
+                ("dropped", c.c_uint32), ("reserved", c.c_uint32),
+                ("sequence", c.c_uint64), ("sender", c.c_char * 128),
+                ("receiver", c.c_char * 128), ("text", c.c_char * 1024),
+                ("mention_source", c.c_char * 4096)]
 
 
-assert c.sizeof(ReceivedTextMessage) == 5408
+class ReceivedTextMessage(c.Structure):
+    """新桥接（V3）的接收结构：正文缓冲 8KB（引用消息的 XML 常常超过 1KB）+ 艾特来源。"""
+    _fields_ = [("size", c.c_uint32), ("present", c.c_uint32),
+                ("type", c.c_uint32), ("thread_id", c.c_uint32),
+                ("dropped", c.c_uint32), ("reserved", c.c_uint32),
+                ("sequence", c.c_uint64), ("sender", c.c_char * 128),
+                ("receiver", c.c_char * 128), ("text", c.c_char * 8192),
+                ("mention_source", c.c_char * 4096)]
+
+
+assert c.sizeof(ReceivedMessage) == 1312
+assert c.sizeof(ReceivedTextMessageV2) == 5408
+assert c.sizeof(ReceivedTextMessage) == 12576
 
 
 class ReceiveChannel:

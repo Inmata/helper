@@ -30,7 +30,7 @@ OPTIONS = (
     ("quiet_seconds", 3, 1, 60),
     ("max_wait_seconds", 8, 1, 120),
     ("wait_recheck_seconds", 20, 5, 120),
-    ("threshold_percent", 50, 1, 100),
+    ("threshold_percent", 25, 1, 100),
     ("streak_step_percent", 10, 0, 50),
     ("limit", 5, 1, 30),
     ("window_seconds", 600, 60, 86400),

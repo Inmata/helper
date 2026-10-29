@@ -56,20 +56,32 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(action.args["probability"], 0.7)
 
     def test_streak_raises_threshold(self):
-        jev = fake_jev(reply_called=0.55, silent_irrelevant=0.45)
+        jev = fake_jev(reply_called=0.28, silent_irrelevant=0.72)
         planner = JevSpeakPlanner(jev)
         self.assertEqual(planner.decide(context(streak=0)).type, REPLY)
         self.assertEqual(planner.decide(context(streak=1)).type, WAIT)
+        # streak=1 阈值 0.35：达到就 reply，差 0.1 以内才 wait。
+        self.assertEqual(JevSpeakPlanner(fake_jev(reply_called=0.35, silent_irrelevant=0.65))
+                         .decide(context(streak=1)).type, REPLY)
+        self.assertEqual(JevSpeakPlanner(fake_jev(reply_called=0.34, silent_irrelevant=0.66))
+                         .decide(context(streak=1)).type, WAIT)
+        self.assertEqual(JevSpeakPlanner(fake_jev(reply_called=0.24, silent_irrelevant=0.76))
+                         .decide(context(streak=1)).type, SKIP)
 
     def test_default_threshold_matches_measured_choice(self):
-        # 阈值 0.5：评测里 0.5–0.6 的判断多数适合插话；0.6 时几乎不主动说话。
-        self.assertEqual(JevSpeakPlanner(fake_jev(reply_banter=0.52, silent_irrelevant=0.48)).decide(context()).type,
-                         REPLY)
-        self.assertEqual(JevSpeakPlanner(fake_jev(reply_banter=0.42, silent_irrelevant=0.58)).decide(context()).type,
+        # 阈值 0.25：10-29 真机 25 次判断 reply 概率 0.01–0.48，0.5 一次都没触发；0.25 下约两成判断会进入生成。
+        planner = JevSpeakPlanner(fake_jev(reply_banter=0.26, silent_irrelevant=0.74))
+        self.assertEqual(planner.decide(context()).type, REPLY)
+        self.assertEqual(JevSpeakPlanner(fake_jev(reply_banter=0.18, silent_irrelevant=0.82)).decide(context()).type,
                          WAIT)
+        # 复判缓冲区下限 0.15：再低就落在 Jev 判“几乎没关系”的区间，直接 skip，省一次复判调用。
+        self.assertEqual(JevSpeakPlanner(fake_jev(reply_banter=0.15, silent_irrelevant=0.85)).decide(context()).type,
+                         WAIT)
+        self.assertEqual(JevSpeakPlanner(fake_jev(reply_banter=0.14, silent_irrelevant=0.86)).decide(context()).type,
+                         SKIP)
 
     def test_low_probability_skips(self):
-        action = JevSpeakPlanner(fake_jev(reply_called=0.1, silent_irrelevant=0.9)).decide(context())
+        action = JevSpeakPlanner(fake_jev(reply_called=0.02, silent_irrelevant=0.98)).decide(context())
         self.assertEqual(action.type, SKIP)
         self.assertEqual(action.args["reason"], "below-threshold")
 
@@ -469,7 +481,7 @@ class PluginTests(unittest.TestCase):
 
     def test_wait_schedules_one_recheck_then_gives_up(self):
         self.plugin.options = read_options({"start_hour": 0, "end_hour": 24, "wait_recheck_seconds": 20})
-        self.plugin.planner = JevSpeakPlanner(fake_jev(reply_called=0.45, silent_irrelevant=0.55))
+        self.plugin.planner = JevSpeakPlanner(fake_jev(reply_called=0.18, silent_irrelevant=0.82))
         self.assertFalse(self.consider())
         self.ctx.reply.assert_not_called()
         self.assertEqual(self.plugin._due(), [])  # 复判时刻还没到
@@ -484,7 +496,7 @@ class PluginTests(unittest.TestCase):
 
     def test_new_message_cancels_pending_recheck(self):
         self.plugin.options = read_options({"start_hour": 0, "end_hour": 24, "wait_recheck_seconds": 20})
-        self.plugin.planner = JevSpeakPlanner(fake_jev(reply_called=0.45, silent_irrelevant=0.55))
+        self.plugin.planner = JevSpeakPlanner(fake_jev(reply_called=0.18, silent_irrelevant=0.82))
         self.assertFalse(self.consider())
         self.plugin.on_message(make_message("我又说一句"), self.ctx)
         self.clock.value += 21
@@ -493,7 +505,7 @@ class PluginTests(unittest.TestCase):
 
     def test_recheck_does_not_send_when_budget_refuses(self):
         self.plugin.options = read_options({"start_hour": 0, "end_hour": 24, "wait_recheck_seconds": 20})
-        self.plugin.planner = JevSpeakPlanner(fake_jev(reply_called=0.45, silent_irrelevant=0.55))
+        self.plugin.planner = JevSpeakPlanner(fake_jev(reply_called=0.18, silent_irrelevant=0.82))
         self.assertFalse(self.consider())
         self.plugin.budget.record(ROOM)  # 别的主动发言刚发过，间隔未满
         self.clock.value += 21
@@ -504,7 +516,7 @@ class PluginTests(unittest.TestCase):
 
     def test_defaults_lower_threshold_and_open_the_whole_day(self):
         options = read_options({})
-        self.assertEqual((options["threshold_percent"], options["start_hour"], options["end_hour"]), (50, 0, 24))
+        self.assertEqual((options["threshold_percent"], options["start_hour"], options["end_hour"]), (25, 0, 24))
         self.assertEqual(options["wait_recheck_seconds"], 20)
 
     def test_recheck_seconds_is_validated(self):

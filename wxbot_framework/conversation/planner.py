@@ -135,10 +135,12 @@ class JevSpeakPlanner(Planner):
     """用 Jev choice 题判断主动发言：reply 概率 = 各 reply_* 选项之和。
 
     阈值 = ``threshold + streak_step * streak``；达到阈值返回 reply，差不到 ``wait_margin`` 返回 wait，
-    其余 skip。Jev 超时、失败或格式错误一律 skip，不重试。wait 最后由调用方决定要不要过一会儿复判。
+    其余 skip。wait_margin 取 0.1：阈值 0.5 时缓冲区是阈值下方的 40%（0.3–0.5），阈值降到 0.25 后同样
+    只留 0.15–0.25；再往下就落在 Jev 已判定“几乎没关系”的区间，20 秒后无声复判没有新信息可看，只会多花一次 Jev 调用。
+    Jev 超时、失败或格式错误一律 skip，不重试。wait 最后由调用方决定要不要过一会儿复判。
     """
 
-    def __init__(self, jev, *, threshold=0.5, streak_step=0.1, wait_margin=0.2):
+    def __init__(self, jev, *, threshold=0.25, streak_step=0.1, wait_margin=0.1):
         self.jev, self.threshold, self.streak_step, self.wait_margin = jev, threshold, streak_step, wait_margin
 
     def decide(self, context):

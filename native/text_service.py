@@ -82,6 +82,8 @@ class NativeTextService(NativeFileHelperService):
         self._poll_export, self._message_type = text_message_binding()
         if self._poll_export != V3_EXPORT:
             logger.info("桥接为 V2 协议：正文上限 1KB，引用消息（应用消息）暂不接收；重编桥接后自动启用 V3")
+        else:
+            logger.info("桥接为 V3 协议：正文上限 8KB，接收引用消息（应用消息 type 49）")
         self.preferred_account = validate_account(account) if account is not None else None
         self.router = TextRouter(include_self_groups=True)
         self.chats = {}

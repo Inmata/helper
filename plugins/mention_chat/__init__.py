@@ -1,12 +1,14 @@
 """真正艾特机器人后，用本群人格回复当前发言者。"""
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 from .._shared import idiom_state
 
 from wxbot_framework.conversation.dialogue import Dialogue
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
-from wxbot_framework.conversation.mention_tools import MentionTools, ToolOutcome, read_tool_options, strip_links
+from wxbot_framework.conversation.mention_tools import (MentionTools, ToolOutcome, previous_question, read_tool_options,
+                                                        strip_links)
 from wxbot_framework.conversation.repetition import too_similar
 from wxbot_framework.conversation.tool_router import JevToolRouter
 from wxbot_framework.recent_images import RECENT_IMAGES
@@ -132,7 +134,7 @@ class Plugin:
         return tuple(row.get("text") or "" for row in rows
                      if isinstance(row, dict) and (row.get("bot_generated") or row.get("is_self")))
 
-    def _run_tools(self, message, ctx, question):
+    def _run_tools(self, message, ctx, question, snapshot=None):
         """本轮艾特的看图 / 联网；没开启时返回空结果。Jev 读不出来时只按明确说法执行。"""
         if self.tools is None:
             return ToolOutcome()
@@ -144,8 +146,18 @@ class Plugin:
         tools = MentionTools(router=JevToolRouter(jev, **self.tools), magpie=lambda: ctx.magpie,
                              images=RECENT_IMAGES, image_supported=IMAGE_CAPABILITY in getattr(ctx, "capabilities", ()),
                              logger=ctx.logger)
+        # 只艾特没写正文时，他上一条发言（如“这张图是啥意思？”）才是真正的问题。
+        context_question = ""
+        if not question and snapshot is not None:
+            # 以这条艾特到达的墙钟时刻比较，扣掉它排队等待处理的时间。
+            queued = max(0.0, time.monotonic() - message.received_at)
+            names = self._bot_names(message.chat_id)
+            context_question = previous_question(
+                snapshot.messages, now=datetime.now(timezone.utc) - timedelta(seconds=queued),
+                is_mention=lambda text: bool(typed_at(text, names)))
         return tools.run(question=question, room=message.chat_id, sender=message.sender_id,
-                         received_at=message.received_at, quote=message.data.get("quote"))
+                         received_at=message.received_at, quote=message.data.get("quote"),
+                         context_question=context_question)
 
     def on_message(self, message, ctx):
         # 图片事件（type 3）由原生服务记入 RECENT_IMAGES，这里只回复文本里的艾特。
@@ -191,7 +203,7 @@ class Plugin:
             def send_at(part, send_guard=guard):
                 return ctx.reply_at(message, part, display_name=display, delivery_guard=send_guard)
 
-            outcome = self._run_tools(message, ctx, clean_query)
+            outcome = self._run_tools(message, ctx, clean_query, snapshot)
             if outcome.ask:
                 # 找不到或分不清要看哪张图：不猜，直接请对方引用。
                 speak(outcome.ask, tier=QA, byte_budget=budget, result=result, send_at=send_at)

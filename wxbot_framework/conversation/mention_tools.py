@@ -9,7 +9,7 @@
   先判断看图，识图结果再参与搜索判断。Jev 不可用时含糊提问不调用工具。
 * 预算：每轮最多识图一次、搜索一次；Jev 判断、等图和工具调用共用同一截止时间。
   客户端的超时只约束单次 socket 操作，所以每次判断 / 调用都在单独线程里执行、最多等到
-  剩余时间，迟到的结果丢弃。工具失败如实交给模型说明。回复里不带网址（见 ``strip_links``）。
+  剩余时间，迟到的结果丢弃。艾特没有正文时，提问人 90 秒内的上一条发言当作问题来判断。工具失败如实交给模型说明。回复里不带网址（见 ``strip_links``）。
 """
 from __future__ import annotations
 
@@ -17,8 +17,10 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from ..recent_images import FAILED, PENDING, READY, SKIPPED
+from ..timeutil import parse_utc
 from .tool_router import MAX_QUESTION_CHARS, ToolTurn, read_options
 
 VISION = "vision"
@@ -29,6 +31,8 @@ VISION_HINTS = ("看图", "看看图", "看下图", "看一下图", "看看这�
 SEARCH_HINTS = ("联网", "上网查", "网上查", "上网搜", "网上搜", "搜一下", "搜搜", "搜下", "帮我搜", "去搜",
                 "百度一下", "谷歌一下")
 IMAGE_WINDOW_SECONDS = 120
+PREVIOUS_QUESTION_SECONDS = 90
+MENTION_MARK = chr(0x2005)  # 微信 @ 后面的分隔符：带它的上一条发言本身是一次艾特，已经回答过
 PENDING_WAIT_SECONDS = 6
 BUDGET_SECONDS = 60
 MIN_CALL_SECONDS = 8  # 剩余时间不够一次工具调用时不再发起
@@ -106,6 +110,25 @@ def strip_links(reply):
     return re.sub(r"[ \t]+\n", "\n", text).strip()
 
 
+def previous_question(rows, *, now=None, within=PREVIOUS_QUESTION_SECONDS, is_mention=None):
+    """艾特没有正文时，提问人上一条发言（``within`` 秒内、本身不是艾特）当作这次的问题；没有就返回空串。
+
+    ``now`` 应是这条艾特到达的时刻（不是处理它的时刻，插件串行处理时中间可能排过队）；
+    ``is_mention(text)`` 识别手打的 @机器人（没有分隔符），它和带分隔符的艾特一样已经回答过。
+    """
+    if not rows:
+        return ""
+    row = rows[-1]
+    text = str(row.get("text") or "").strip()
+    if not text or MENTION_MARK in text or (is_mention is not None and is_mention(text)):
+        return ""
+    try:
+        age = ((now or datetime.now(timezone.utc)) - parse_utc(row.get("received_at"))).total_seconds()
+    except (TypeError, ValueError):
+        return ""
+    return text[:MAX_QUESTION_CHARS] if 0 <= age <= within else ""
+
+
 def _vision_prompt(question):
     ask = f"群友的提问是：{question}\n" if question else ""
     return (ask + "请客观描述这张图里和提问相关的内容，图中有文字时照录关键文字；看不清的地方直接说看不清，"
@@ -160,11 +183,13 @@ class MentionTools:
         self.clock = clock
         self.budget = budget
 
-    def run(self, *, question, room, sender, received_at, quote=None):
+    def run(self, *, question, room, sender, received_at, quote=None, context_question=""):
+        """``context_question``：艾特没有正文时提问人上一条发言（见 ``previous_question``），只用来判断和调用工具。"""
         started = self.clock()
         deadline = started + self.budget
         quote = quote or {}
         outcome = ToolOutcome()
+        question = question or context_question
         explicit_vision = wants(question, VISION_HINTS)
         explicit_search = wants(question, SEARCH_HINTS)
         quoted_image = quote.get("ref_type") == "3"

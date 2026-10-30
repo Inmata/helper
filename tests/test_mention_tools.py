@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,9 +16,9 @@ from wxbot_framework.conversation import utterance
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
 from wxbot_framework.conversation.members import ConversationSnapshot
 from wxbot_framework.conversation.mention_tools import (ASK_FOR_IMAGE, ASK_WHICH_IMAGE, ASK_WHICH_OTHER_IMAGE,
-                                                        NO_IMAGE_SUPPORT, QUOTED_IMAGE_MISSING, MentionTools,
+                                                        NO_IMAGE_SUPPORT, QUOTED_IMAGE_MISSING, MentionTools, previous_question,
                                                         read_tool_options, strip_links)
-from wxbot_framework.conversation.tool_router import JevToolRouter
+from wxbot_framework.conversation.tool_router import MAX_QUESTION_CHARS, JevToolRouter
 from wxbot_framework.integrations.jev import JevClient
 from wxbot_framework.integrations.magpie_tools import (MagpieResult, MagpieTools, MagpieToolsUnavailableError,
                                                        _McpEndpoint)
@@ -337,6 +338,21 @@ class MentionToolsTests(unittest.TestCase):
         image(index, message_id=1, sender=OTHER)
         self.assertEqual(self.run_tools("看看图里是啥", index=index)[0].ask, ASK_FOR_IMAGE)
 
+    def test_context_question_stands_in_for_an_empty_mention(self):
+        index = RecentImages(clock=Clock(990))
+        image(index, message_id=1, sender=OTHER, path="C:/images/other.png")
+        runner, magpie = tools(index, None)
+        outcome = runner.run(question="", room=ROOM, sender=SENDER, received_at=1000,
+                             context_question="这张图是啥意思？")
+        self.assertEqual(magpie.images[0][0], "C:/images/other.png")  # “这张图”是明确的看图说法，不用问 Jev
+        self.assertTrue(outcome.results[0].ok)
+        # 真问题优先；两者都没有时仍按只艾特处理。
+        runner, magpie = tools(RecentImages(clock=Clock()), None)
+        runner.run(question="帮我搜一下天气", room=ROOM, sender=SENDER, received_at=1000, context_question="别的")
+        self.assertEqual(magpie.queries, ["帮我搜一下天气"])
+        runner, magpie = tools(RecentImages(clock=Clock()), None)
+        self.assertFalse(runner.run(question="", room=ROOM, sender=SENDER, received_at=1000).used)
+
     def test_quoted_image_is_seen_without_asking_jev(self):
         index = RecentImages(clock=Clock(10))
         image(index, message_id=77, sender=OTHER, md5=MD5, path="C:/images/q.png")
@@ -481,6 +497,23 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(strip_links("没有网址，原样返回"), "没有网址，原样返回")
         self.assertEqual(strip_links(""), "")
 
+    def test_previous_question(self):
+        now = datetime(2026, 10, 30, 1, 55, 0, tzinfo=timezone.utc)
+
+        def row(text, seconds_ago, **extra):
+            stamp = (now - timedelta(seconds=seconds_ago)).isoformat().replace("+00:00", "Z")
+            return {"text": text, "received_at": stamp, **extra}
+
+        self.assertEqual(previous_question([row("早", 300), row(" 这张图是啥意思？ ", 8)], now=now), "这张图是啥意思？")
+        self.assertEqual(previous_question([row("这张图是啥意思？", 200)], now=now), "")  # 太久以前
+        self.assertEqual(previous_question([row("@有个ai" + chr(0x2005) + "查一下", 8)], now=now), "")  # 上一条也是艾特
+        self.assertEqual(previous_question([row("@有个ai 查一下", 8)], now=now, is_mention=lambda t: "@有个ai" in t), "")
+        self.assertEqual(previous_question([row("  ", 8)], now=now), "")
+        self.assertEqual(previous_question([{"text": "好", "received_at": "坏时间"}], now=now), "")
+        self.assertEqual(previous_question([{"text": "好"}], now=now), "")
+        self.assertEqual(previous_question([], now=now), "")
+        self.assertEqual(len(previous_question([row("长" * 9999, 1)], now=now)), MAX_QUESTION_CHARS)
+
     def test_read_tool_options(self):
         self.assertEqual(read_tool_options({}), {"vision_threshold": 0.6, "search_threshold": 0.7})
         self.assertIsNone(read_tool_options({"tools": {"enabled": False}}))
@@ -565,6 +598,40 @@ class MentionChatToolTests(unittest.TestCase):
         plugin.on_message(mention("帮我搜一下天气"), ctx)
         self.assertNotIn("【联网搜索结果】", ctx.last_user)
         self.assertEqual(ctx.magpie.queries, [])
+
+    def test_empty_mention_uses_the_askers_previous_message_as_the_question(self):
+        plugin, ctx = self.build("红圈里那个像水母")
+        stamp = datetime.now(timezone.utc) - timedelta(seconds=5)
+        row = {"text": "这张图是啥意思？", "received_at": stamp.isoformat().replace("+00:00", "Z")}
+        ctx.members.conversation_snapshot = lambda message: ConversationSnapshot(
+            ROOM, "2026-10-30", 0, "小明", (row,), message.text, ())
+        RECENT_IMAGES.note({"chat_id": ROOM, "sender_id": OTHER, "image_status": "ready", "sequence": 1,
+                            "native_message_id": "1", "image_path": "C:/images/1.png"})
+        plugin.on_message(mention("", received_at=time.monotonic()), ctx)
+        self.assertEqual(ctx.magpie.images[0][0], "C:/images/1.png")
+        self.assertIn("这张图是啥意思", ctx.magpie.images[0][1])
+        self.assertIn("【看图结果】", ctx.last_user)
+
+    def test_previous_typed_mention_is_not_reused_as_the_question(self):
+        stamp = datetime.now(timezone.utc) - timedelta(seconds=5)
+        row = {"text": "@机器人 帮我搜一下天气", "received_at": stamp.isoformat().replace("+00:00", "Z")}
+        plugin, ctx = self.build("晴")
+        plugin.aliases = ("机器人",)
+        ctx.members.conversation_snapshot = lambda message: ConversationSnapshot(
+            ROOM, "2026-10-30", 0, "小明", (row,), message.text, ())
+        plugin.on_message(mention("", received_at=time.monotonic()), ctx)
+        self.assertEqual(ctx.magpie.queries, [])
+
+    def test_previous_message_window_is_measured_at_arrival_not_at_processing(self):
+        stamp = datetime.now(timezone.utc) - timedelta(seconds=205)
+        row = {"text": "帮我搜一下天气", "received_at": stamp.isoformat().replace("+00:00", "Z")}
+        for queued, expected in ((200, 1), (0, 0)):  # 排队 200 秒：艾特到达时离上一句才 5 秒；没排队则已过去 205 秒
+            with self.subTest(queued=queued):
+                plugin, ctx = self.build("晴")
+                ctx.members.conversation_snapshot = lambda message: ConversationSnapshot(
+                    ROOM, "2026-10-30", 0, "小明", (row,), message.text, ())
+                plugin.on_message(mention("", received_at=time.monotonic() - queued), ctx)
+                self.assertEqual(len(ctx.magpie.queries), expected)
 
     def test_image_events_are_not_answered(self):
         plugin, ctx = self.build("不该调用")

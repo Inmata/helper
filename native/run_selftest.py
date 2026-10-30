@@ -55,8 +55,13 @@ class TextConfig(Config):
 class AtTextConfig(TextConfig):
     _fields_ = [("members", c.c_char * 1024)]
 
+class ImageDownloadConfig(Config):
+    _fields_ = [("filekey", c.c_char * 1024), ("aeskey", c.c_char * 65),
+                ("image_type", c.c_uint32)]
+
 
 assert c.sizeof(Config) == 1560 and c.sizeof(TextConfig) == 1688 and c.sizeof(AtTextConfig) == 2712
+assert c.sizeof(ImageDownloadConfig) == 2656
 
 
 class ProcessEntry(c.Structure):
@@ -143,14 +148,56 @@ def find_wechat():
     return candidates[0]
 
 
+def download_aeskey_supported(aeskey):
+    """原生图片下载接口的密钥规则：32 或 64 位十六进制。
+
+    与 image_download.h 的校验保持一致；缩略图 XML 的 cdnthumbaeskey 是 16 位，
+    不能用于该接口，调用方应按 skipped 处理而不是猜测性转换。
+    """
+    return (isinstance(aeskey, str) and len(aeskey) in (32, 64) and
+            all(ch in "0123456789abcdefABCDEF" for ch in aeskey))
+
+
+def _validate_download_image(download_image):
+    """校验图片下载参数；返回 (destination, filekey, aeskey, image_type)。"""
+    if not isinstance(download_image, dict):
+        raise ValueError("download_image 必须是对象")
+    destination = download_image.get("destination")
+    filekey = download_image.get("filekey")
+    aeskey = download_image.get("aeskey")
+    image_type = download_image.get("image_type")
+    if not isinstance(destination, str) or not destination.strip() or "\0" in destination:
+        raise ValueError("图片下载目标必须是非空本地路径")
+    path = Path(destination)
+    if not path.is_absolute():
+        raise ValueError("图片下载目标必须是绝对路径")
+    encoded = str(path).encode("utf-8")
+    if len(encoded) >= 1024:
+        raise ValueError("图片下载目标路径过长")
+    if not path.parent.is_dir():
+        raise ValueError("图片下载目标的父目录必须存在")
+    if path.exists() or path.is_symlink():
+        raise ValueError("图片下载目标必须尚不存在")
+    if not isinstance(filekey, str) or not filekey or len(filekey.encode("ascii", "ignore")) != len(filekey) \
+            or len(filekey) >= 1024 or "\0" in filekey:
+        raise ValueError("图片 filekey 必须是 1–1023 个 ASCII 字节")
+    if not download_aeskey_supported(aeskey):
+        raise ValueError("图片 aeskey 必须是 32 或 64 位十六进制字符串")
+    if type(image_type) is not int or image_type not in (1, 2, 3):
+        raise ValueError("图片下载类型必须是 1、2 或 3")
+    return str(path), filekey, aeskey, image_type
+
+
 def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_report=True,
-        bridge_path=None, target="filehelper", mentions=None):
+        bridge_path=None, target="filehelper", mentions=None, download_image=None):
     dll = Path(bridge_path or DLL).resolve()
     if dll not in (DLL.resolve(), TEXT_DLL.resolve()):
         raise ValueError("不支持的桥接 DLL 路径")
     generic = dll == TEXT_DLL.resolve()
-    if generic and mode not in ("--dispatch", "--listen", "--remove", "--probe-at"):
-        raise ValueError("通用桥接只支持文本发送、监听和卸载")
+    if generic and mode not in ("--dispatch", "--listen", "--remove", "--probe-at", "--download-image"):
+        raise ValueError("通用桥接只支持文本/图片、监听和卸载")
+    if not generic and mode == "--download-image":
+        raise ValueError("图片下载仅用于通用桥接")
     if not generic and target != "filehelper":
         raise ValueError("旧自测桥接仅支持文件传输助手")
     if generic:
@@ -161,15 +208,22 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
             raise ValueError("艾特成员列表仅用于通用文本发送")
         from wxbot_framework.messaging.text import validate_mentions
         mentions = validate_mentions(target, mentions)
-    if mode not in ("--arm", "--dispatch", "--receive", "--listen", "--remove", "--probe-at"):
+    if mode not in ("--arm", "--dispatch", "--receive", "--listen", "--remove", "--probe-at", "--download-image"):
         raise RuntimeError("不支持的原生桥接操作")
     if mode == "--probe-at" and not generic:
         raise ValueError("艾特探针仅用于通用桥接")
-    if keep_loaded and mode != "--dispatch":
-        raise ValueError("keep_loaded 只用于接收服务内的发送")
+    if download_image is not None and mode != "--download-image":
+        raise ValueError("图片下载参数仅用于 --download-image")
+    if mode == "--download-image" and download_image is None:
+        raise ValueError("--download-image 需要下载参数")
+    if keep_loaded and mode not in ("--dispatch", "--download-image"):
+        raise ValueError("keep_loaded 只用于接收服务内的发送或图片下载")
     if c.sizeof(PTR) != 8: raise RuntimeError("需要 64 位 Python")
+    destination = None
+    if download_image is not None:
+        destination, filekey, aeskey, image_type = _validate_download_image(download_image)
     encoded = text.encode("utf-8")
-    if not encoded or len(encoded) > 1023 or b"\0" in encoded:
+    if mode != "--download-image" and (not encoded or len(encoded) > 1023 or b"\0" in encoded):
         raise ValueError("文本应为 1–1023 个 UTF-8 字节，且不能包含 NUL")
     pid = pid or find_wechat()
     process = check(K.OpenProcess(0x43a, False, pid), "打开已验证的微信进程")
@@ -193,14 +247,17 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
         if mode != "--remove" and other.name.lower() in loaded_modules:
             raise RuntimeError("另一版本的桥接仍在运行，请先在旧 main.py 中输入 quit")
         pe = pefile.PE(str(dll))
-        name = b"WxArmMentionProbe" if mode == "--probe-at" else {
-            "--arm":b"WxArmSelfTest", "--dispatch":b"WxDispatchSelfTest", "--receive":b"WxArmReceiveTest",
-            "--listen":b"WxStartFileHelperReceiver", "--remove":b"WxRemoveSelfTest"}[mode]
+        # 两种桥接的导出表不同，必须先按桥接类型选映射；图片下载只存在于通用桥接。
         if generic:
             name = {"--dispatch": b"WxSendText", "--listen": b"WxStartTextReceiver",
-                    "--remove": b"WxRemoveSelfTest", "--probe-at": b"WxArmMentionProbe"}[mode]
+                    "--remove": b"WxRemoveSelfTest", "--probe-at": b"WxArmMentionProbe",
+                    "--download-image": b"WxDownloadImage"}[mode]
             if mentions is not None:
                 name = b"WxSendAtText"
+        else:
+            name = b"WxArmMentionProbe" if mode == "--probe-at" else {
+                "--arm":b"WxArmSelfTest", "--dispatch":b"WxDispatchSelfTest", "--receive":b"WxArmReceiveTest",
+                "--listen":b"WxStartFileHelperReceiver", "--remove":b"WxRemoveSelfTest"}[mode]
         export = next(item.address for item in pe.DIRECTORY_ENTRY_EXPORT.symbols if item.name == name)
 
         def allocate(data):
@@ -225,9 +282,18 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
         report_path = ROOT / f".runtime/native_requests/{uuid.uuid4().hex}.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         if len(str(report_path)) >= 260: raise RuntimeError("报告路径超过原生接口长度")
-        config = AtTextConfig() if mentions is not None else (TextConfig() if generic else Config())
+        config = AtTextConfig() if mentions is not None else (
+            ImageDownloadConfig() if download_image is not None else
+            (TextConfig() if generic else Config()))
         config.size, config.pid, config.manager = c.sizeof(config), pid, 0
-        config.log_path, config.text = str(report_path), encoded
+        config.log_path = str(report_path)
+        if download_image is not None:
+            config.text = destination.encode("utf-8")
+            config.filekey = filekey.encode("ascii")
+            config.aeskey = aeskey.encode("ascii")
+            config.image_type = image_type
+        else:
+            config.text = encoded
         if generic:
             config.target = target.encode("ascii")
         if mentions is not None:
@@ -241,7 +307,7 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
         result = {"mode":mode,"pid":pid,"code":exit_code,"target":target,"report_path":str(report_path)}
         if mode == "--remove":
             result["dll_unloaded"] = dll.name.lower() not in modules(pid)
-        if mode == "--dispatch":
+        if mode in ("--dispatch", "--download-image"):
             deadline = time.monotonic() + 15
             while exit_code == 0 and not report_path.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
@@ -262,15 +328,27 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
                 result["dll_unloaded"] = dll.name.lower() not in modules(pid)
             else:
                 result["dll_unloaded"] = False
-            result["success"] = (exit_code == 0 and result.get("report", {}).get("completion_success") is True
-                                 and result["report"].get("target") == target and result["report"].get("text") == text
+            report = result.get("report", {})
+            result["success"] = (exit_code == 0 and report.get("completion_success") is True
+                                 and report.get("target") == target and report.get("text") == text
                                  and cleanup_code == 0 and (keep_loaded or result.get("dll_unloaded") is True))
+            if download_image is not None:
+                report = result.get("report", {})
+                result["success"] = (exit_code == 0 and report.get("completion_success") is True
+                                     and report.get("operation") == "image_download"
+                                     and report.get("image_path") == destination
+                                     and type(report.get("bytes_written")) is int
+                                     and report["bytes_written"] > 0
+                                     and cleanup_code == 0
+                                     and (keep_loaded or result.get("dll_unloaded") is True))
             if mentions is not None:
                 result["success"] = result["success"] and result["report"].get("at_members") == ",".join(mentions)
             if not preserve_report and result["success"]:
-                # 长期运行只保留内存中的完成结果；删除本次已结束的临时报告。
+                # 长期运行只保留内存中的完成结果；已结束的临时报告归档而不是删除。
                 try:
-                    report_path.unlink(missing_ok=True)
+                    archive = report_path.parent / "done"
+                    archive.mkdir(parents=True, exist_ok=True)
+                    report_path.replace(archive / report_path.name)
                     result["report_retained"] = False
                 except OSError as error:
                     # 临时文件被占用不应把已经成功的发送变成失败。

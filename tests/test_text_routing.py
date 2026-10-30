@@ -108,32 +108,45 @@ class TextRoutingTests(unittest.TestCase):
         if str(NATIVE) not in sys.path:
             sys.path.insert(0, str(NATIVE))
         import pefile
-        from run_selftest import Config, TextConfig, AtTextConfig, TEXT_DLL
-        from filehelper_service import ReceivedMessage, ReceivedTextMessage, ReceivedTextMessageV2
-        from text_service import text_message_binding
+        from run_selftest import Config, TextConfig, AtTextConfig, ImageDownloadConfig, TEXT_DLL
+        from filehelper_service import (ReceivedMessage, ReceivedTextMessage, ReceivedTextMessageV2,
+                                        ReceivedMediaMessageV4)
+        from text_service import V4_EXPORT, V3_EXPORT, V2_EXPORT, text_message_binding
         self.assertEqual(ctypes.sizeof(Config), 1560)
         self.assertEqual(ctypes.sizeof(TextConfig), 1688)
         self.assertEqual(TextConfig.target.offset, 1560)
         self.assertEqual(ctypes.sizeof(AtTextConfig), 2712)
         self.assertEqual(AtTextConfig.members.offset, 1688)
+        self.assertEqual(ctypes.sizeof(ImageDownloadConfig), 2656)
+        self.assertEqual(ImageDownloadConfig.filekey.offset, 1560)
+        self.assertEqual(ImageDownloadConfig.aeskey.offset, 2584)
+        self.assertEqual(ImageDownloadConfig.image_type.offset, 2652)
         self.assertEqual(ctypes.sizeof(ReceivedMessage), 1312)
         self.assertEqual(ctypes.sizeof(ReceivedTextMessageV2), 5408)  # 正文 1KB + 艾特来源
         self.assertEqual(ctypes.sizeof(ReceivedTextMessage), 12576)  # 正文缓冲 8KB + 艾特来源
+        self.assertEqual(ctypes.sizeof(ReceivedMediaMessageV4), 28968)  # + 图片 XML 16KB + 原始编号
+        self.assertEqual(ReceivedMediaMessageV4.image_xml.offset, 12576)
+        self.assertEqual(ReceivedMediaMessageV4.native_message_id.offset, 28960)
         with pefile.PE(str(TEXT_DLL)) as pe:
             exports = {item.name for item in pe.DIRECTORY_ENTRY_EXPORT.symbols}
             self.assertEqual(pe.FILE_HEADER.Machine, 0x8664)
             self.assertTrue({b"WxSendText", b"WxSendAtText", b"WxStartTextReceiver", b"WxPollTextMessage",
                              b"WxPollTextMessageV2", b"WxWaitForTasks", b"WxRemoveSelfTest"}.issubset(exports))
-        # 接收协议跟着已编译 DLL 走：有 V3 收 8KB 正文，否则按 V2 的 1KB 正文收，都能正常启动。
+        # 接收协议跟着已编译 DLL 走：V4 收图片，V3 收 8KB 正文，否则按 V2 的 1KB 正文收，都能正常启动。
         poll_export, message_type = text_message_binding(exports)
-        if b"WxPollTextMessageV3" in exports:
-            self.assertEqual((poll_export, message_type), (b"WxPollTextMessageV3", ReceivedTextMessage))
+        if V4_EXPORT in exports:
+            self.assertEqual((poll_export, message_type), (V4_EXPORT, ReceivedMediaMessageV4))
+        elif V3_EXPORT in exports:
+            self.assertEqual((poll_export, message_type), (V3_EXPORT, ReceivedTextMessage))
         else:
-            self.assertEqual((poll_export, message_type), (b"WxPollTextMessageV2", ReceivedTextMessageV2))
-        # 源码已声明 V3（重编桥接后即启用）；这里防止有人只改一边。
+            self.assertEqual((poll_export, message_type), (V2_EXPORT, ReceivedTextMessageV2))
+        # 源码已声明 V4（重编桥接后即启用）；这里防止有人只改一边。
         source = (NATIVE / "text_bridge.cpp").read_text(encoding="utf-8")
+        self.assertIn("WxPollMediaMessageV4", source)
         self.assertIn("WxPollTextMessageV3", source)
         self.assertIn("WxPollTextMessageV2", source)
+        self.assertIn('#include "image_download.h"', source)
+        self.assertIn("WxDownloadImage", (NATIVE / "image_download.h").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

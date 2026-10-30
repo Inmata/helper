@@ -20,6 +20,7 @@ class PluginContext:
         self._llm_config_path = llm_config_path
         self._llm = None
         self._jev = None
+        self._magpie = None
         self._members = member_store
         self._knowledge = knowledge_store
         self._room_state = room_state_store
@@ -69,6 +70,16 @@ class PluginContext:
             from ..integrations.jev import JevClient
             self._jev = JevClient.from_file(self._llm_config_path)
         return self._jev
+
+    @property
+    def magpie(self):
+        """本机 Magpie 识图 / 联网工具：读同一份大模型配置的可选 "magpie_tools" 段，缺省用本机默认地址。"""
+        if self._magpie is None:
+            if self._llm_config_path is None:
+                raise ValueError("尚未配置大模型文件")
+            from ..integrations.magpie_tools import MagpieTools
+            self._magpie = MagpieTools.from_file(self._llm_config_path)
+        return self._magpie
 
     def send_text(self, chat_id, text):
         sent = self._service.send_text(chat_id, text)

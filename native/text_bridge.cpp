@@ -2,6 +2,7 @@
 // 单独生成 text_bridge.dll，不替换仍在运行的 selftest_bridge.dll。
 #define WXBOT_EXTENDED_RECEIVE
 #include "selftest_bridge.cpp"
+#include "image_download.h"
 
 struct TextConfig {
     TestConfig base;
@@ -245,17 +246,29 @@ static void sample_all_text(const uintptr_t* batch) {
         for (uintptr_t address = batch[0]; address < batch[1]; address += 0x78) {
             const auto message = reinterpret_cast<const unsigned char*>(address);
             const uint32_t type = *reinterpret_cast<const uint32_t*>(message + 0x14);
-            // 1 是文本；49 只放行带 refermsg 的引用消息，链接、文件、转发等其他卡片不要。
-            if (type != 1 && type != 49) continue;
-            char sender[128]{}, receiver[128]{}, text[8192]{};
+            // 1 是文本；3 是图片；49 只放行带 refermsg 的引用消息，
+            // 链接、文件、转发等其他卡片不要。
+            if (type != 1 && type != 3 && type != 49) continue;
+            char sender[128]{}, receiver[128]{};
             if (!read_pb_string(message, 8, sender, sizeof(sender)) || !valid_target(sender) ||
-                !read_pb_string(message, 0x18, receiver, sizeof(receiver)) || !valid_target(receiver) ||
-                !read_pb_string(message, 0x20, text, sizeof(text))) continue;
-            if (type == 49 && !std::strstr(text, "<refermsg")) continue;
+                !read_pb_string(message, 0x18, receiver, sizeof(receiver)) || !valid_target(receiver)) continue;
             // 接收瞬间复制元数据，不持有任何微信消息对象或字符串指针。
             char source[4096]{};
             if (!try_read_source(message, 0x38, source, sizeof(source))) source[0] = 0;
-            enqueue_received(sender, receiver, text, source, type);
+            // Sync AddMsg +0x50 -> 消息对象 +0x148；保留 64 位服务器编号，
+            // 供图片事件与引用消息后续按原始编号关联。
+            const uint64_t message_id = *reinterpret_cast<const uint64_t*>(message + 0x50);
+            if (type == 3) {
+                // 群图片正文同样是“成员 ID:\n<msg><img .../></msg>”，由 Python 路由剥离前缀。
+                char image_xml[16384]{};
+                if (!read_pb_string(message, 0x20, image_xml, sizeof(image_xml))) continue;
+                enqueue_received(sender, receiver, "", source, 3, image_xml, message_id);
+                continue;
+            }
+            char text[8192]{};
+            if (!read_pb_string(message, 0x20, text, sizeof(text))) continue;
+            if (type == 49 && !std::strstr(text, "<refermsg")) continue;
+            enqueue_received(sender, receiver, text, source, type, nullptr, message_id);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // 布局不匹配时放弃采样，真实客户端仍按原逻辑收消息。
@@ -295,17 +308,16 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxStartTextReceiver(void* paramete
 }
 
 extern "C" __declspec(dllexport) DWORD WINAPI WxPollTextMessage(void* parameter) {
-    // 保留旧接口的 1312 字节边界，旧调用者不会被 V2 写越界。
+    // 保留旧接口的 1312 字节边界，旧调用者不会被 V2/V4 写越界。
     if (!parameter) return ERROR_INVALID_PARAMETER;
-    ReceivedMessage message{};
-    const DWORD code = WxPollFileHelperMessage(&message);
-    std::memcpy(parameter, &message, 1312);
-    *static_cast<uint32_t*>(parameter) = 1312;
+    ReceivedMediaMessageV4 message{};
+    const DWORD code = poll_received(&message);
+    copy_legacy_message(message, static_cast<LegacyReceivedMessage*>(parameter));
     return code;
 }
 
-// V2 调用方只分配 5408 字节（正文 1KB + 艾特来源 4KB）。队列内部是 12576 字节的 V3 结构，
-// 所以这里先取到本地再按旧布局截断复制，绝不能把新结构直接写进旧缓冲区。
+// V2 调用方只分配 5408 字节（正文 1KB + 艾特来源 4KB）。队列内部是 28968 字节的
+// V4 结构，所以这里先取到本地再按旧布局截断复制，绝不能把新结构直接写进旧缓冲区。
 struct LegacyReceivedText {
     uint32_t size, present, type, thread_id, dropped, reserved;
     uint64_t sequence;
@@ -313,12 +325,45 @@ struct LegacyReceivedText {
 };
 static_assert(sizeof(LegacyReceivedText) == 5408, "Unexpected V2 receive ABI");
 
+static void copy_legacy_text(const ReceivedMediaMessageV4& source, LegacyReceivedText* output) {
+    output->size = sizeof(*output);
+    output->present = source.present;
+    output->type = source.type;
+    output->thread_id = source.thread_id;
+    output->dropped = source.dropped;
+    output->reserved = source.reserved;
+    output->sequence = source.sequence;
+    std::memcpy(output->sender, source.sender, sizeof(output->sender));
+    std::memcpy(output->receiver, source.receiver, sizeof(output->receiver));
+    std::memcpy(output->text, source.text, sizeof(output->text) - 1);
+    output->text[sizeof(output->text) - 1] = 0;
+    std::memcpy(output->mention_source, source.mention_source, sizeof(output->mention_source) - 1);
+    output->mention_source[sizeof(output->mention_source) - 1] = 0;
+}
+
 extern "C" __declspec(dllexport) DWORD WINAPI WxPollTextMessageV2(void* parameter) {
     if (!parameter) return ERROR_INVALID_PARAMETER;
-    ReceivedMessage message{};
-    const DWORD code = WxPollFileHelperMessage(&message);
+    ReceivedMediaMessageV4 message{};
+    const DWORD code = poll_received(&message);
     if (code) return code;
-    auto output = static_cast<LegacyReceivedText*>(parameter);
+    copy_legacy_text(message, static_cast<LegacyReceivedText*>(parameter));
+    return 0;
+}
+
+// V3 调用方分配 12576 字节（正文 8KB + 艾特来源）；不含图片 XML 与原始消息编号。
+struct LegacyReceivedTextV3 {
+    uint32_t size, present, type, thread_id, dropped, reserved;
+    uint64_t sequence;
+    char sender[128], receiver[128], text[8192], mention_source[4096];
+};
+static_assert(sizeof(LegacyReceivedTextV3) == 12576, "Unexpected V3 receive ABI");
+
+extern "C" __declspec(dllexport) DWORD WINAPI WxPollTextMessageV3(void* parameter) {
+    if (!parameter) return ERROR_INVALID_PARAMETER;
+    ReceivedMediaMessageV4 message{};
+    const DWORD code = poll_received(&message);
+    if (code) return code;
+    auto output = static_cast<LegacyReceivedTextV3*>(parameter);
     output->size = sizeof(*output);
     output->present = message.present;
     output->type = message.type;
@@ -335,9 +380,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxPollTextMessageV2(void* paramete
     return 0;
 }
 
-// 正文缓冲扩到 8KB 后的同一份队列；调用方按新的结构大小读取。
-extern "C" __declspec(dllexport) DWORD WINAPI WxPollTextMessageV3(void* parameter) {
-    return WxPollFileHelperMessage(parameter);
+// V4 媒体队列：正文 8KB、艾特来源 4KB、图片 XML 16KB、64 位原始消息编号。
+extern "C" __declspec(dllexport) DWORD WINAPI WxPollMediaMessageV4(void* parameter) {
+    if (!parameter) return ERROR_INVALID_PARAMETER;
+    _InterlockedIncrement(&active_callbacks);
+    auto output = static_cast<ReceivedMediaMessageV4*>(parameter);
+    const DWORD code = poll_received(output);
+    _InterlockedDecrement(&active_callbacks);
+    return code;
 }
 
 // 定向只读探针：仅在手动发送 WXBOT_AT_PROBE 的消息中记录 msgsource 字符串。

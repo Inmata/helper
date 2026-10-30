@@ -16,7 +16,7 @@ related:
 
 ## 边界
 
-- 运行平台为 Windows x64 与 64 位 Python；原生桥接负责文本收发，C++ 内部不在本规范范围。
+- 运行平台为 Windows x64 与 64 位 Python；原生桥接负责文本收发与群图片下载；图片接收时只保存到本地，只在艾特回复里按需经 Magpie 识别（见 [mention-reply](../mention-reply/spec.md)）；C++ 内部不在本规范范围。
 - 统一入口是 `main.py`：解析参数、装配应用、启动主循环。
 - 功能以插件实现；配置字段、用户命令、脚本入口与插件目录名保持兼容。
 - spec 只写已经实现的行为；计划中的改动留在 `docs/` 的计划文档。
@@ -32,10 +32,10 @@ related:
 | `app/` | 装配与显式初始化（`bootstrap.py`）、主循环（`runtime.py`）、消息顺序（`ingress.py`）、控制台、维护、检查命令、公告、资料修订 |
 | `messaging/` | 消息模型、发送、节奏、接收水位、文本与艾特工具 |
 | `plugin_engine/` | 清单、发现与加载、插件上下文 |
-| `conversation/` | 成员与历史、群状态、对话、总结、人格、清空控制、决策接缝（`planner.py`） |
+| `conversation/` | 成员与历史、群状态、对话、总结、人格、清空控制、决策接缝（`planner.py`）、艾特回复的工具判断与调用（`tool_router.py`、`mention_tools.py`） |
 | `memory/` | 知识库与维护、增量学习、学习调度、主动发言 |
 | `storage/` | 唯一连接与事务、集中迁移 |
-| `integrations/` | 原生微信后端适配、大模型与 Jev 客户端 |
+| `integrations/` | 原生微信后端适配、大模型与 Jev 客户端、Magpie 看图/联网工具客户端与带硬截止的 HTTP opener |
 | `plugins/_shared/` | 插件之间的只读数据契约 |
 | `plugins/_template/` | 插件模板 |
 | `native/`、`tests/`、`tools/` | 原生桥接源码与 DLL、离线测试、离线维护脚本 |
@@ -59,6 +59,9 @@ related:
 - 事务由用例控制：下层写方法只执行 SQL，异常沿调用栈抛出，不留半批结果。
 - 只有显式初始化会建库与迁移：`app/bootstrap.py` 的 `startup_services()` 与 `open_knowledge()`；解析配置、读取插件上下文属性不写数据库。
 - 停止顺序与未完成时的处理见 [lifecycle](../lifecycle/spec.md)；检查命令（`--check` / `--list-plugins`）不建库、不注入微信、不请求模型。
+- 图片保存目录由 `image_directory` 配置（默认 `.runtime/images`），原生服务按账号隔离后交给 `ImageStore`；原始图片 XML、CDN 地址与密钥只存在于解析和下载请求内部，不进入插件消息。
+- 图片能力只按已编译桥接的实际导出声明：同时存在 V4 媒体队列与 `WxDownloadImage` 时才把 `image.receive` 等加入后端能力；旧 V3/V2 DLL 不声明，依赖图片能力的插件不会加载。`mention_chat` 不把图片能力写进 `requires`，按运行时能力决定能否看图，旧 DLL 下仍可联网搜索。
+- 最近图片索引 `recent_images.RECENT_IMAGES` 是进程内单例：原生服务写、艾特回复读，按群有界、服务启动时清空，不落库。
 
 | 线程名 | 作用 |
 |---|---|
@@ -67,6 +70,8 @@ related:
 | `MemoryLearner` | 增量学习调度 |
 | `HourlyChat` | 定时主动发言候选（冷场兜底） |
 | `ProactiveChat.timer` | 事件驱动主动发言的去抖计时（插件 `proactive_chat` 自建，`on_unload` 时停止） |
+| `WechatImageReceiver` | 每个账号一个异步图片下载线程；下载完成后投递图片事件 |
+| `mention-tool` | 艾特回复里单次 Jev 判断或工具调用的限时线程（守护线程，超过本轮截止时间即放弃） |
 | `Plugin.<名称>` | 每个插件的消息队列 |
 
 ## 扩展落点

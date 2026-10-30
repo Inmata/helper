@@ -3,14 +3,52 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from .deadline_http import build_deadline_opener
 
 DEFAULT_MODEL = "typesafe/jev-latest"
 MAX_QUESTIONS = 64
 CHOICE_SUM_TOLERANCE = 0.05
+MAX_RESPONSE_BYTES = 1024 * 1024
+CHUNK_SIZE = 64 * 1024
+
+
+_opener = build_deadline_opener()
+
+
+def urlopen(request, timeout):
+    """模块内的 ``urlopen``：整次请求受 timeout 硬截止、不跟随重定向；便于测试替换。"""
+    return _opener.open(request, timeout=timeout)
+
+
+def _read_within(response, deadline):
+    """按总截止时间分块读响应体。
+
+    ``urlopen`` 的 timeout 只约束单次 socket 读，服务端小口慢发时会不断重置；
+    每读一块前把套接字读超时收窄到剩余时间，超过截止时间抛 ``TimeoutError``。
+    """
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    read = getattr(response, "read1", None) or response.read
+    raw = bytearray()
+    while len(raw) <= MAX_RESPONSE_BYTES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Jev 读取超时")
+        if sock is not None:
+            try:
+                sock.settimeout(remaining)
+            except (OSError, ValueError):
+                pass
+        chunk = read(CHUNK_SIZE)
+        if not chunk:
+            break
+        raw.extend(chunk)
+    return bytes(raw)
 
 
 class JevError(RuntimeError):
@@ -60,8 +98,11 @@ class JevClient:
         section = options.get("jev", {})
         return cls(section if isinstance(section, dict) else {}, fallback=options)
 
-    def noul(self, state, questions):
-        """questions 为 [{"instructions", "true", "false"}]；按顺序返回每题为真的概率。"""
+    def noul(self, state, questions, *, timeout=None):
+        """questions 为 [{"instructions", "true", "false"}]；按顺序返回每题为真的概率。
+
+        ``timeout`` 是调用方剩余的时间，只能缩短配置的超时。
+        """
         if not isinstance(state, dict):
             raise ValueError("Jev state 必须是对象")
         if not isinstance(questions, (list, tuple)) or not 1 <= len(questions) <= MAX_QUESTIONS:
@@ -73,7 +114,10 @@ class JevClient:
                 raise ValueError("Jev 题目需要 instructions 与 true/false 判据")
             payload[f"q{index}"] = {"type": "noul", "instructions": question["instructions"],
                                     "criteria": {"true": question["true"], "false": question["false"]}}
-        answers = self._post({"model": self.model, "state": state, "questions": payload})
+        if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("Jev timeout 应为正数秒")
+        answers = self._post({"model": self.model, "state": state, "questions": payload},
+                             timeout=self.timeout if timeout is None else min(self.timeout, timeout))
         result = []
         for index in range(len(questions)):
             try:
@@ -116,14 +160,16 @@ class JevClient:
             raise JevFormatError("Jev 返回的选项概率之和不为 1")
         return result
 
-    def _post(self, payload):
+    def _post(self, payload, *, timeout=None):
+        timeout = self.timeout if timeout is None else timeout
+        deadline = time.monotonic() + timeout
         request = Request(self.base_url + "/systemone",
                           data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                           headers={"Authorization": "Bearer " + self._api_key,
                                    "Content-Type": "application/json"}, method="POST")
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                raw = response.read(1024 * 1024 + 1)
+            with urlopen(request, timeout=timeout) as response:
+                raw = _read_within(response, deadline)
         except HTTPError as error:
             # 不输出响应正文或请求头，避免服务器错误回显密钥。
             if error.code in (401, 403):
@@ -131,7 +177,7 @@ class JevClient:
             raise JevError(f"Jev 接口 HTTP {error.code}") from None
         except (URLError, TimeoutError, OSError):
             raise JevError("Jev 连接失败或超时") from None
-        if len(raw) > 1024 * 1024:
+        if len(raw) > MAX_RESPONSE_BYTES:
             raise JevError("Jev 响应过大")
         try:
             answers = json.loads(raw)["answers"]

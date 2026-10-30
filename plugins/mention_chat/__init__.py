@@ -6,12 +6,15 @@ from .._shared import idiom_state
 
 from wxbot_framework.conversation.dialogue import Dialogue
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
+from wxbot_framework.conversation.mention_tools import MentionTools, ToolOutcome, read_tool_options, with_sources
 from wxbot_framework.conversation.repetition import too_similar
+from wxbot_framework.conversation.tool_router import JevToolRouter
+from wxbot_framework.recent_images import RECENT_IMAGES
 from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.conversation.members import SnapshotExpired
 from wxbot_framework.messaging.mentions import at_source, bot_names, strip_at_labels, typed_at
 from wxbot_framework.conversation.personality import personality_text
-from wxbot_framework.conversation.utterance import (CHAT, InterjectionGate, SpeakResult, classify_tier,
+from wxbot_framework.conversation.utterance import (CHAT, DETAIL, QA, InterjectionGate, SpeakResult, classify_tier,
                                                     interjection_probe, speak)
 from wxbot_framework.commands import is_control
 
@@ -21,6 +24,8 @@ USED_SAMPLE = 10
 RECENT_BOT_ROWS = 5
 # 提问含这些词时视为明确要求详细回答，使用 detail_max_tokens 预算。
 DETAIL_HINTS = ("详细", "详解", "细说", "展开", "具体说说", "完整", "全文", "全篇", "原文", "一步一步", "逐步")
+# 框架按已编译桥接声明的图片能力；没有时找不到图要如实说“收不到图片”，而不是让对方去引用。
+IMAGE_CAPABILITY = "group.image.receive"
 
 
 def read_aliases(config):
@@ -42,6 +47,7 @@ class Plugin:
         self._pending = {}
         self._pending_lock = threading.Lock()
         self.aliases = ()  # on_load 按配置填；测试与热重载时缺省为空
+        self.tools = None  # on_load 按配置填看图 / 联网阈值；None 表示不调用工具
 
     def _claim(self, key, arrived_at):
         """认领本次生成；仍在生成中，或本次到达时首次回复尚未结束，返回 False。
@@ -74,6 +80,7 @@ class Plugin:
         self.members = ctx.members
         self.room_state = getattr(ctx, "room_state", None)
         self.aliases = read_aliases(ctx.config)
+        self.tools = read_tool_options(ctx.config)
         if not self.members.history_enabled:
             raise ValueError("艾特上下文对话需要 history_enabled: true")
         ctx.llm  # 启动时核对配置，不请求接口。
@@ -125,7 +132,23 @@ class Plugin:
         return tuple(row.get("text") or "" for row in rows
                      if isinstance(row, dict) and (row.get("bot_generated") or row.get("is_self")))
 
+    def _run_tools(self, message, ctx, question):
+        """本轮艾特的看图 / 联网；没开启时返回空结果。Jev 读不出来时只按明确说法执行。"""
+        if self.tools is None:
+            return ToolOutcome()
+        try:
+            jev = ctx.jev
+        except Exception as error:
+            ctx.logger.warning("Jev 不可用，只按明确说法看图或搜索：%s", type(error).__name__)
+            jev = None
+        tools = MentionTools(router=JevToolRouter(jev, **self.tools), magpie=lambda: ctx.magpie,
+                             images=RECENT_IMAGES, image_supported=IMAGE_CAPABILITY in getattr(ctx, "capabilities", ()),
+                             logger=ctx.logger)
+        return tools.run(question=question, room=message.chat_id, sender=message.sender_id,
+                         received_at=message.received_at, quote=message.data.get("quote"))
+
     def on_message(self, message, ctx):
+        # 图片事件（type 3）由原生服务记入 RECENT_IMAGES，这里只回复文本里的艾特。
         if (message.type != 1 or not message.is_group or message.chat_id not in self.members.groups or
                 "WXBOT_AT_CHAT_PROBE" in message.text or
                 message.data.get("bot_generated") or is_control(message.text)):
@@ -143,9 +166,10 @@ class Plugin:
                 clean_query = clean_query.replace("@" + label, "")
         clean_query = clean_query.strip()
         quote = message.data.get("quote") or {}
-        # 引用非文本消息时没有正文，仍把引用人带给模型，别把整条引用丢掉。
-        quote = ({"name": quote.get("name") or "", "text": quote.get("text") or ""}
-                 if quote.get("name") or quote.get("text") else None)
+        # 引用非文本消息时没有正文，仍把引用人带给模型，别把整条引用丢掉；引用图片时标明是图片。
+        quote_text = quote.get("text") or ("[图片]" if quote.get("ref_type") == "3" else "")
+        quote = ({"name": quote.get("name") or "", "text": quote_text}
+                 if quote.get("name") or quote_text else None)
         game = self.room_game(message.chat_id, ctx, message=message)
         if game and self.is_move(clean_query, game):
             return  # 答案由接龙插件判定并出题，人格不重复回复也不编造进度。
@@ -161,6 +185,22 @@ class Plugin:
             tools = build_default_tools(ctx.knowledge, self.members)
             context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
             options = {"detail": True} if detail else {"examples": context.examples}
+            display = self.members.at_display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
+            budget = 1023 - len(("@" + display + "\u2005\n").encode("utf-8"))
+
+            def send_at(part, send_guard=guard):
+                return ctx.reply_at(message, part, display_name=display, delivery_guard=send_guard)
+
+            outcome = self._run_tools(message, ctx, clean_query)
+            if outcome.ask:
+                # 找不到或分不清要看哪张图：不猜，直接请对方引用。
+                speak(outcome.ask, tier=QA, byte_budget=budget, result=result, send_at=send_at)
+                if result.failed:
+                    raise RuntimeError("原生艾特发送未成功")
+                ctx.logger.info("艾特对话：请对方指明图片 room=%s", message.chat_id)
+                return
+            if outcome.used:
+                options["tool_results"] = outcome.payload()
 
             def generate(avoid=None):
                 return personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(
@@ -183,14 +223,14 @@ class Plugin:
                     reply = retried
                     if too_similar(reply, self._recent_bot_texts(message.chat_id)):
                         ctx.logger.info("艾特回复重说后仍相近，按原样发送：room=%s", message.chat_id)
-            display = self.members.at_display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
-            budget = 1023 - len(("@" + display + "\u2005\n").encode("utf-8"))
-            tier = classify_tier(clean_query, detail=detail)
+            # 用了工具的回复按问答单条发出，来源链接跟在正文后面，不被闲聊拆分切开。
+            reply = with_sources(reply, outcome.sources)
+            tier = (DETAIL if detail else QA) if outcome.used else classify_tier(clean_query, detail=detail)
             # 闲聊拆分时把插话检测并入守卫：后续条在拿到守卫后、原生发送前再查一次。
             gate = InterjectionGate(interjection_probe(self.members, message.chat_id)) if tier == CHAT else None
             send_guard = gate.wrap(guard) if gate is not None else guard
             speak(reply, tier=tier, byte_budget=budget, result=result,
-                  send_at=lambda part: ctx.reply_at(message, part, display_name=display, delivery_guard=send_guard),
+                  send_at=lambda part: send_at(part, send_guard),
                   send_plain=lambda part: ctx.reply(message, part, delivery_guard=send_guard),
                   interjected=gate)
             if result.failed:

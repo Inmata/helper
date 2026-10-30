@@ -53,7 +53,12 @@
       "enabled": true
     },
     "mention_chat": {
-      "enabled": false
+      "enabled": false,
+      "tools": {
+        "enabled": true,
+        "vision_threshold": 0.6,
+        "search_threshold": 0.7
+      }
     },
     "chat_summary": {
       "enabled": false

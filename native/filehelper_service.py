@@ -50,9 +50,15 @@ class ReceivedTextMessage(c.Structure):
                 ("mention_source", c.c_char * 4096)]
 
 
+class ReceivedMediaMessageV4(ReceivedTextMessage):
+    """V4 媒体接收：图片 XML 与 64 位原始消息编号追加在 V3 正文之后。"""
+    _fields_ = [("image_xml", c.c_char * 16384), ("native_message_id", c.c_uint64)]
+
+
 assert c.sizeof(ReceivedMessage) == 1312
 assert c.sizeof(ReceivedTextMessageV2) == 5408
 assert c.sizeof(ReceivedTextMessage) == 12576
+assert c.sizeof(ReceivedMediaMessageV4) == 28968
 
 
 class ReceiveChannel:

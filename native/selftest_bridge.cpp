@@ -40,7 +40,13 @@ static volatile LONG live_completions = 0;
 static volatile LONG live_tasks = 0;
 static bool hook_created = false;
 static bool factory_hook_created = false;
+static bool image_download_factory_hook_created = false;
 static DWORD factory_tls = TLS_OUT_OF_INDEXES;
+
+// 本桥接只接受 4.1.15.13 指纹，旧地址即当前地址；保留与上游一致的取名，
+// 便于以后增加其他构建时替换成版本映射。
+static uintptr_t core_address(uintptr_t base, uintptr_t legacy_rva) { return base + legacy_rva; }
+[[maybe_unused]] static uintptr_t core_rva(uintptr_t legacy_rva) { return legacy_rva; }
 using ReceiveFunction = uintptr_t (__fastcall*)(void*, const uintptr_t*, uint8_t, uint8_t);
 static ReceiveFunction original_receive = nullptr;
 static bool receive_hook_created = false;
@@ -49,6 +55,7 @@ static bool receive_queue_mode = false;
 
 // 只复制文件传输助手消息；Hook 内不做磁盘读写或调用 Python。
 // 扩展接收把正文缓冲扩到 8KB：引用消息的 XML 常常超过 1KB，装不下就解析不出来。
+// 队列内部再追加图片 XML 与 64 位服务器编号；旧导出按各自调用方的缓冲区截断复制。
 struct ReceivedMessage {
     uint32_t size, present, type, thread_id, dropped, reserved;
     uint64_t sequence;
@@ -65,25 +72,57 @@ static_assert(sizeof(ReceivedMessage) == 12576, "Unexpected text receive V3 ABI"
 #else
 static_assert(sizeof(ReceivedMessage) == 1312, "Unexpected receive ABI");
 #endif
+
+#ifdef WXBOT_EXTENDED_RECEIVE
+struct ReceivedMediaMessageV4 {
+    uint32_t size, present, type, thread_id, dropped, reserved;
+    uint64_t sequence;
+    char sender[128], receiver[128];
+    char text[8192];
+    char mention_source[4096];
+    char image_xml[16384];
+    uint64_t native_message_id;
+};
+static_assert(sizeof(ReceivedMediaMessageV4) == 28968, "Unexpected media receive ABI");
+#define RECEIVED_QUEUE_TYPE ReceivedMediaMessageV4
+#else
+#define RECEIVED_QUEUE_TYPE ReceivedMessage
+#endif
+
 static SRWLOCK receive_lock = SRWLOCK_INIT;
-static ReceivedMessage received_messages[64]{};
+static RECEIVED_QUEUE_TYPE received_messages[64]{};
 static uint32_t receive_head = 0, receive_count = 0, receive_dropped = 0;
 static uint64_t receive_sequence = 0;
 
+static size_t bounded_length(const char* text, size_t capacity) {
+    return text ? strnlen_s(text, capacity - 1) : 0;
+}
+
 static void enqueue_received(const char* sender, const char* receiver, const char* text, const char* source = nullptr,
-                             uint32_t type = 1) {
+                             uint32_t type = 1, const char* media = nullptr, uint64_t message_id = 0) {
+#ifdef WXBOT_EXTENDED_RECEIVE
+    ReceivedMediaMessageV4 message{};
+#else
     ReceivedMessage message{};
+#endif
     message.size = sizeof(message);
     message.present = 1;
     message.type = type;
     message.thread_id = GetCurrentThreadId();
-    std::memcpy(message.sender, sender, std::strlen(sender) + 1);
-    std::memcpy(message.receiver, receiver, std::strlen(receiver) + 1);
-    std::memcpy(message.text, text, std::strlen(text) + 1);
-#ifdef WXBOT_EXTENDED_RECEIVE
-    if (source) std::memcpy(message.mention_source, source, std::strlen(source) + 1);
+    std::memcpy(message.sender, sender, bounded_length(sender, sizeof(message.sender)));
+    std::memcpy(message.receiver, receiver, bounded_length(receiver, sizeof(message.receiver)));
+    const size_t text_length = bounded_length(text, sizeof(message.text));
+    if (text_length) std::memcpy(message.text, text, text_length);
+#if defined(WXBOT_EXTENDED_RECEIVE)
+    const size_t source_length = bounded_length(source, sizeof(message.mention_source));
+    if (source_length) std::memcpy(message.mention_source, source, source_length);
+    const size_t media_length = bounded_length(media, sizeof(message.image_xml));
+    if (media_length) std::memcpy(message.image_xml, media, media_length);
+    message.native_message_id = message_id;
 #else
     (void)source;
+    (void)media;
+    (void)message_id;
 #endif
     AcquireSRWLockExclusive(&receive_lock);
     if (receive_count == std::size(received_messages)) {
@@ -96,6 +135,41 @@ static void enqueue_received(const char* sender, const char* receiver, const cha
     received_messages[(receive_head + receive_count) % 64] = message;
     ++receive_count;
     ReleaseSRWLockExclusive(&receive_lock);
+}
+
+static DWORD poll_received(RECEIVED_QUEUE_TYPE* output) {
+    AcquireSRWLockExclusive(&receive_lock);
+    *output = {};
+    output->size = sizeof(*output);
+    output->dropped = receive_dropped;
+    if (receive_count) {
+        *output = received_messages[receive_head];
+        receive_head = (receive_head + 1) % 64;
+        --receive_count;
+    }
+    ReleaseSRWLockExclusive(&receive_lock);
+    return 0;
+}
+
+struct LegacyReceivedMessage {
+    uint32_t size, present, type, thread_id, dropped, reserved;
+    uint64_t sequence;
+    char sender[128], receiver[128], text[1024];
+};
+static_assert(sizeof(LegacyReceivedMessage) == 1312, "Unexpected legacy receive ABI");
+
+static void copy_legacy_message(const RECEIVED_QUEUE_TYPE& source, LegacyReceivedMessage* output) {
+    output->size = sizeof(*output);
+    output->present = source.present;
+    output->type = source.type;
+    output->thread_id = source.thread_id;
+    output->dropped = source.dropped;
+    output->reserved = source.reserved;
+    output->sequence = source.sequence;
+    std::memcpy(output->sender, source.sender, sizeof(output->sender));
+    std::memcpy(output->receiver, source.receiver, sizeof(output->receiver));
+    std::memcpy(output->text, source.text, sizeof(output->text) - 1);
+    output->text[sizeof(output->text) - 1] = 0;
 }
 
 static int record_exception(EXCEPTION_POINTERS* exception, TestResult* result) {
@@ -520,19 +594,15 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxStartFileHelperReceiver(void* pa
 extern "C" __declspec(dllexport) DWORD WINAPI WxPollFileHelperMessage(void* parameter) {
     if (!parameter) return ERROR_INVALID_PARAMETER;
     _InterlockedIncrement(&active_callbacks);
-    auto output = static_cast<ReceivedMessage*>(parameter);
-    AcquireSRWLockExclusive(&receive_lock);
-    *output = {};
-    output->size = sizeof(*output);
-    output->dropped = receive_dropped;
-    if (receive_count) {
-        *output = received_messages[receive_head];
-        receive_head = (receive_head + 1) % 64;
-        --receive_count;
-    }
-    ReleaseSRWLockExclusive(&receive_lock);
+#ifdef WXBOT_EXTENDED_RECEIVE
+    ReceivedMediaMessageV4 message{};
+#else
+    ReceivedMessage message{};
+#endif
+    const DWORD code = poll_received(&message);
+    copy_legacy_message(message, static_cast<LegacyReceivedMessage*>(parameter));
     _InterlockedDecrement(&active_callbacks);
-    return 0;
+    return code;
 }
 
 extern "C" __declspec(dllexport) DWORD WINAPI WxWaitForTasks(void*) {
@@ -557,9 +627,15 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxRemoveSelfTest(void*) {
         status = MH_DisableHook(factory_target);
         if (status != MH_OK && status != MH_ERROR_DISABLED) return 600 + status;
     }
+    void* image_factory_target = reinterpret_cast<void*>(core_address(core_base, 0x5240720));
+    if (image_download_factory_hook_created) {
+        status = MH_DisableHook(image_factory_target);
+        if (status != MH_OK && status != MH_ERROR_DISABLED) return 600 + status;
+    }
     for (int attempt = 0; (active_callbacks != 0 || live_completions != 0 || live_tasks != 0) && attempt < 100; ++attempt) Sleep(50);
     if (active_callbacks != 0 || live_completions != 0 || live_tasks != 0) return ERROR_BUSY;
-    if (!hook_created && !receive_hook_created && !factory_hook_created) return 0;
+    if (!hook_created && !receive_hook_created && !factory_hook_created &&
+        !image_download_factory_hook_created) return 0;
     if (hook_created) {
         status = MH_RemoveHook(target);
         if (status != MH_OK) return 600 + status;
@@ -572,9 +648,14 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxRemoveSelfTest(void*) {
         status = MH_RemoveHook(factory_target);
         if (status != MH_OK) return 600 + status;
     }
+    if (image_download_factory_hook_created) {
+        status = MH_RemoveHook(image_factory_target);
+        if (status != MH_OK) return 600 + status;
+    }
     status = MH_Uninitialize();
     if (status == MH_OK) {
         hook_created = false; receive_hook_created = false; factory_hook_created = false;
+        image_download_factory_hook_created = false;
         if (factory_tls != TLS_OUT_OF_INDEXES) { TlsFree(factory_tls); factory_tls = TLS_OUT_OF_INDEXES; }
     }
     return status == MH_OK ? 0 : 600 + status;

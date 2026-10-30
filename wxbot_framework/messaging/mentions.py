@@ -23,6 +23,7 @@ _VISIBLE_AT = re.compile(r"@([^@\s\u2005]{1,24})\u2005")
 
 QUOTE_MAX_CHARS = 8191
 QUOTE_TEXT_MAX_CHARS = 300
+_IMAGE_MD5 = re.compile(r"(?<![\w])md5\s*=\s*[\"']([0-9a-fA-F]{32})[\"']")
 
 _learned = {}
 _learned_lock = threading.Lock()
@@ -64,10 +65,18 @@ def strip_at_labels(text):
     return re.sub(r"@[^@\r\n\u2005]+\u2005", "", text).strip()
 
 
-def parse_quote(source):
-    """解析引用消息 XML：返回 ``{title, name, text, ref_type, chatusr, fromusr}``，不是引用时返回 None。
+def _quoted_image_md5(content):
+    """被引用图片 XML 里的 md5；只取这一项，aeskey、CDN 地址等不带出来。"""
+    match = _IMAGE_MD5.search(content or "")
+    return match.group(1).lower() if match else ""
 
-    ``title`` 是这次回复的正文，``text`` 是被引用的原文（只取文本类引用，截断到 300 字）。
+
+def parse_quote(source):
+    """解析引用消息 XML：返回 ``{title, name, text, ref_type, chatusr, fromusr, svrid, image_md5}``，
+    不是引用时返回 None。
+
+    ``title`` 是这次回复的正文，``text`` 是被引用的原文（只取文本类引用，截断到 300 字）；
+    ``svrid`` 是被引用消息的编号，引用图片（ref_type 3）时 ``image_md5`` 是那张图的 md5，用来找本地图片。
     """
     if not isinstance(source, str) or len(source) > QUOTE_MAX_CHARS:
         return None
@@ -88,12 +97,15 @@ def parse_quote(source):
     if refer is None:
         return None
     ref_type = (refer.findtext("type") or "").strip()
+    svrid = (refer.findtext("svrid") or "").strip()
     return {"title": (appmsg.findtext("title") or "").strip(),
             "name": (refer.findtext("displayname") or "").strip(),
             "text": (refer.findtext("content") or "").strip()[:QUOTE_TEXT_MAX_CHARS] if ref_type == "1" else "",
             "ref_type": ref_type,
             "chatusr": (refer.findtext("chatusr") or "").strip(),
-            "fromusr": (refer.findtext("fromusr") or "").strip()}
+            "fromusr": (refer.findtext("fromusr") or "").strip(),
+            "svrid": svrid if svrid.isascii() and svrid.isdigit() and len(svrid) <= 20 else "",
+            "image_md5": _quoted_image_md5(refer.findtext("content")) if ref_type == "3" else ""}
 
 
 def typed_at(text, names=()):

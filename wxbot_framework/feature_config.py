@@ -81,7 +81,7 @@ def maintenance_options(config, *, contributors=None):
     if not isinstance(options, dict):
         raise ValueError("maintenance 应为 JSON 对象")
     options = {"default_room": None, "upgrade_file": None, "announcement": None,
-               "announcements": [], **options}
+               "announcements": [], "startup_greeting": None, **options}
     if options["default_room"] is not None:
         validate_target(options["default_room"])
         if not options["default_room"].endswith("@chatroom"):
@@ -89,6 +89,24 @@ def maintenance_options(config, *, contributors=None):
     path = options["upgrade_file"]
     if path is not None and (not isinstance(path, str) or not path.strip() or "\0" in path):
         raise ValueError("upgrade_file 应为本地文件路径或 null")
+    greeting = options["startup_greeting"]
+    if greeting is not None:
+        if not isinstance(greeting, dict):
+            raise ValueError("maintenance.startup_greeting 应为 JSON 对象或 null")
+        room = greeting.get("room")
+        if room is None:
+            room = options["default_room"]
+        if not isinstance(room, str):
+            raise ValueError("启动问候需要 room 或 maintenance.default_room")
+        validate_target(room)
+        if not room.endswith("@chatroom"):
+            raise ValueError("启动问候目标必须是群 ID")
+        text = greeting.get("text", "来了")
+        if not isinstance(text, str) or not text.strip() or "\0" in text:
+            raise ValueError("启动问候 text 应为非空字符串")
+        if len(text.encode("utf-8")) > 900:
+            raise ValueError("启动问候不能超过 900 个 UTF-8 字节")
+        options["startup_greeting"] = {"room": room, "text": text}
     legacy = options["announcement"]
     announcements = options["announcements"]
     if not isinstance(announcements, list):

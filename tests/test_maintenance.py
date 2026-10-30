@@ -16,7 +16,8 @@ from wxbot_framework.conversation.members import MemberError, MemberStore
 from wxbot_framework.memory.worker import MemoryWorker
 from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.sdk import Message
-from wxbot_framework.app.announcements import AnnouncementQueue, StartupNotice
+from wxbot_framework.app.announcements import (
+    AnnouncementQueue, StartupGreeting, StartupNotice, send_startup_messages)
 from wxbot_framework.app.upgrades import apply_upgrade
 from wxbot_framework.plugin_engine.manifest import announcement_contributions
 
@@ -379,6 +380,58 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(queue.status("waiting")["status"], "waiting")
         attempts = k.connection().execute("SELECT COUNT(*) FROM startup_notice_attempts").fetchone()[0]
         self.assertEqual(attempts, 0)
+
+    def test_startup_greeting_sends_once_when_no_announcement(self):
+        k = self.kb()
+        greeting = StartupGreeting(k, self.service, {"room": ROOM, "text": "来了"})
+        self.assertTrue(send_startup_messages(None, greeting))
+        self.assertFalse(send_startup_messages(None, greeting))
+        self.assertEqual(self.backend.sent, [(ROOM, "来了")])
+
+    def test_startup_greeting_is_replaced_by_pending_announcement(self):
+        k = self.kb()
+        notice = {"id": "new", "room": ROOM, "text": "更新", "plugins": []}
+        queue = AnnouncementQueue(k, self.service, [notice], run_id="run-1")
+        greeting = StartupGreeting(k, self.service, {"room": ROOM, "text": "来了"})
+        self.assertFalse(send_startup_messages(queue, greeting))
+        self.assertEqual([(room, text.strip()) for room, text in self.backend.sent], [(ROOM, "更新")])
+
+    def test_startup_greeting_returns_after_all_announcements_sent(self):
+        k = self.kb()
+        notice = {"id": "once", "room": ROOM, "text": "更新", "plugins": []}
+        first = AnnouncementQueue(k, self.service, [notice], run_id="run-1")
+        self.assertFalse(send_startup_messages(
+            first, StartupGreeting(k, self.service, {"room": ROOM, "text": "来了"})))
+        second = AnnouncementQueue(k, self.service, [notice], run_id="run-2")
+        self.assertFalse(second.pending())
+        greeting = StartupGreeting(k, self.service, {"room": ROOM, "text": "来了"})
+        self.assertTrue(send_startup_messages(second, greeting))
+        self.assertEqual([text.strip() for _, text in self.backend.sent], ["更新", "来了"])
+
+    def test_startup_greeting_is_deferred_when_announcement_result_unknown(self):
+        k = self.kb()
+        notice = {"id": "uncertain", "room": ROOM, "text": "更新", "plugins": []}
+        facade = Mock(session_id="test", send_text=Mock(return_value=False))
+        queue = AnnouncementQueue(k, facade, [notice], run_id="run-1")
+        greeting = StartupGreeting(k, facade, {"room": ROOM, "text": "来了"})
+        self.assertFalse(send_startup_messages(queue, greeting))
+        self.assertEqual(facade.send_text.call_count, 1)
+        self.assertTrue(queue.pending())
+
+    def test_startup_greeting_options_default_room_and_text(self):
+        options = maintenance_options(
+            {"maintenance": {"default_room": ROOM, "startup_greeting": {}}})
+        self.assertEqual(options["startup_greeting"], {"room": ROOM, "text": "来了"})
+
+    def test_startup_greeting_options_require_group_and_limit_text(self):
+        with self.assertRaisesRegex(ValueError, "需要 room"):
+            maintenance_options({"maintenance": {"startup_greeting": {"text": "来了"}}})
+        with self.assertRaisesRegex(ValueError, "群 ID"):
+            maintenance_options(
+                {"maintenance": {"default_room": ROOM, "startup_greeting": {"room": "12345678"}}})
+        with self.assertRaisesRegex(ValueError, "900"):
+            maintenance_options(
+                {"maintenance": {"default_room": ROOM, "startup_greeting": {"text": "正" * 301}}})
 
     def test_profile_upgrade_splits_people_and_preserves_item_ids_and_sources(self):
         k = self.kb()

@@ -15,6 +15,7 @@ from ..memory.knowledge import KnowledgeStore
 from ..conversation.room_state import RoomStateStore
 from ..feature_config import feature_options
 from ..feature_config import maintenance_options
+from .announcements import send_startup_messages
 from .bootstrap import release, startup_services
 from .control import RuntimeControl
 from .console import ConsoleCommands
@@ -42,6 +43,8 @@ class BotApplication:
                             if self.knowledge else None)
         self.maintenance_router = MaintenanceRouter(self.maintenance, self.service) if self.maintenance else None
         self.startup_notice = None
+        self.startup_greeting = None
+        self._startup_messages_attempted = False
         self._background_lock = threading.RLock()
         generic = self.config.get("backend") == "native_text"
         capabilities = TEXT_CAPABILITIES if generic else CAPABILITIES
@@ -87,9 +90,9 @@ class BotApplication:
             self._connection_ready = False
             self._log_connection_error(error)
             self._disconnect()
-        if self._connection_ready and self.startup_notice:
+        if self._connection_ready:
             # 公告失败不影响微信连接；本次运行只继续尚未成功的公告。
-            self.startup_notice.send()
+            self._send_startup_messages()
 
     def sync_wechat_directory(self, room=None):
         if not self._connection_ready or self.backend is None or self.members is None:
@@ -124,6 +127,13 @@ class BotApplication:
             # 清理忙时保留实例，只重试清理，不覆盖 DLL、不再次注入。
             self._log_connection_error(error)
             return False
+
+    def _send_startup_messages(self):
+        """首次连上后处理启动公告；没有待发公告时补一句问候。"""
+        if self._startup_messages_attempted:
+            return
+        self._startup_messages_attempted = True
+        send_startup_messages(self.startup_notice, self.startup_greeting)
 
     def execute(self, command):
         """控制台命令入口；解析与执行见 ``app/console.py``。"""

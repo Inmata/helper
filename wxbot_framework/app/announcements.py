@@ -165,6 +165,11 @@ class AnnouncementQueue:
                 (k.account, notice["room"], notice["id"])).fetchone()
         return bool(row) and row[0] == "sent"
 
+    def pending(self):
+        """本次运行是否仍有未确认发送的公告；发送失败待下次启动重试也算。"""
+        return any(notice["id"] not in self._successful and not self._already_sent(notice)
+                   for notice in self.notices)
+
     def _send_one(self, notice, force=False):
         k, session = self.knowledge, self.service.session_id
         if notice["id"] in self._successful or notice["id"] in self._attempted:
@@ -219,6 +224,49 @@ class AnnouncementQueue:
         self._attempted.discard(notice["id"])
         self._successful.discard(notice["id"])
         return self._send_one(notice, force=True)
+
+
+class StartupGreeting:
+    """每次完整启动发送一次的固定问候；本次运行只尝试一次。"""
+
+    def __init__(self, knowledge, service, options):
+        self.knowledge, self.service = knowledge, service
+        self.room, self.text = options["room"], options["text"]
+        self._attempted = False
+        knowledge._room(self.room)
+
+    def send(self):
+        if self._attempted:
+            return False
+        session = self.service.session_id
+        if not session:
+            logger.info("启动问候暂缓：微信会话尚未就绪")
+            return False
+        self._attempted = True
+        try:
+            success = self.service.send_text(self.room, self.text, expected_session=session)
+            if success:
+                logger.info("启动问候已发送：%s", self.room)
+            else:
+                logger.warning("启动问候结果待确认：%s", self.room)
+            return bool(success)
+        except Exception as error:
+            logger.warning("启动问候发送失败：%s（%s）", self.room, type(error).__name__)
+            return False
+
+
+def send_startup_messages(queue, greeting):
+    """公告优先：本次有待发公告就不问候，否则补一句启动问候。
+
+    返回是否实际发送了问候；公告失败或结果未确认时留待下次启动重试。
+    """
+    if queue is not None:
+        sent = queue.send()
+        if sent or queue.pending():
+            return False
+    if greeting is None:
+        return False
+    return greeting.send()
 
 
 def migrate_legacy_notice(notice):

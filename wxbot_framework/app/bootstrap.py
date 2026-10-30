@@ -12,7 +12,7 @@ from pathlib import Path
 from ..conversation.members import MemberStore
 from ..feature_config import maintenance_options
 from ..memory.knowledge import KnowledgeStore
-from .announcements import AnnouncementQueue
+from .announcements import AnnouncementQueue, StartupGreeting
 from .upgrades import apply_upgrade
 
 logger = logging.getLogger("Bot")
@@ -55,16 +55,21 @@ def startup_services(app):
     if app.room_state is not None:
         app.room_state.initialize()
     notices = app.maintenance_options["announcements"]
-    if not notices:
-        return
-    for notice in notices:
-        app.knowledge._room(notice["room"])
-        if app.config.get("chat_allowlist") and notice["room"] not in app.config["chat_allowlist"]:
-            raise ValueError("启动公告群不在当前收发范围内")
-    app.startup_notice = AnnouncementQueue(app.knowledge, app.service, notices, contributors=app.contributors)
-    for notice, state in zip(notices, app.startup_notice.all_status()):
-        logger.info("启动公告就绪：%s -> %s（当前状态：%s）",
-                    notice["id"], notice["room"], state["status"])
+    if notices:
+        for notice in notices:
+            app.knowledge._room(notice["room"])
+            if app.config.get("chat_allowlist") and notice["room"] not in app.config["chat_allowlist"]:
+                raise ValueError("启动公告群不在当前收发范围内")
+        app.startup_notice = AnnouncementQueue(app.knowledge, app.service, notices, contributors=app.contributors)
+        for notice, state in zip(notices, app.startup_notice.all_status()):
+            logger.info("启动公告就绪：%s -> %s（当前状态：%s）",
+                        notice["id"], notice["room"], state["status"])
+    greeting = app.maintenance_options["startup_greeting"]
+    if greeting:
+        room = greeting["room"]
+        if app.config.get("chat_allowlist") and room not in app.config["chat_allowlist"]:
+            raise ValueError("启动问候群不在当前收发范围内")
+        app.startup_greeting = StartupGreeting(app.knowledge, app.service, greeting)
 
 
 def release(app):

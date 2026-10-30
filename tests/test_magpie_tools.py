@@ -80,7 +80,7 @@ class RequestShapeTests(unittest.TestCase):
         self.assertEqual(payloads[2]["params"]["name"], "analyze_image")
         self.assertEqual(payloads[2]["params"]["arguments"],
                          {"image": str(self.image.resolve()), "prompt": "画面里是什么？"})
-        self.assertTrue(all(item.kwargs["timeout"] <= 30 for item in call.call_args_list))
+        self.assertTrue(all(item.kwargs["timeout"] <= 45 for item in call.call_args_list))
 
     def test_blank_prompt_is_omitted(self):
         with patch("wxbot_framework.integrations.magpie_tools.urlopen",

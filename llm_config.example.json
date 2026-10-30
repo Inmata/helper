@@ -13,7 +13,7 @@
   },
   "magpie_tools": {
     "base_url": "http://127.0.0.1:3425",
-    "timeout_seconds": 30,
+    "timeout_seconds": 45,
     "max_result_chars": 4000
   }
 }

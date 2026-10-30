@@ -221,6 +221,15 @@ class LLMTests(unittest.TestCase):
         self.assertEqual([json.loads(item.args[0].data)["reasoning_effort"] for item in call.call_args_list],
                          ["low", "low"])
 
+    def test_text_request_falls_back_to_global_reasoning_effort(self):
+        client = LLMClient({**self.options, "reasoning_effort": "low"})
+        self.assertEqual(client.chat_reasoning_effort, "low")
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("正文")) as call:
+            self.assertEqual(client.complete_text("系统", "测试"), "正文")
+        payload = json.loads(call.call_args.args[0].data)
+        self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+
     def test_chat_reasoning_effort_overrides_for_text_only(self):
         client = LLMClient({**self.options, "reasoning_effort": "low", "chat_reasoning_effort": "minimal"})
         self.assertEqual((client.reasoning_effort, client.chat_reasoning_effort), ("low", "minimal"))

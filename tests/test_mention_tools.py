@@ -264,9 +264,111 @@ class MentionToolsTests(unittest.TestCase):
     def test_image_not_needed_when_jev_says_no(self):
         index = RecentImages(clock=Clock(990))
         image(index, message_id=1)
-        outcome, magpie = self.run_tools("晚安", index=index, jev=FakeJev(vision=0.3))
+        outcome, magpie = self.run_tools("大家晚安啦", index=index, jev=FakeJev(vision=0.3))
         self.assertEqual(magpie.images, [])
         self.assertFalse(outcome.used)
+
+    def test_empty_mention_with_own_recent_image_is_seen_without_jev(self):
+        index = RecentImages(clock=Clock(990))
+        image(index, message_id=1, path="C:/images/own.png")
+        jev = FakeJev(vision=0.04, search=0.0)
+        outcome, magpie = self.run_tools("", index=index, jev=jev)
+        self.assertEqual(magpie.images[0][0], "C:/images/own.png")
+        self.assertEqual(jev.calls, [])  # 没有正文，也不用判断搜索
+        self.assertTrue(outcome.results[0].ok)
+
+    def test_short_vague_mention_with_own_image_is_seen_without_jev(self):
+        for text in ("现在呢", "现在呢？", "这个", "看看", "呢", "咋样"):
+            with self.subTest(text=text):
+                index = RecentImages(clock=Clock(990))
+                image(index, message_id=1, path="C:/images/own.png")
+                jev = FakeJev(vision=0.39, search=0.0)
+                outcome, magpie = self.run_tools(text, index=index, jev=jev)
+                self.assertEqual(magpie.images[0][0], "C:/images/own.png")
+                self.assertNotIn("vision", [kind for kind, _ in jev.calls])
+                self.assertTrue(outcome.used)
+
+    def test_longer_vague_question_still_asks_jev_about_the_image(self):
+        index = RecentImages(clock=Clock(990))
+        image(index, message_id=1)
+        jev = FakeJev(vision=0.3, search=0.0)
+        outcome, magpie = self.run_tools("这个人你认识吗", index=index, jev=jev)
+        self.assertEqual([kind for kind, _ in jev.calls][0], "vision")
+        self.assertEqual(magpie.images, [])
+        self.assertFalse(outcome.used)
+
+    def test_other_senders_image_with_empty_mention_still_asks_jev(self):
+        index = RecentImages(clock=Clock(990))
+        image(index, message_id=1, sender=OTHER, path="C:/images/other.png")
+        jev = FakeJev(vision=0.3, search=0.0)
+        outcome, magpie = self.run_tools("", index=index, jev=jev)
+        self.assertEqual([kind for kind, _ in jev.calls], ["vision"])
+        self.assertEqual((magpie.images, outcome.used), ([], False))
+        # Jev 认为要看时才看别人的图。
+        outcome, magpie = self.run_tools("", index=index, jev=FakeJev(vision=0.9))
+        self.assertEqual(magpie.images[0][0], "C:/images/other.png")
+
+    def test_several_own_images_with_empty_mention_ask_which_one(self):
+        index = RecentImages(clock=Clock(990))
+        image(index, message_id=1)
+        image(index, message_id=2)
+        jev = FakeJev(vision=0.0)
+        outcome, magpie = self.run_tools("", index=index, jev=jev)
+        self.assertEqual(outcome.ask, ASK_WHICH_IMAGE)
+        self.assertEqual((jev.calls, magpie.images), ([], []))
+
+    def test_seen_own_image_is_not_implicitly_viewed_again(self):
+        index = RecentImages(clock=Clock(990))
+        image(index, message_id=1, path="C:/images/own.png")
+        self.assertTrue(self.run_tools("看看图里是啥", index=index)[0].results[0].ok)
+        outcome, magpie = self.run_tools("", index=index, jev=FakeJev(vision=0.3))
+        self.assertEqual((outcome.used, outcome.ask, magpie.images), (False, None, []))
+
+    def test_text_quote_blocks_implicit_vision(self):
+        # 引用了一条文本再说“谢谢”：即使自己有一张没看过的图，也回到原有 Jev 判断，不直接识图。
+        quotes = ({"name": "小红", "text": "这周末去爬山", "ref_type": "1"}, {"name": "小红"}, {"ref_type": "1"})
+        for question in ("谢谢", ""):
+            for quote in quotes:
+                with self.subTest(question=question, quote=quote):
+                    index = RecentImages(clock=Clock(990))
+                    image(index, message_id=1, path="C:/images/own.png")
+                    jev = FakeJev(vision=0.0, search=0.0)
+                    outcome, magpie = self.run_tools(question, index=index, jev=jev, quote=quote)
+                    self.assertEqual([kind for kind, _ in jev.calls][:1], ["vision"])
+                    self.assertEqual((magpie.images, outcome.used), ([], False))
+
+    def test_quote_without_any_reference_is_treated_as_no_quote(self):
+        index = RecentImages(clock=Clock(990))
+        image(index, message_id=1, path="C:/images/own.png")
+        jev = FakeJev(vision=0.0, search=0.0)
+        outcome, magpie = self.run_tools("", index=index, jev=jev, quote={"title": "这条回复的正文"})
+        self.assertEqual((magpie.images[0][0], jev.calls), ("C:/images/own.png", []))
+
+    def test_implicit_vision_boundary_is_four_letters_or_digits(self):
+        # 标点和表情符号不计入；恰好 4 个字母/数字才隐式看图，第 5 个就交回 Jev。
+        for text, implicit in (("现在咋样", True), ("现在咋样？？", True), ("现在咋样😀", True),
+                               ("现在咋样啊", False)):
+            with self.subTest(text=text):
+                index = RecentImages(clock=Clock(990))
+                image(index, message_id=1, path="C:/images/own.png")
+                jev = FakeJev(vision=0.0, search=0.0)
+                outcome, magpie = self.run_tools(text, index=index, jev=jev)
+                self.assertEqual(bool(magpie.images), implicit)
+                self.assertEqual("vision" in [kind for kind, _ in jev.calls], not implicit)
+
+    def test_implicit_vision_with_context_question_still_searches_the_backfilled_question(self):
+        index = RecentImages(clock=Clock(990))
+        image(index, message_id=1, path="C:/images/own.png")
+        jev = FakeJev(vision=0.0, search=0.9)
+        runner, magpie = tools(index, jev)
+        outcome = runner.run(question="", room=ROOM, sender=SENDER, received_at=1000,
+                             context_question="Python 最新版本是多少")
+        self.assertEqual(magpie.images[0][0], "C:/images/own.png")
+        self.assertNotIn("vision", [kind for kind, _ in jev.calls])  # 隐式看图不问 Jev
+        search_states = [state for kind, state in jev.calls if kind == "search"]
+        self.assertEqual([state["提问"] for state in search_states], ["Python 最新版本是多少"])
+        self.assertIn("Python 最新版本是多少", magpie.queries[0])
+        self.assertEqual([item.tool for item in outcome.results], ["vision", "search"])
 
     def test_several_recent_images_ask_which_one(self):
         index = RecentImages(clock=Clock(990))
@@ -276,7 +378,7 @@ class MentionToolsTests(unittest.TestCase):
         self.assertEqual(outcome.ask, ASK_WHICH_IMAGE)
         self.assertEqual(magpie.images, [])
         # 不需要看图的提问不因为有多张图而追问。
-        self.assertIsNone(self.run_tools("晚安", index=index, jev=FakeJev(vision=0.1))[0].ask)
+        self.assertIsNone(self.run_tools("大家晚安啦", index=index, jev=FakeJev(vision=0.1))[0].ask)
 
     def test_seen_image_is_not_a_candidate_again_but_can_be_quoted(self):
         index = RecentImages(clock=Clock(990))

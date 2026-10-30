@@ -5,7 +5,8 @@
 * 找图：引用了图片就按引用找（原消息编号优先，其次 md5）；没有引用时只认同一群、提问前 2 分钟内发的、
   还没被看过的唯一一张（看成功过的图不再算，引用仍可再看）：先找提问人自己发的，他一张都没发时
   再找别人发的（“他发张图是啥意思”）。多张时请对方引用，不猜。
-* 判断：提问里明确说看图 / 搜索，或引用了图片，就直接执行；其余交给 Jev（``ToolTurn``），
+* 判断：提问里明确说看图 / 搜索，或引用了图片，就直接执行；没有引用任何消息时，只有艾特或很短、
+  没有实质内容（如“现在呢”）、候选图又是提问人自己刚发的，也直接看图（隐式看图）；其余交给 Jev（``ToolTurn``），
   先判断看图，识图结果再参与搜索判断。Jev 不可用时含糊提问不调用工具。
 * 预算：每轮最多识图一次、搜索一次；Jev 判断、等图和工具调用共用同一截止时间。
   客户端的超时只约束单次 socket 操作，所以每次判断 / 调用都在单独线程里执行、最多等到
@@ -32,6 +33,7 @@ SEARCH_HINTS = ("联网", "上网查", "网上查", "上网搜", "网上搜", "�
                 "百度一下", "谷歌一下")
 IMAGE_WINDOW_SECONDS = 120
 PREVIOUS_QUESTION_SECONDS = 90
+IMPLICIT_QUESTION_CHARS = 4  # 艾特正文的字母和数字合计不超过这么多（标点、表情符号不计）当作没有实质问题
 MENTION_MARK = chr(0x2005)  # 微信 @ 后面的分隔符：带它的上一条发言本身是一次艾特，已经回答过
 PENDING_WAIT_SECONDS = 6
 BUDGET_SECONDS = 60
@@ -96,6 +98,11 @@ def read_tool_options(config):
 
 def wants(text, hints):
     return any(hint in text for hint in hints)
+
+
+def vague_question(text):
+    """艾特正文的字母和数字合计不超过 4 个（标点、表情符号不计；空、“现在呢”“咋样”）：没有实质问题。"""
+    return sum(char.isalnum() for char in text or "") <= IMPLICIT_QUESTION_CHARS
 
 
 def strip_links(reply):
@@ -188,16 +195,20 @@ class MentionTools:
         started = self.clock()
         deadline = started + self.budget
         quote = quote or {}
+        has_quote = any(quote.get(key) for key in ("name", "text", "ref_type"))  # 引用了任意一条消息
         outcome = ToolOutcome()
+        asked = question  # 艾特自己的正文；回填上一句话后仍用它判断这次艾特有没有实质问题
         question = question or context_question
         explicit_vision = wants(question, VISION_HINTS)
         explicit_search = wants(question, SEARCH_HINTS)
         quoted_image = quote.get("ref_type") == "3"
         image, candidates, ask_which = None, (), ASK_WHICH_IMAGE
+        own_candidates = False
         if quoted_image:
             image = self.images.quoted(room, svrid=quote.get("svrid") or "", md5=quote.get("image_md5") or "")
         else:
             candidates = self.images.recent(room, sender, before=received_at, within=IMAGE_WINDOW_SECONDS)
+            own_candidates = bool(candidates)
             if not candidates:
                 candidates = self.images.recent(room, sender, before=received_at, within=IMAGE_WINDOW_SECONDS,
                                                 from_others=True)
@@ -210,8 +221,15 @@ class MentionTools:
 
         vision_reason = "explicit" if (quoted_image or explicit_vision) else None
         if vision_reason is None and has_image:
-            decision = self._judge(turn.consider_vision, deadline, "看图")
-            vision_reason = "jev" if decision is not None and decision.use else None
+            if not has_quote and own_candidates and vague_question(asked):
+                # 没有引用、提问人自己刚发了一张没看过的图，这次艾特又没问出实质内容（只有艾特、“现在呢”）：
+                # 默认就是要看那张图，不必再让 Jev 判断（实测这类提问概率偏低，容易被拒）。
+                # 引用了别的消息（如引用一句文本回“谢谢”）时不算，仍按原有 Jev 判断。
+                self.logger.info("艾特工具：隐式看图，跳过看图判断")
+                vision_reason = "implicit"
+            else:
+                decision = self._judge(turn.consider_vision, deadline, "看图")
+                vision_reason = "jev" if decision is not None and decision.use else None
         vision_text = None
         if vision_reason:
             if len(candidates) > 1:

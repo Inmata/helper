@@ -1,4 +1,4 @@
-"""艾特回复里的看图 / 联网：找图、Jev 判断、调用 Magpie，整理成给模型的结果和来源链接。
+"""艾特回复里的看图 / 联网：找图、Jev 判断、调用 Magpie，整理成给模型的结果。
 
 只在真正艾特机器人的提问里使用；普通聊天、主动发言不走这里。
 
@@ -8,7 +8,7 @@
   先判断看图，识图结果再参与搜索判断。Jev 不可用时含糊提问不调用工具。
 * 预算：每轮最多识图一次、搜索一次；Jev 判断、等图和工具调用共用同一截止时间。
   客户端的超时只约束单次 socket 操作，所以每次判断 / 调用都在单独线程里执行、最多等到
-  剩余时间，迟到的结果丢弃。工具失败如实交给模型说明。
+  剩余时间，迟到的结果丢弃。工具失败如实交给模型说明。回复里不带网址（见 ``strip_links``）。
 """
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..recent_images import FAILED, PENDING, READY, SKIPPED
 from .tool_router import MAX_QUESTION_CHARS, ToolTurn, read_options
@@ -37,8 +36,6 @@ MIN_JEV_SECONDS = 1
 VISION_RESULT_CHARS = 800
 SEARCH_RESULT_CHARS = 3000
 SEARCH_VISION_CONTEXT_CHARS = 300
-MAX_SOURCES = 3
-MAX_SOURCE_BYTES = 300  # 按 UTF-8 字节算；太长的链接发出去会被拆断，不收
 
 ASK_WHICH_IMAGE = "你刚发了好几张图，引用想让我看的那张再艾特我"
 ASK_FOR_IMAGE = "没找到你要我看的图，引用那张图再艾特我"
@@ -49,8 +46,9 @@ _STATUS_NOTE = {FAILED: "图片没下载成功", SKIPPED: "图片没有下载", 
 _ERROR_NOTE = {"MagpieToolsUnavailableError": "工具服务连不上或超时", "MagpieToolsAuthError": "工具服务鉴权失败",
                "MagpieToolsFormatError": "工具返回的格式不对", "MagpieToolsToolError": "工具执行出错",
                "TimeoutError": "工具服务连不上或超时"}
-_MARKDOWN_LINK = re.compile(r"\]\((https?://[^\s)]+)\)")
-_BARE_URL = re.compile(r"https?://[^\s)\]>\"'，。、；）】]+")
+_MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\(\s*(?:https?://|www\.)[^)]*\)")
+_DOMAIN_TEXT = re.compile(r"[\w-]+(?:\.[\w-]+)+")  # 链接文字本身就是域名时一并去掉
+_BARE_URL = re.compile(r"(?:https?://|www\.)[^\s)\]>\"'，。、；）】]*")
 
 
 @dataclass(frozen=True)
@@ -67,7 +65,6 @@ class ToolResult:
 @dataclass
 class ToolOutcome:
     results: list = field(default_factory=list)
-    sources: tuple = ()
     ask: str | None = None  # 非空时不生成回复，直接用这句请对方说明
 
     @property
@@ -95,35 +92,16 @@ def wants(text, hints):
     return any(hint in text for hint in hints)
 
 
-def strip_tracking(url):
-    """去掉 utm_* 跟踪参数和锚点；不是 http(s) 链接时返回空串。"""
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return ""
-    if parts.scheme not in ("http", "https") or not parts.netloc:
-        return ""
-    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True)
-             if not key.lower().startswith("utm_")]
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+def strip_links(reply):
+    """去掉回复里的网址：Markdown 链接留文字（文字是域名时也去掉），裸网址整段删掉。
 
-
-def extract_sources(text, limit=MAX_SOURCES):
-    """搜索结果里的来源链接：优先 Markdown 链接，没有时取裸链接；去跟踪参数、去重。"""
-    urls = _MARKDOWN_LINK.findall(text or "") or _BARE_URL.findall(text or "")
-    result = []
-    for url in urls:
-        clean = strip_tracking(url)
-        if clean and len(clean.encode("utf-8")) <= MAX_SOURCE_BYTES and clean not in result:
-            result.append(clean)
-        if len(result) >= limit:
-            break
-    return tuple(result)
-
-
-def with_sources(reply, sources):
-    """把来源链接接在回复后面；每个链接单独一行，避免微信把标点并进链接。"""
-    return reply if not sources else reply.rstrip() + "\n来源：\n" + "\n".join(sources)
+    带链接的消息容易触发微信风控，所以不管模型是否照抄了搜索结果里的网址，发出去的回复都不含链接。
+    """
+    text = _MARKDOWN_LINK.sub(lambda match: "" if _DOMAIN_TEXT.fullmatch(match.group(1).strip()) else match.group(1),
+                             reply or "")
+    text = _BARE_URL.sub("", text)
+    text = re.sub(r"[（(]\s*[）)]", "", text)
+    return re.sub(r"[ \t]+\n", "\n", text).strip()
 
 
 def _vision_prompt(question):
@@ -230,7 +208,6 @@ class MentionTools:
                 outcome.results.append(result)
                 if result.ok:
                     turn.record_search(result.text)
-                    outcome.sources = extract_sources(result.text)
         self.logger.info("艾特工具：%s 耗时 %.1fs", "、".join(
             f"{item.tool}={'ok' if item.ok else 'failed'}" for item in outcome.results) or "未使用",
             self.clock() - started)

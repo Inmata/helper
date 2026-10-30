@@ -15,8 +15,8 @@ from wxbot_framework.conversation import utterance
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
 from wxbot_framework.conversation.members import ConversationSnapshot
 from wxbot_framework.conversation.mention_tools import (ASK_FOR_IMAGE, ASK_WHICH_IMAGE, NO_IMAGE_SUPPORT,
-                                                        QUOTED_IMAGE_MISSING, MentionTools, extract_sources,
-                                                        read_tool_options, strip_tracking, with_sources)
+                                                        QUOTED_IMAGE_MISSING, MentionTools,
+                                                        read_tool_options, strip_links)
 from wxbot_framework.conversation.tool_router import JevToolRouter
 from wxbot_framework.integrations.jev import JevClient
 from wxbot_framework.integrations.magpie_tools import (MagpieResult, MagpieTools, MagpieToolsUnavailableError,
@@ -231,12 +231,10 @@ class MentionToolsTests(unittest.TestCase):
         self.assertEqual([kind for kind, _ in jev.calls], ["search"])  # 没有图片就不问看图
         self.assertEqual((magpie.images, magpie.queries), ([], []))
 
-    def test_explicit_search_runs_without_jev_and_extracts_clean_sources(self):
+    def test_explicit_search_runs_without_jev(self):
         outcome, magpie = self.run_tools("帮我搜一下 Python 最新版本", jev=None)
         self.assertEqual(magpie.queries, ["帮我搜一下 Python 最新版本"])
         self.assertTrue(outcome.results[0].ok)
-        self.assertEqual(outcome.sources, ("https://www.python.org/downloads/",
-                                           "https://docs.python.org/3/whatsnew/3.14.html?x=1"))
 
     def test_jev_search_respects_threshold(self):
         self.assertTrue(self.run_tools("Python 最新版本是多少", jev=FakeJev(search=0.8))[0].used)
@@ -342,7 +340,6 @@ class MentionToolsTests(unittest.TestCase):
         error = MagpieToolsUnavailableError("C:/secret/path 连接被拒绝")
         outcome, _ = self.run_tools("帮我搜一下天气", magpie=FakeMagpie(error=error))
         self.assertEqual(outcome.results[0].note, "工具服务连不上或超时")
-        self.assertEqual(outcome.sources, ())
 
     def test_every_call_is_bounded_by_the_remaining_budget(self):
         index = RecentImages(clock=Clock(990))
@@ -445,15 +442,13 @@ class ClientTimeoutTests(unittest.TestCase):
 
 
 class HelperTests(unittest.TestCase):
-    def test_sources(self):
-        self.assertEqual(strip_tracking("https://a.com/x?utm_source=openai&id=3#top"), "https://a.com/x?id=3")
-        self.assertEqual(strip_tracking("javascript:alert(1)"), "")
-        self.assertEqual(extract_sources("见 https://a.com/1 和 https://a.com/1。"), ("https://a.com/1",))
-        self.assertEqual(extract_sources("https://a.com/" + "x" * 400 + " https://b.com"), ("https://b.com",))
-        # 字数不多但字节超限的中文链接同样不收。
-        self.assertEqual(extract_sources("https://a.com/" + "中" * 100 + " https://b.com"), ("https://b.com",))
-        self.assertEqual(with_sources("答案", ()), "答案")
-        self.assertEqual(with_sources("答案", ("https://a.com",)), "答案\n来源：\nhttps://a.com")
+    def test_strip_links(self):
+        self.assertEqual(strip_links("最新是 3.15.2（[python.org](https://www.python.org/downloads/?x=1)）。"),
+                         "最新是 3.15.2。")
+        self.assertEqual(strip_links("见[Python 官网](https://www.python.org/)说明"), "见Python 官网说明")
+        self.assertEqual(strip_links("详见 https://a.com/x。再看 www.b.com/y 吧"), "详见 。再看  吧")
+        self.assertEqual(strip_links("没有网址，原样返回"), "没有网址，原样返回")
+        self.assertEqual(strip_links(""), "")
 
     def test_read_tool_options(self):
         self.assertEqual(read_tool_options({}), {"vision_threshold": 0.6, "search_threshold": 0.7})
@@ -484,7 +479,7 @@ class DialogueToolSectionTests(unittest.TestCase):
 
     def test_system_forbids_claiming_unseen_images_or_searches(self):
         self.assertIn("只有出现【看图结果】时才能说看了图", SYSTEM)
-        self.assertIn("不要自己写网址", SYSTEM)
+        self.assertIn("不要写网址、链接或域名", SYSTEM)
 
 
 class MentionChatToolTests(unittest.TestCase):
@@ -505,14 +500,20 @@ class MentionChatToolTests(unittest.TestCase):
         plugin.tools = read_tool_options({})
         return plugin, ctx
 
-    def test_search_reply_is_one_message_with_sources(self):
+    def test_search_reply_is_one_message_without_links(self):
         plugin, ctx = self.build("3.14 已经发了。没错。", jev=FakeJev(search=0.9))
         plugin.on_message(mention("Python 最新版本是多少"), ctx)
         self.assertIn("【联网搜索结果】", ctx.last_user)
-        self.assertEqual(ctx.sent, [("reply_at", "3.14 已经发了。没错。\n来源：\nhttps://www.python.org/downloads/\n"
-                                                 "https://docs.python.org/3/whatsnew/3.14.html?x=1")])
+        self.assertEqual(ctx.sent, [("reply_at", "3.14 已经发了。没错。")])
 
-    def test_failed_search_is_told_to_model_without_sources(self):
+    def test_links_the_model_copies_are_removed_from_the_sent_reply(self):
+        plugin, ctx = self.build("3.14 发了（[官网](https://www.python.org/downloads/)）。见 https://docs.python.org/3/",
+                                 jev=FakeJev(search=0.9))
+        plugin.on_message(mention("Python 最新版本是多少"), ctx)
+        self.assertEqual(ctx.sent, [("reply_at", "3.14 发了（官网）。见")])
+        self.assertNotIn("http", ctx.sent[0][1])
+
+    def test_failed_search_is_told_to_model(self):
         plugin, ctx = self.build("没查到，搜索挂了", magpie=FakeMagpie(error=MagpieToolsUnavailableError("x")))
         plugin.on_message(mention("帮我搜一下今天的新闻"), ctx)
         self.assertIn("（没成功）工具服务连不上或超时", ctx.last_user)

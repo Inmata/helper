@@ -6,7 +6,7 @@ from .._shared import idiom_state
 
 from wxbot_framework.conversation.dialogue import Dialogue
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
-from wxbot_framework.conversation.mention_tools import MentionTools, ToolOutcome, read_tool_options, with_sources
+from wxbot_framework.conversation.mention_tools import MentionTools, ToolOutcome, read_tool_options, strip_links
 from wxbot_framework.conversation.repetition import too_similar
 from wxbot_framework.conversation.tool_router import JevToolRouter
 from wxbot_framework.recent_images import RECENT_IMAGES
@@ -223,8 +223,9 @@ class Plugin:
                     reply = retried
                     if too_similar(reply, self._recent_bot_texts(message.chat_id)):
                         ctx.logger.info("艾特回复重说后仍相近，按原样发送：room=%s", message.chat_id)
-            # 用了工具的回复按问答单条发出，来源链接跟在正文后面，不被闲聊拆分切开。
-            reply = with_sources(reply, outcome.sources)
+            # 用了工具的回复按问答单条发出；带网址的消息容易触发微信风控，模型照抄了网址也在这里去掉。
+            if outcome.used:
+                reply = strip_links(reply) or reply
             tier = (DETAIL if detail else QA) if outcome.used else classify_tier(clean_query, detail=detail)
             # 闲聊拆分时把插话检测并入守卫：后续条在拿到守卫后、原生发送前再查一次。
             gate = InterjectionGate(interjection_probe(self.members, message.chat_id)) if tier == CHAT else None

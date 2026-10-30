@@ -105,10 +105,10 @@ class RecentImages:
                     return record
         return None
 
-    def recent(self, room, sender, *, before, within):
-        """这个人在提问前 ``within`` 秒内发的、还没被看过的图（按到达顺序）。"""
+    def recent(self, room, sender, *, before, within, from_others=False):
+        """提问前 ``within`` 秒内、还没被看过的图（按到达顺序）：默认是这个人自己发的，``from_others`` 时是别人发的。"""
         return tuple(record for record in self._records(room)
-                     if record.sender == sender and not record.used and
+                     if (record.sender != sender) == from_others and not record.used and
                      before - within <= record.seen_at <= before + ARRIVAL_SLACK_SECONDS)
 
     def mark_used(self, record):

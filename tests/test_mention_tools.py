@@ -14,8 +14,8 @@ from tests.test_mention_chat import ROOM, FakeCtx, FakeMembers, mention
 from wxbot_framework.conversation import utterance
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
 from wxbot_framework.conversation.members import ConversationSnapshot
-from wxbot_framework.conversation.mention_tools import (ASK_FOR_IMAGE, ASK_WHICH_IMAGE, NO_IMAGE_SUPPORT,
-                                                        QUOTED_IMAGE_MISSING, MentionTools,
+from wxbot_framework.conversation.mention_tools import (ASK_FOR_IMAGE, ASK_WHICH_IMAGE, ASK_WHICH_OTHER_IMAGE,
+                                                        NO_IMAGE_SUPPORT, QUOTED_IMAGE_MISSING, MentionTools,
                                                         read_tool_options, strip_links)
 from wxbot_framework.conversation.tool_router import JevToolRouter
 from wxbot_framework.integrations.jev import JevClient
@@ -127,6 +127,8 @@ class RecentImagesTests(unittest.TestCase):
         self.assertEqual([r.native_message_id for r in index.recent(ROOM, SENDER, before=310, within=120)], ["3"])
         # 提问之后才到的图片不算这次提问附带的图。
         self.assertEqual(index.recent(ROOM, SENDER, before=50, within=120), ())
+        self.assertEqual([r.native_message_id for r in index.recent(ROOM, SENDER, before=110, within=120,
+                                                                    from_others=True)], ["2"])
 
     def test_invalid_events_and_bounds(self):
         index = RecentImages(per_room=2, rooms=2)
@@ -301,8 +303,37 @@ class MentionToolsTests(unittest.TestCase):
         self.assertEqual(self.run_tools("看看图里是啥")[0].ask, ASK_FOR_IMAGE)
         self.assertEqual(self.run_tools("看看图里是啥", supported=False)[0].ask, NO_IMAGE_SUPPORT)
 
-    def test_other_senders_image_is_not_used_without_quote(self):
+    def test_other_senders_image_is_used_when_the_asker_sent_none(self):
         index = RecentImages(clock=Clock(990))
+        image(index, message_id=1, sender=OTHER, path="C:/images/other.png")
+        outcome, magpie = self.run_tools("他发张图是啥意思", index=index, jev=FakeJev(vision=0.9))
+        self.assertIsNone(outcome.ask)
+        self.assertEqual(magpie.images[0][0], "C:/images/other.png")
+        # 看过后不再算候选；Jev 认为用不着看图时也不看别人的图。
+        self.assertEqual(self.run_tools("看看图里是啥", index=index)[0].ask, ASK_FOR_IMAGE)
+        image(index, message_id=2, sender=OTHER)
+        image(index, message_id=3, sender="wxid_third")
+        outcome, magpie = self.run_tools("晚安", index=index, jev=FakeJev(vision=0.1))
+        self.assertEqual((outcome.ask, magpie.images), (None, []))  # 多张别人的图，用不着看时也不追问
+
+    def test_askers_own_image_wins_over_other_senders(self):
+        index = RecentImages(clock=Clock(990))
+        image(index, message_id=1, sender=OTHER, path="C:/images/other.png")
+        image(index, message_id=2, path="C:/images/own.png")
+        outcome, magpie = self.run_tools("看看图里是啥", index=index)
+        self.assertIsNone(outcome.ask)
+        self.assertEqual(magpie.images[0][0], "C:/images/own.png")
+
+    def test_several_other_senders_images_ask_which_one(self):
+        index = RecentImages(clock=Clock(990))
+        image(index, message_id=1, sender=OTHER)
+        image(index, message_id=2, sender="wxid_third")
+        outcome, magpie = self.run_tools("看看图里是啥", index=index)
+        self.assertEqual(outcome.ask, ASK_WHICH_OTHER_IMAGE)
+        self.assertEqual(magpie.images, [])
+
+    def test_other_senders_stale_image_is_not_used(self):
+        index = RecentImages(clock=Clock(100))
         image(index, message_id=1, sender=OTHER)
         self.assertEqual(self.run_tools("看看图里是啥", index=index)[0].ask, ASK_FOR_IMAGE)
 

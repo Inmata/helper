@@ -2,8 +2,9 @@
 
 只在真正艾特机器人的提问里使用；普通聊天、主动发言不走这里。
 
-* 找图：引用了图片就按引用找（原消息编号优先，其次 md5）；没有引用时只认同一群、同一人
-  提问前 2 分钟内发的、还没被看过的唯一一张（看成功过的图不再算，引用仍可再看）。多张时请对方引用，不猜。
+* 找图：引用了图片就按引用找（原消息编号优先，其次 md5）；没有引用时只认同一群、提问前 2 分钟内发的、
+  还没被看过的唯一一张（看成功过的图不再算，引用仍可再看）：先找提问人自己发的，他一张都没发时
+  再找别人发的（“他发张图是啥意思”）。多张时请对方引用，不猜。
 * 判断：提问里明确说看图 / 搜索，或引用了图片，就直接执行；其余交给 Jev（``ToolTurn``），
   先判断看图，识图结果再参与搜索判断。Jev 不可用时含糊提问不调用工具。
 * 预算：每轮最多识图一次、搜索一次；Jev 判断、等图和工具调用共用同一截止时间。
@@ -38,7 +39,8 @@ SEARCH_RESULT_CHARS = 3000
 SEARCH_VISION_CONTEXT_CHARS = 300
 
 ASK_WHICH_IMAGE = "你刚发了好几张图，引用想让我看的那张再艾特我"
-ASK_FOR_IMAGE = "没找到你要我看的图，引用那张图再艾特我"
+ASK_WHICH_OTHER_IMAGE = "群里刚有好几张图，引用想让我看的那张再艾特我"
+ASK_FOR_IMAGE ="没找到你要我看的图，引用那张图再艾特我"
 QUOTED_IMAGE_MISSING = "你引用的那张图我这边没收到，可能是我上线前发的，重新发一下再艾特我"
 NO_IMAGE_SUPPORT = "我这边暂时收不到图片，看不了图"
 
@@ -166,11 +168,15 @@ class MentionTools:
         explicit_vision = wants(question, VISION_HINTS)
         explicit_search = wants(question, SEARCH_HINTS)
         quoted_image = quote.get("ref_type") == "3"
-        image, candidates = None, ()
+        image, candidates, ask_which = None, (), ASK_WHICH_IMAGE
         if quoted_image:
             image = self.images.quoted(room, svrid=quote.get("svrid") or "", md5=quote.get("image_md5") or "")
         else:
             candidates = self.images.recent(room, sender, before=received_at, within=IMAGE_WINDOW_SECONDS)
+            if not candidates:
+                candidates = self.images.recent(room, sender, before=received_at, within=IMAGE_WINDOW_SECONDS,
+                                                from_others=True)
+                ask_which = ASK_WHICH_OTHER_IMAGE
             if len(candidates) == 1:
                 image = candidates[0]
         has_image = quoted_image or bool(candidates)
@@ -184,7 +190,7 @@ class MentionTools:
         vision_text = None
         if vision_reason:
             if len(candidates) > 1:
-                outcome.ask = ASK_WHICH_IMAGE
+                outcome.ask = ask_which
                 return outcome
             if image is None:
                 # 引用的图对不上记录（多半是上线前发的）也不让模型猜，直接请对方重发。

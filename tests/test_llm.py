@@ -194,6 +194,54 @@ class LLMTests(unittest.TestCase):
         self.assertEqual([row["role"] for row in payload["messages"]],
                          ["system", "user", "assistant", "user"])
 
+    def test_unconfigured_reasoning_effort_sends_no_field(self):
+        self.assertIsNone(self.client.reasoning_effort)
+        self.assertIsNone(self.client.chat_reasoning_effort)
+        for method, content in ((self.client.complete_json, "{}"), (self.client.complete_text, "正文")):
+            with (self.subTest(method=method.__name__),
+                  patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response(content)) as call):
+                method("系统", "测试")
+            payload = json.loads(call.call_args.args[0].data)
+            self.assertNotIn("reasoning_effort", payload)
+            self.assertEqual(payload["thinking"], {"type": "disabled"})
+
+    def test_global_reasoning_effort_applies_to_json_and_repair(self):
+        client = LLMClient({**self.options, "reasoning_effort": "low"})
+        self.assertEqual(client.reasoning_effort, "low")
+        self.assertEqual(client.chat_reasoning_effort, "low")
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("{}")) as call:
+            self.assertEqual(client.complete_json("JSON", "测试"), {})
+        payload = json.loads(call.call_args.args[0].data)
+        self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+
+        responses = [self.response("这不是 JSON"), self.response('{"reply":"好了"}')]
+        with patch("wxbot_framework.integrations.llm.urlopen", side_effect=responses) as call:
+            self.assertEqual(client.complete_json("JSON", "测试"), {"reply": "好了"})
+        self.assertEqual([json.loads(item.args[0].data)["reasoning_effort"] for item in call.call_args_list],
+                         ["low", "low"])
+
+    def test_chat_reasoning_effort_overrides_for_text_only(self):
+        client = LLMClient({**self.options, "reasoning_effort": "low", "chat_reasoning_effort": "minimal"})
+        self.assertEqual((client.reasoning_effort, client.chat_reasoning_effort), ("low", "minimal"))
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("{}")) as call:
+            client.complete_json("JSON", "测试")
+        self.assertEqual(json.loads(call.call_args.args[0].data)["reasoning_effort"], "low")
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=self.response("正文")) as call:
+            client.complete_text("系统", "测试")
+        self.assertEqual(json.loads(call.call_args.args[0].data)["reasoning_effort"], "minimal")
+
+    def test_reasoning_effort_validation(self):
+        for key in ("reasoning_effort", "chat_reasoning_effort"):
+            for bad in ("", "fast", "LOW", 1, True, None, []):
+                with self.subTest(key=key, bad=bad), self.assertRaises(ValueError):
+                    LLMClient({**self.options, key: bad})
+        for good in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            with self.subTest(good=good):
+                client = LLMClient({**self.options, "chat_reasoning_effort": good})
+                self.assertEqual(client.chat_reasoning_effort, good)
+                self.assertIsNone(client.reasoning_effort)
+
 
 class JudgeTests(unittest.TestCase):
     def setUp(self):

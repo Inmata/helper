@@ -10,6 +10,9 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
 class LLMError(RuntimeError):
     pass
 
@@ -58,6 +61,18 @@ class LLMClient:
             raise ValueError("chat_max_tokens 应为 128–4096 的整数")
         if type(self.detail_max_tokens) is not int or not 128 <= self.detail_max_tokens <= 4096:
             raise ValueError("detail_max_tokens 应为 128–4096 的整数")
+        # 思考强度可选；未配置时请求体与不发送该字段时逐字相同。
+        self.reasoning_effort = self._effort(options, "reasoning_effort", None)
+        self.chat_reasoning_effort = self._effort(options, "chat_reasoning_effort", self.reasoning_effort)
+
+    @staticmethod
+    def _effort(options, key, fallback):
+        if key not in options:
+            return fallback
+        value = options[key]
+        if not isinstance(value, str) or value not in REASONING_EFFORTS:
+            raise ValueError(f"{key} 应为 none、minimal、low、medium、high、xhigh、max 之一")
+        return value
 
     @classmethod
     def from_file(cls, path):
@@ -75,9 +90,11 @@ class LLMClient:
         messages.append({"role": "user", "content": user})
         return messages
 
-    def _post(self, messages, budget, *, json_mode, timeout):
+    def _post(self, messages, budget, *, json_mode, timeout, reasoning_effort=None):
         payload = {"model": self.model, "messages": messages, "max_tokens": budget,
                    "thinking": {"type": "disabled"}, "stream": False}
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
         request = Request(self.base_url + "/chat/completions",
@@ -121,7 +138,8 @@ class LLMClient:
             raise ValueError("任务 max_tokens 应为128—4096的整数")
         messages = self._messages(system, user, history)
         deadline = time.monotonic() + self.timeout
-        content = self._post(messages, budget, json_mode=True, timeout=self.timeout)
+        content = self._post(messages, budget, json_mode=True, timeout=self.timeout,
+                             reasoning_effort=self.reasoning_effort)
         try:
             data = json.loads(content)
         except ValueError:
@@ -135,7 +153,8 @@ class LLMClient:
                       {"role": "user", "content": "上一次输出不是合法的 JSON 对象。请只输出一个 JSON 对象，"
                                                    "不要代码块、注释或解释文字。"}]
             try:
-                repaired = self._post(repair, budget, json_mode=True, timeout=remaining)
+                repaired = self._post(repair, budget, json_mode=True, timeout=remaining,
+                                      reasoning_effort=self.reasoning_effort)
             except LLMError:
                 pass
             else:
@@ -159,4 +178,5 @@ class LLMClient:
         if type(budget) is not int or not 128 <= budget <= 4096:
             raise ValueError("任务 max_tokens 应为128—4096的整数")
         messages = self._messages(system, user, history)
-        return self._post(messages, budget, json_mode=False, timeout=self.chat_timeout)
+        return self._post(messages, budget, json_mode=False, timeout=self.chat_timeout,
+                          reasoning_effort=self.chat_reasoning_effort)

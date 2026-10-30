@@ -77,7 +77,7 @@ related:
 - `tests/test_context_tools.py`：上下文工具登记名称/说明/参数，预取顺序、条数与去重与原内联逻辑一致。
 - `tools/replay_mention_length.py`：回放 50 条非详细提问的长度中位数、p90、空行分段占比与套路短语命中率。
 - `tests/test_personality.py`：篇幅提示只定义一次；分段字节预算、长显示名、中途发送失败或上下文失效停止后续段。
-- `tests/test_llm.py`：`content_filter` 残文报错不重试，其他结束原因照常返回；聊天任务的超时与 `max_tokens` 按配置传递，未配置时沿用全局值。
+- `tests/test_llm.py`：`content_filter` 残文报错不重试，其他结束原因照常返回；聊天任务的超时与 `max_tokens` 按配置传递，未配置时沿用全局值；思考强度按配置传递，未配置时不发送。
 - `tests/test_mention_dedupe.py`：同一提问生成中再次艾特不另行生成。
 - `tests/test_mention_chat.py`：背景资料带记录日期；SYSTEM 含能力边界与分区来源说明且各只出现一次。
 - `tests/test_personality.py`：敏感真实事件与梗重复规则只定义一次。

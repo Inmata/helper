@@ -20,6 +20,7 @@ import time
 import types
 from datetime import datetime
 from pathlib import Path
+from statistics import median
 from types import SimpleNamespace
 from unittest import mock
 
@@ -47,6 +48,21 @@ VERSION_OPTIONS = {
             "chat_timeout_seconds": 60, "chat_max_tokens": 512, "detail_max_tokens": 2048},
 }
 SECRET_PATTERN = re.compile(r"sk-[A-Za-z0-9]{8,}|api[_-]?key|Bearer\s", re.I)
+EFFORT_CHOICES = ("default",) + tuple(real_llm.REASONING_EFFORTS)
+
+
+def parse_efforts(text):
+    """逗号分隔的思考强度；default 表示不发送该字段。"""
+    values = [item.strip() for item in text.split(",")]
+    if any(not item for item in values):
+        raise ValueError("强度不能为空")
+    if len(set(values)) != len(values):
+        raise ValueError("强度重复")
+    invalid = [item for item in values if item not in EFFORT_CHOICES]
+    if invalid:
+        raise ValueError(f"不支持的强度：{', '.join(invalid)}；可用 {', '.join(EFFORT_CHOICES)}")
+    return values
+
 
 
 # ---------- 样本 ----------
@@ -363,14 +379,152 @@ def summarize(results):
     return summary
 
 
+# ---------- 按思考强度评测（只跑工作区版） ----------
+
+def reasoning_tokens(usage):
+    """上游可能在顶层或 completion_tokens_details 里报告思考 token。"""
+    if not isinstance(usage, dict):
+        return None
+    value = usage.get("reasoning_tokens")
+    if type(value) is not int:
+        details = usage.get("completion_tokens_details")
+        value = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    return value if type(value) is int else None
+
+
+def _median(values):
+    return round(median(values), 2) if values else None
+
+
+def summarize_efforts(results, efforts):
+    summary = {}
+    for effort in efforts:
+        rows = [row for row in results if row["effort"] == effort]
+        done = [row for row in rows if row["completed"]]
+        usage = [row["usage"] for row in rows if isinstance(row.get("usage"), dict)]
+        completion = [item["completion_tokens"] for item in usage if type(item.get("completion_tokens")) is int]
+        reasoning = [value for value in (reasoning_tokens(item) for item in usage) if value is not None]
+        summary[effort] = {
+            "requests": sum(row["requests"] for row in rows), "cases": len(rows), "completed": len(done),
+            "failed": {row["id"]: row["error_kind"] for row in rows if not row["completed"]},
+            "format_all_pass": sum(1 for row in done if row["format"]["all_pass"]),
+            "format_fail_ids": [row["id"] for row in done if not row["format"]["all_pass"]],
+            "seconds_median": _median([row["seconds"] for row in rows]),
+            "seconds_max": max((row["seconds"] for row in rows), default=None),
+            "usage_reported": len(usage),
+            "completion_tokens_total": sum(completion) if completion else None,
+            "completion_tokens_median": _median(completion),
+            "reasoning_tokens_total": sum(reasoning) if reasoning else None,
+            "reasoning_tokens_median": _median(reasoning),
+        }
+    return summary
+
+
+def _cell(text):
+    return text.replace("|", "\\|").replace("\n", "<br>") if isinstance(text, str) else ""
+
+
+def write_compare(out, model, selected, results, efforts):
+    by_id = {}
+    for row in results:
+        by_id.setdefault(row["id"], {})[row["effort"]] = row
+    lines = ["# 思考强度对比", "", f"- 模型：{model}", f"- 强度：{', '.join(efforts)}",
+             "- default 表示请求体不发送 reasoning_effort 字段。", ""]
+    for case in selected:
+        rows = by_id.get(case["id"], {})
+        lines += [f"## {case['id']}（缺陷 {case['defect']}）", "",
+                  f"**提问**：{_cell(case['current'])}", "",
+                  f"**期望**：{_cell(case.get('expected', ''))}", "",
+                  "| 强度 | 耗时(s) | completion | reasoning | 格式 | 回复 |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for effort in efforts:
+            row = rows.get(effort)
+            if not row:
+                lines.append(f"| {effort} | — | — | — | — | 未运行 |")
+                continue
+            usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
+            if row["completed"]:
+                text = row["reply"]
+                fmt = "通过" if row["format"]["all_pass"] else "未通过"
+            else:
+                text = f"失败：{row.get('error_kind')} {row.get('error', '')}".strip()
+                fmt = "—"
+            rt = reasoning_tokens(usage)
+            completion = usage.get("completion_tokens")
+            lines.append(f"| {effort} | {row['seconds']} | {completion if completion is not None else '—'} | "
+                         f"{rt if rt is not None else '—'} | {fmt} | {_cell(text)} |")
+        lines.append("")
+    (out / "compare.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def run_effort_batch(data, version, config_path, selected, efforts):
+    """同一批样本按每个思考强度各跑一遍，只走工作区版提示词链路。"""
+    dialogue_mod, personality_mod, texts = version
+    config = json.loads(Path(config_path).read_text(encoding="utf-8-sig"))
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
+    out = OUTPUT_ROOT / stamp
+    out.mkdir(parents=True, exist_ok=False)
+    (out / "cases.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    meta = {"started_at": datetime.now().isoformat(timespec="seconds"), "model": config.get("model"),
+            "old_commit": None, "new": "working tree", "mode": "efforts", "efforts": efforts,
+            "source_sha256": {"new": {path: hashlib.sha256(text.encode("utf-8")).hexdigest()
+                                      for path, text in texts.items()}},
+            "options": VERSION_OPTIONS["new"], "group_lore": "fixtures 虚构设定", "retries": 0,
+            "hard_limit_seconds": HARD_LIMIT_SECONDS, "cases": [case["id"] for case in selected]}
+    (out / "versions.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    hints = detail_hints()
+    base = {key: value for key, value in config.items()
+            if key not in ("reasoning_effort", "chat_reasoning_effort")}
+    recorder = Recorder()
+    results = []
+    with mock.patch.object(real_llm, "urlopen", recorder), \
+            open(out / "results.jsonl", "w", encoding="utf-8") as stream:
+        for case in selected:
+            for effort in efforts:
+                overrides = {} if effort == "default" else {"reasoning_effort": effort, "chat_reasoning_effort": effort}
+                client = real_llm.LLMClient({**base, **VERSION_OPTIONS["new"], **overrides})
+                before = len(recorder.calls)
+                kwargs = reply_kwargs("new", case, hints)
+                dialogue = build_dialogue("new", dialogue_mod, personality_mod, client)
+                outcome = run_one(dialogue, personality_mod, case, data["day"], kwargs)
+                calls = recorder.calls[before:]
+                row = {"id": case["id"], "defect": case["defect"], "version": "new", "effort": effort,
+                       "detail": bool(kwargs.get("detail")), "requests": len(calls),
+                       "completed": "reply" in outcome, **outcome,
+                       "finish_reason": calls[-1].get("finish_reason") if calls else None,
+                       "usage": calls[-1].get("usage") if calls else None}
+                if "reply" in outcome:
+                    row["chars"] = len(outcome["reply"])
+                    row["format"] = format_checks(case, outcome["reply"])
+                results.append(row)
+                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+                stream.flush()
+                status = "ok" if row["completed"] else row["error_kind"]
+                print(f"{case['id']:<20} {effort}: {status} {row['seconds']}s", flush=True)
+    summary = summarize_efforts(results, efforts)
+    (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_compare(out, config.get("model"), selected, results, efforts)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(f"结果目录：{out}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", action="store_true", help="真实调用模型（默认只校验并离线渲染，不联网）")
     parser.add_argument("--config", default=str(ROOT / "llm_config.json"), help="私有 llm_config 路径，仅 --run 时读取")
     parser.add_argument("--cases", help="逗号分隔的样本 id，用于日后定向重现")
     parser.add_argument("--limit", type=int, help="只取前 N 条样本")
+    parser.add_argument("--efforts", help="逗号分隔的思考强度（default 表示不发送该字段），给出时只跑工作区版")
     parser.add_argument("--fixtures", default=str(FIXTURES), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+
+    efforts = None
+    if args.efforts:
+        try:
+            efforts = parse_efforts(args.efforts)
+        except ValueError as error:
+            print(f"--efforts 参数错误：{error}")
+            return 2
 
     data = load_cases(args.fixtures)
     problems = validate_cases(data)
@@ -386,7 +540,7 @@ def main(argv=None):
         selected = selected[:args.limit]
 
     versions = {}
-    for version in ("old", "new"):
+    for version in (("new",) if efforts else ("old", "new")):
         texts = read_sources(version)
         dialogue_mod, personality_mod = load_version(version, data["group_lore"], texts)
         versions[version] = (dialogue_mod, personality_mod, texts)
@@ -394,7 +548,10 @@ def main(argv=None):
     if not args.run:
         print("未指定 --run：未调用模型。")
         return 0
-    run_batch(data, versions, args.config, selected)
+    if efforts:
+        run_effort_batch(data, versions["new"], args.config, selected, efforts)
+    else:
+        run_batch(data, versions, args.config, selected)
     return 0
 
 

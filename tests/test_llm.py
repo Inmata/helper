@@ -1,6 +1,9 @@
 """大模型协议和错误处理验证；使用假响应，不消耗实际 API。"""
 import io
 import json
+import socket
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -20,6 +23,43 @@ class JSONClient:
     def complete_json(self, system, user):
         self.calls.append((system, user))
         return self.result
+
+
+class TricklingServer:
+    """本机替身：读到请求后每 30ms 发一行响应头，持续数秒，永不结束响应头。"""
+
+    def __init__(self):
+        self.listener = socket.create_server(("127.0.0.1", 0))
+        self.port = self.listener.getsockname()[1]
+        self.stop = threading.Event()
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        self.listener.settimeout(0.1)
+        while not self.stop.is_set():
+            try:
+                conn, _ = self.listener.accept()
+            except OSError:
+                continue
+            threading.Thread(target=self.trickle, args=(conn,), daemon=True).start()
+
+    def trickle(self, conn):
+        with conn:
+            try:
+                conn.settimeout(1)
+                conn.recv(65536)
+                conn.sendall(b"HTTP/1.1 200 OK\r\n")
+                for index in range(150):
+                    if self.stop.is_set():
+                        return
+                    conn.sendall(f"X-Slow-{index}: 1\r\n".encode())
+                    time.sleep(0.03)
+            except OSError:
+                return
+
+    def close(self):
+        self.stop.set()
+        self.listener.close()
 
 
 class LLMTests(unittest.TestCase):
@@ -154,6 +194,17 @@ class LLMTests(unittest.TestCase):
                 self.assertEqual(client.complete_text("系统", "测试", detail=detail), "正文")
             self.assertEqual(json.loads(call.call_args.args[0].data)["max_tokens"], expected)
             self.assertEqual(call.call_args.kwargs["timeout"], 60)
+
+    def test_slow_response_ends_at_the_hard_deadline(self):
+        server = TricklingServer()
+        self.addCleanup(server.close)
+        client = LLMClient({**self.options, "base_url": f"http://127.0.0.1:{server.port}/v1",
+                            "chat_timeout_seconds": 1})
+        started = time.monotonic()
+        with self.assertRaises(LLMError):
+            client.complete_text("系统", "测试")
+        # 服务端每 30ms 吐一行响应头，共 4.5 秒；裸 urlopen 会读完才返回。
+        self.assertLess(time.monotonic() - started, 2.5)
 
     def test_detail_budget_falls_back_to_chat_budget(self):
         client = LLMClient({**self.options, "chat_max_tokens": 640})

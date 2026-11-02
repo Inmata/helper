@@ -7,10 +7,23 @@ import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from .deadline_http import build_deadline_opener
 
 
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+_opener = build_deadline_opener()
+
+
+def urlopen(request, timeout):
+    """模块内的 ``urlopen``：整次请求受 timeout 硬截止、不跟随重定向；便于测试替换。
+
+    裸 ``urlopen`` 的 timeout 只约束单次 socket 读，网关小口慢发时一次请求可以远超时限，
+    艾特回复线程和它持有的插件队列会一直堵住。改动说明见 ``deadline_http``。
+    """
+    return _opener.open(request, timeout=timeout)
 
 
 class LLMError(RuntimeError):

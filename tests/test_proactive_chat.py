@@ -4,6 +4,7 @@ import json
 import logging
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -256,6 +257,7 @@ class PluginTests(unittest.TestCase):
         self.plugin.active = True
         self.plugin.options = read_options({"start_hour": 0, "end_hour": 24})
         self.plugin.members = MagicMock(account=ROBOT, groups={ROOM})
+        self.plugin.members.turns = None
         self.plugin.members.wechat_name.return_value = "小助手"
         self.plugin.members.display_name.return_value = "小助手"
         self.plugin.members.personality.return_value = MagicMock(name="人格", supplement="")
@@ -272,7 +274,7 @@ class PluginTests(unittest.TestCase):
         self.plugin._stop = threading.Event()
         now = datetime.now(timezone.utc)
         self.plugin.members.recent_rows.return_value = [
-            {"sender_id": "wxid_a", "text": "机器人去哪了", "received_at": (now - timedelta(seconds=3)).isoformat()}]
+            {"id": 10, "sender_id": "wxid_a", "text": "机器人去哪了", "received_at": (now - timedelta(seconds=3)).isoformat()}]
         self.ctx = MagicMock()
         self.ctx.logger = logging.getLogger("ProactiveTests")
         self.ctx.reply.return_value = True
@@ -289,6 +291,30 @@ class PluginTests(unittest.TestCase):
         self.ctx.reply.assert_called_once()
         self.assertEqual(self.ctx.reply.call_args.args[1], "在这呢")
         self.assertEqual(self.plugin.budget.count(ROOM), 1)
+
+    def test_banter_waits_for_another_message_and_passes_the_original_line(self):
+        self.plugin.planner = JevSpeakPlanner(fake_jev(reply_banter=0.12, silent_conversation=0.88))
+        self.ctx.jev.noul.return_value = [0.9]
+        rows = self.plugin.members.recent_rows.return_value
+        now = datetime.now(timezone.utc).isoformat()
+        rows[:] = [
+            {"id": 9, "sender_id": "wxid_a", "text": "我还有五分钟到", "received_at": now},
+            {"id": 10, "sender_id": "wxid_b", "text": "这次真五分钟", "received_at": now},
+        ]
+        second = replace(make_message(rows[-1]["text"]), dispatch_sequence=10)
+        with patch("plugins.proactive_chat.pick_speech_examples", return_value=[]):
+            self.assertFalse(self.plugin.consider(ROOM, second, self.ctx))
+            self.assertFalse(self.plugin.consider(ROOM, second, self.ctx, recheck=True))
+            self.ctx.reply.assert_not_called()
+            self.plugin.planner = JevSpeakPlanner(fake_jev(reply_banter=0.2, silent_conversation=0.8))
+            rows.append({"id": 11, "sender_id": "wxid_a", "text": "他又说五分钟", "received_at": now})
+            self.plugin.members.message_id.return_value = 11
+            third = replace(make_message(rows[-1]["text"]), dispatch_sequence=11)
+            self.assertTrue(self.plugin.consider(ROOM, third, self.ctx))
+        prompt = self.model.complete_json.call_args.args[1]
+        self.assertIn("【本轮想接的原话】", prompt)
+        self.assertIn("【同一话题先前的原话】我还有五分钟到", prompt)
+        self.ctx.reply.assert_called_once()
 
     def test_gap_blocks_second_send_before_jev(self):
         self.consider()

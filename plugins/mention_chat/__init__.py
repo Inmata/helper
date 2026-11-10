@@ -4,6 +4,7 @@ import threading
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from .._shared import idiom_state
@@ -18,6 +19,7 @@ from wxbot_framework.conversation.mention_tools import (ASK_PUBLIC_SEARCH_TARGET
                                                         previous_question, public_search_topic, read_tool_options,
                                                         strip_links)
 from wxbot_framework.conversation.repetition import too_similar
+from wxbot_framework.conversation.turns import COLLECT_SECONDS, judge_turn, likely_incomplete, turn_key
 from wxbot_framework.conversation.tool_router import JevToolRouter
 from wxbot_framework.recent_images import RECENT_IMAGES
 from wxbot_framework.integrations.llm import LLMError
@@ -38,6 +40,14 @@ CATCH_UP = re.compile(r"补个?课|(?:最后|最终|后来).{0,4}(?:定|说好)|
 # 框架按已编译桥接声明的图片能力；没有时找不到图要如实说“收不到图片”，而不是让对方去引用。
 IMAGE_CAPABILITY = "group.image.receive"
 TOOL_FOLLOWUP_LIMIT = 64
+
+
+class TurnChanged(Exception):
+    """同一人补了会改变答案的条件，尚未发送的回复重做。"""
+
+
+class TurnNeedsReview(Exception):
+    """打字节奏等待期间收到补充，退出发送锁后再判断。"""
 
 
 def read_aliases(config):
@@ -230,8 +240,43 @@ class Plugin:
                 _remember_tool_followup(self._last_searches, key, arrived, outcome.search_query)
         return outcome
 
+    def _clean_query(self, message, source):
+        text = strip_at_labels(message.text)
+        if source == "typed":
+            label = typed_at(text, self._bot_names(message.chat_id))
+            if label:
+                text = text.replace("@" + label, "")
+        return text.strip()
+
+    @staticmethod
+    def _turn_judge(ctx, intent, question, **context):
+        try:
+            jev = ctx.jev
+        except ValueError:
+            return False
+        return jev is not None and judge_turn(jev, intent, question, **context)
+
+    def _advance_turn(self, turns, turn, ctx, *, deadline=None):
+        changed = False
+        for incoming in turns.additions(turn, deadline=deadline):
+            source = at_source(incoming, self.members, self.aliases)
+            quote = incoming.data.get("quote")
+            if quote or (source is None and (incoming.data.get("at_members") or incoming.text.startswith("@"))):
+                continue
+            text = self._clean_query(incoming, source)
+            if source and (not text or text == turn.question):
+                turns.merge(incoming)
+            elif text and self._turn_judge(ctx, "merge", turn.question, new=text):
+                turns.merge(incoming)
+                turn.question = "\n".join(filter(None, (turn.question, text)))
+                previous_quote = turn.message.data.get("quote")
+                turn.message = (replace(incoming, data={**incoming.data, "quote": previous_quote})
+                                if previous_quote else incoming)
+                changed = True
+        return changed
+
     def on_message(self, message, ctx):
-        # 图片事件（type 3）由原生服务记入 RECENT_IMAGES，这里只回复文本里的艾特。
+        # 图片事件（type 3）由原生服务记入 RECENT_IMAGES；这里处理艾特与定向续问。
         if (message.type != 1 or not message.is_group or message.chat_id not in self.members.groups or
                 "WXBOT_AT_CHAT_PROBE" in message.text or
                 message.data.get("bot_generated")):
@@ -244,23 +289,33 @@ class Plugin:
             elif parts[0] == COLD_COMMAND and self.cold is not None and not message.is_self:
                 self.cold.command(message, ctx, args)
             return
-        source = at_source(message, self.members, self.aliases)
-        if source is None:
+        turns = getattr(self.members, "turns", None) if message.dispatch_sequence else None
+        if turns is not None and turns.merged(message):
             return
-        clean_query = strip_at_labels(message.text)
-        if source == "typed":
-            # 手打的 @ 没有微信的 U+2005 分隔符，单独去掉命中的名字。
-            label = typed_at(clean_query, self._bot_names(message.chat_id))
-            if label:
-                clean_query = clean_query.replace("@" + label, "")
-        clean_query = clean_query.strip()
+        source = at_source(message, self.members, self.aliases)
+        clean_query = self._clean_query(message, source)
+        depth = 0
+        if source is None:
+            if (turns is None or not clean_query or turns.active(message) or message.data.get("quote")
+                    or message.data.get("at_members") or message.text.startswith("@")):
+                return
+            previous = turns.continuation(message)
+            if previous is None or not self._turn_judge(ctx, "follow", previous.question,
+                                                       previous=previous.text, new=clean_query):
+                return
+            source, depth = "follow", previous.depth + 1
+        elif turns is not None and not clean_query and not message.data.get("quote") and turns.active(message):
+            turns.merge(message)
+            return
         game = self.room_game(message.chat_id, ctx, message=message)
         if game and self.is_move(clean_query, game):
             return  # 答案由接龙插件判定。
+        if turns is not None:
+            turns.claim(message)
         if self.cold is not None and self.cold.handle_mention(message, ctx, clean_query):
             return
-        key = (message.session_id, message.chat_id, message.sender_id)
-        resume = lambda: self._reply_turn(message, ctx, clean_query, game)
+        key = turn_key(message)
+        resume = lambda: self._reply_turn(message, ctx, clean_query, game, turns=turns, source=source, depth=depth)
         slow = self._slow
         if slow is not None and slow.queue_if_active(key, resume):
             return
@@ -276,7 +331,44 @@ class Plugin:
         if not slow.handoff(key, turn):
             turn.close()
 
-    def _reply_turn(self, message, ctx, clean_query, game):
+    def _reply_turn(self, message, ctx, clean_query, game, *, turns=None, source=None, depth=0):
+        if turns is None:
+            yield from self._reply_once(message, ctx, clean_query, game)
+            return
+        if turns.merged(message):
+            return
+        turn = turns.open(message, clean_query, depth)
+        try:
+            self._advance_turn(turns, turn, ctx)
+            deadline = message.received_at + COLLECT_SECONDS
+            if (source != "follow" and not message.data.get("quote") and time.monotonic() < deadline
+                    and likely_incomplete(turn.question) and self._turn_judge(ctx, "collect", turn.question)):
+                yield  # 等同一人把话说完时，不占其他群友的正常回复线程。
+                while time.monotonic() < deadline and turns.active(message) is turn:
+                    if self._advance_turn(turns, turn, ctx, deadline=deadline):
+                        break
+
+            def before_send():
+                if not turn.sent and self._advance_turn(turns, turn, ctx):
+                    raise TurnChanged
+
+            while True:
+                if source == "follow" or turn.message is not message:
+                    ctx.logger.info("群聊接话：来源=%s 目标=%s", source, turn.message.dispatch_sequence)
+                try:
+                    yield from self._reply_once(turn.message, ctx, turn.question, game, before_send=before_send,
+                                                needs_review=lambda: turns.has_addition(turn),
+                                                sent=lambda text: turns.sent(turn, text), plain=source == "follow")
+                except TurnChanged:
+                    if turn.replanned:
+                        ctx.logger.info("群聊接话：按最新补充另起一轮 目标=%s", turn.message.dispatch_sequence)
+                    turn.replanned = not turn.replanned
+                    continue
+                return
+        finally:
+            turns.close(turn)
+
+    def _reply_once(self, message, ctx, clean_query, game, *, before_send=None, needs_review=None, sent=None, plain=False):
         if self._slow is not None and self._slow.stopped.is_set():
             return
         if self.cold is not None and self.cold.active(message):
@@ -288,18 +380,42 @@ class Plugin:
             ctx.logger.info("艾特对话跳过：相同提问仍在回复中 room=%s", message.chat_id)
             return
         result = SpeakResult()
+
+        def dispatch(send):
+            while True:
+                if before_send is not None:
+                    before_send()
+                try:
+                    return send()
+                except TurnNeedsReview:
+                    continue
+
         try:
             catch_up = CATCH_UP.search(clean_query)
             snapshot = (self.members.conversation_snapshot(message, group_limit=100, group_only=True)
                         if catch_up else self.members.conversation_snapshot(message))
-            guard = lambda: self._delivery_guard(message, ctx.response_guard, snapshot, personality)
+            @contextmanager
+            def guard():
+                with self._delivery_guard(message, ctx.response_guard, snapshot, personality):
+                    if needs_review is not None and needs_review():
+                        raise TurnNeedsReview
+                    yield
             quote, missing_quote = resolve_reply_quote(
                 message.data.get("quote"), lambda message_id: self.members.context_text(message.chat_id, message_id))
             display = self.members.at_display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
             budget = 1023 - len(("@" + display + "\u2005\n").encode("utf-8"))
 
+            def send_part(part, send_guard=guard, *, use_at=False):
+                if use_at and not plain:
+                    delivered = dispatch(lambda: ctx.reply_at(message, part, display_name=display, delivery_guard=send_guard))
+                else:
+                    delivered = dispatch(lambda: ctx.reply(message, part, delivery_guard=send_guard))
+                if delivered and sent is not None:
+                    sent(part)
+                return delivered
+
             def send_at(part, send_guard=guard):
-                return ctx.reply_at(message, part, display_name=display, delivery_guard=send_guard)
+                return send_part(part, send_guard, use_at=True)
 
             if missing_quote:
                 speak(missing_quote, tier=QA, byte_budget=budget, result=result, send_at=send_at)
@@ -324,6 +440,8 @@ class Plugin:
             options = {"detail": True} if detail else {"examples": context.examples}
             outcome = yield from self._run_tools(message, ctx, clean_query, snapshot)
             self._ensure_running()
+            if before_send is not None:
+                before_send()
             if outcome.ask:
                 # 工具目标不明确时直接请对方补充。
                 speak(outcome.ask, tier=QA, byte_budget=budget, result=result, send_at=send_at)
@@ -375,17 +493,19 @@ class Plugin:
             if can_voice and self.voice_reply.reserve(message, reply, voice_preference, automatic=tier == CHAT):
                 yield  # 语音合成由慢队列等待，其他成员的文字回复继续处理。
                 self._ensure_running()
-                voice_sent = self.voice_reply.send(message, ctx, reply, guard=guard)
+                voice_sent = self.voice_reply.send(message, ctx, reply, guard=guard, dispatch=dispatch)
                 if voice_sent is not None:
                     if voice_sent:
                         result.sent.append(reply)
+                        if sent is not None:
+                            sent(reply)
                     return  # 微信发送结果不明时不补发文字。
             # 闲聊拆分时把插话检测并入守卫：后续条在拿到守卫后、原生发送前再查一次。
             gate = InterjectionGate(interjection_probe(self.members, message.chat_id)) if tier == CHAT else None
             send_guard = gate.wrap(guard) if gate is not None else guard
             speak(reply, tier=tier, byte_budget=budget, result=result,
                   send_at=lambda part: send_at(part, send_guard),
-                  send_plain=lambda part: ctx.reply(message, part, delivery_guard=send_guard),
+                  send_plain=lambda part: send_part(part, send_guard),
                   interjected=gate)
             if result.failed:
                 raise RuntimeError("原生艾特发送未成功")
@@ -398,7 +518,7 @@ class Plugin:
         except LLMError as error:
             ctx.logger.warning("艾特对话失败：%s", error)
             try:
-                ctx.reply(message, f"暂时无法回复：{error}", delivery_guard=guard)
+                dispatch(lambda: ctx.reply(message, f"暂时无法回复：{error}", delivery_guard=guard))
             except SnapshotExpired:
                 pass
         finally:

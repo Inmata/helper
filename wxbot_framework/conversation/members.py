@@ -203,7 +203,9 @@ class MemberStore:
         self._prepared = False
         # 聊天原文拆到独立模块；成员库仍持有同一连接与锁。
         from .history import ConversationHistory
+        from .turns import ConversationTurns
         self.transcript = ConversationHistory(self)
+        self.turns = ConversationTurns()
 
     @classmethod
     def from_config(cls, config, directory):
@@ -309,6 +311,7 @@ class MemberStore:
             if inserted and not message.data.get("bot_generated") and not message.is_self:
                 # 群友新消息统一在这里计入主动发言预算，事件驱动插件关闭时定时路径的连续计数也能清零。
                 self.speak_budget.human_message(message.chat_id)
+                self.turns.observe(message)
         return inserted
 
     def record_bot_reply(self, room, text, *, voice_id=""):
@@ -342,7 +345,10 @@ class MemberStore:
         return self.transcript.recent_snapshot(room, **options)
 
     def reset_context(self, room):
-        return self.transcript.reset_context(room)
+        with self.database.lock:
+            result = self.transcript.reset_context(room)
+            self.turns.clear(room)
+            return result
 
     def close(self):
         """关闭共用连接；由装配方在停止流程末尾调用。"""

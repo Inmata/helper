@@ -10,6 +10,7 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 
 from .._shared import idiom_state
 from .._shared.stickers import sticker_catalog
@@ -20,12 +21,14 @@ from wxbot_framework.conversation.members import BEIJING, SnapshotExpired
 from wxbot_framework.conversation.personality import personality_text
 from wxbot_framework.conversation.planner import (PERSONA_SUMMARY, REPLY, WAIT, JevSpeakPlanner, build_speak_context,
                                                   generate_proactive)
+from wxbot_framework.conversation.turns import judge_turn
 from wxbot_framework.conversation.utterance import CHAT, InterjectionGate, SpeakResult, interjection_probe, speak
 from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.messaging.mentions import at_source
 from wxbot_framework.timeutil import describe_local, parse_utc
 
 GAME_FEATURE = "idiom_chain"
+CALLBACK_SECONDS = 30 * 60
 # (配置键, 默认值, 下限, 上限)；数值都是整数，阈值按百分比填写。
 OPTIONS = (
     ("quiet_seconds", 3, 1, 60),
@@ -76,6 +79,7 @@ class Plugin:
         self._waiting = {}
         self._versions = {}
         self._last_sticker = {}
+        self._callbacks = {}
 
     def on_load(self, ctx):
         self._thread = None
@@ -243,6 +247,33 @@ class Plugin:
                 self.budget.mark_sent(room)
         return guarded
 
+    def _callback_hint(self, room, message, context, action, ctx, *, recheck):
+        """保留一个正在成形的梗；只有新的同话题消息可以把它带回来。"""
+        if recheck or action.args.get("intent") != "reply_banter":
+            return False, ""
+        recent = "\n".join(f"{who}：{text}" for _, who, text in context.lines[-6:])
+        current = context.lines[-1][2]
+        held = self._callbacks.get(room)
+        if held is not None:
+            session, sequence, expires, previous = held
+            if session == message.session_id and self.clock() < expires:
+                if (sequence != message.dispatch_sequence and action.type in (REPLY, WAIT)
+                        and judge_turn(ctx.jev, "hook", previous, previous=recent, new=current)):
+                    return False, previous
+                return False, ""
+            self._callbacks.pop(room)
+        for age, who, text in reversed(context.lines[:-1]):
+            if who == "机器人" or age > CALLBACK_SECONDS:
+                continue
+            overlap = SequenceMatcher(None, text[:100], current[:100], autojunk=False).find_longest_match()
+            if (overlap.size >= 3 and any(ch.isalnum() for ch in text[overlap.a:overlap.a + overlap.size])
+                    and judge_turn(ctx.jev, "hook", text, previous=recent, new=current)):
+                self._callbacks[room] = (message.session_id, message.dispatch_sequence,
+                                         self.clock() + CALLBACK_SECONDS, text)
+                ctx.logger.info("群聊接话：暂留一个梗 目标=%s", message.dispatch_sequence)
+                return True, ""
+        return False, ""
+
     def consider(self, room, message, ctx, *, version=None, recheck=False):
         """判断并在需要时发出一次主动发言；返回是否发出。``recheck`` 为 WAIT 后的复判。"""
         if version is None:
@@ -257,6 +288,13 @@ class Plugin:
             return False
         if self._game_active(room):
             ctx.logger.info("主动发言跳过：room=%s reason=idiom-game", room)
+            return False
+        turns = getattr(self.members, "turns", None)
+
+        def direct():
+            return turns is not None and (turns.claimed(message) or turns.active(message) is not None)
+
+        if direct():
             return False
         # 水位绑定触发这一轮的消息自己的序号：它之后落库的消息（含已落库但尚未分发给插件的）都算新消息。
         # 消息还没落库（None）时无从界定“之后”，这一轮放弃。
@@ -284,17 +322,26 @@ class Plugin:
         ctx.logger.info("主动发言判断：room=%s action=%s p=%s threshold=%s top=%s seconds=%s reason=%s",
                         room, action.type, args.get("probability"), args.get("threshold"), args.get("top"),
                         args.get("seconds"), args.get("reason", ""))
-        if action.type == WAIT and not recheck:
+        if self._superseded(room, version) or direct():
+            return False
+        holding, callback = self._callback_hint(room, message, context, action, ctx, recheck=recheck)
+        if holding:
+            return False
+        if action.type == WAIT and not recheck and not callback:
             self._schedule_recheck(room, message, version, ctx)
             return False
-        if action.type != REPLY or self._superseded(room, version):
+        if (action.type != REPLY and not callback) or self._superseded(room, version):
             return False
         model = ctx.llm_for(message, personality=persona)
         stickers = sticker_catalog() if "group.image.send" in ctx.capabilities else {}
         stickers.pop(self._last_sticker.get(room), None)
+        target = args.get("target", len(context.lines) - 1)
+        intent = args.get("intent", "")
+        ctx.logger.info("群聊接话：来源=主动 意图=%s 目标=%s", intent, rows[-len(context.lines) + target]["id"])
         text = personality_text(generate_proactive(model, context.lines, local_time=context.local_time,
                                                    recent_bot=self._recent_bot_texts(room),
                                                    stickers=stickers,
+                                                   intent=intent, target=target, callback=callback,
                                                    examples=pick_speech_examples(self.members, room)))
         sticker_name = text.removeprefix("表情:") if text.startswith("表情:") else ""
         sticker = stickers.get(sticker_name)
@@ -318,7 +365,7 @@ class Plugin:
             return ctx.reply(message, part, delivery_guard=guard)
         try:
             gate = InterjectionGate(interjection_probe(self.members, room))
-            guard = gate.wrap(self._fresh_guard(room, version, newer,
+            guard = gate.wrap(self._fresh_guard(room, version, lambda: newer() or direct(),
                                                 lambda: ctx.response_guard(snapshot, persona)))
             if sticker is not None:
                 if ctx.reply_image(message, sticker, delivery_guard=guard):
@@ -336,5 +383,7 @@ class Plugin:
         if result.failed and not result.sent:
             ctx.logger.warning("主动发言发送未成功：room=%s", room)
             return False
+        if callback and result.sent:
+            self._callbacks.pop(room, None)
         ctx.logger.info("主动发言完成：room=%s persona=%s count=%d", room, persona.name, self.budget.count(room))
         return bool(result.sent)

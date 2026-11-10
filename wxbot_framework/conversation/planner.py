@@ -19,6 +19,7 @@ from types import MappingProxyType
 
 from .dialogue import AVOID_PHRASES, AVOID_REPEAT
 from .repetition import too_similar
+from .utterance import QA, classify_tier
 
 logger = logging.getLogger(__name__)
 
@@ -153,10 +154,21 @@ class JevSpeakPlanner(Planner):
         except Exception as error:
             return Action(SKIP, {"reason": "jev-error", "error": type(error).__name__})
         elapsed = round(time.monotonic() - started, 3)
-        probability = sum(value for key, value in probabilities.items() if key.startswith("reply_"))
+        positive = {key: value for key, value in probabilities.items() if key.startswith("reply_")}
+        probability = sum(positive.values())
         top = max(probabilities, key=probabilities.get) if probabilities else ""
+        intent = max(positive, key=positive.get, default="")
+        target = len(context.lines) - 1
+        for index in range(target, -1, -1):
+            _, who, text = context.lines[index]
+            if who == "机器人":
+                break
+            if (intent == "reply_called" and mentions_bot(text)) or (
+                    intent == "reply_unanswered" and classify_tier(text) == QA):
+                target = index
+                break
         args = {"probability": round(probability, 3), "threshold": round(threshold, 3), "top": top,
-                "seconds": elapsed}
+                "seconds": elapsed, "intent": intent, "target": target}
         if probability >= threshold:
             return Action(REPLY, args)
         if probability >= threshold - self.wait_margin:
@@ -275,9 +287,12 @@ PROACTIVE_SYSTEM = """群里没人艾特你，但现在适合你像群友一样�
 其实没什么好说、或者说了会显得突兀时返回 speak=false。
 必须只输出 JSON：{"speak":false,"text":""} 或 {"speak":true,"text":"一两句短话，不含@"}。"""
 PROACTIVE_MAX_CHARS = 60
+SPEAK_INTENT = {"reply_called": "接住对机器人说的话", "reply_unanswered": "补答尚未有人回答的问题",
+                "reply_banter": "只接还在继续的玩笑"}
 
 
-def generate_proactive(model, lines, *, examples=(), recent_bot=(), local_time="", stickers=(), max_tokens=512):
+def generate_proactive(model, lines, *, examples=(), recent_bot=(), local_time="", stickers=(),
+                       intent="", target=None, callback="", max_tokens=512):
     """生成主动发言正文；不该说、为空或格式不合时返回空串（调用方视为 skip）。
 
     model 为带人格的模型（``PersonalityLLM``），它抛出的 ``LLMError`` / 人格过期原样传播。
@@ -290,9 +305,18 @@ def generate_proactive(model, lines, *, examples=(), recent_bot=(), local_time="
     if local_time:
         user += f"【当前时间】{local_time}\n"
     user += "【最近聊天】（从旧到新，who=机器人 的是你自己）\n" + json.dumps(payload["recent"], ensure_ascii=False)
+    if target is not None:
+        user += "\n【本轮想接的原话】" + json.dumps(payload["recent"][target], ensure_ascii=False)
+    if intent in SPEAK_INTENT:
+        user += "\n【本轮开口的理由】" + SPEAK_INTENT[intent]
+    if callback:
+        user += "\n【同一话题先前的原话】" + callback
     if payload["examples"]:
         user += "\n【群友说话的样子】\n" + json.dumps(payload["examples"], ensure_ascii=False)
     system = PROACTIVE_SYSTEM
+    if target is not None:
+        system += ("\n本轮只接【本轮想接的原话】和同一话题。群里已有人答上、原话说给别人、或话题已转开时，"
+                   "就返回 speak=false。开口理由是提示，结合后面的聊天判断；旧梗仅在现在确实碰回同一件事时使用。")
     if stickers:
         system += ("\n只有一张表情就足以接梗时，可以把 text 写成下列完整标记之一："
                    + "、".join("表情:" + name for name in stickers) + "。不要加别的字。")

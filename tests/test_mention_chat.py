@@ -1,6 +1,7 @@
 """验证接龙进行中人格对话的边界：答案交给接龙插件，进度按真实状态注入。"""
 import json
 import logging
+import time
 import unittest
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
@@ -16,6 +17,7 @@ from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
 from wxbot_framework.conversation.members import ConversationSnapshot, MemberStore, SnapshotExpired
 from wxbot_framework.conversation.personality import PersonalityState
 from wxbot_framework.conversation.room_state import RoomStateStore
+from wxbot_framework.conversation.turns import ConversationTurns
 from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.messaging.mentions import parse_quote
 from wxbot_framework.sdk import Message
@@ -507,6 +509,28 @@ class MentionDeliveryTests(unittest.TestCase):
         self.assertEqual(ctx.sent, [("reply_at", "行吧"), ("reply", "那我先睡了")])
         self.assertEqual(ctx.guard_calls, 2)  # 每条单独过守卫
         self.sleep.assert_not_called()
+
+    def test_addition_during_delivery_replaces_old_answer_and_opens_followup(self):
+        turns = self.members.turns = ConversationTurns()
+        plugin, ctx = self.build(["南门集合", "改到北门集合", "晚上八点"])
+        ctx.jev = Mock()
+        ctx.jev.noul.return_value = [0.9]
+        first = replace(mention("在哪集合？", time.monotonic()), dispatch_sequence=1)
+        extra = replace(first, text="改成北门。", data={}, dispatch_sequence=2)
+        turns.observe(first)
+
+        def add_before_send(_sent):
+            ctx.before_guard = None
+            turns.observe(extra)
+
+        ctx.before_guard = add_before_send
+        plugin.on_message(first, ctx)
+        self.assertIn("改成北门。", ctx.last_user)
+        plugin.on_message(extra, ctx)
+        follow = replace(extra, text="那北门几点？", received_at=time.monotonic(), dispatch_sequence=3)
+        turns.observe(follow)
+        plugin.on_message(follow, ctx)
+        self.assertEqual(ctx.sent, [("reply_at", "改到北门集合"), ("reply", "晚上八点")])
 
     def test_interjection_after_first_send_drops_the_rest_without_error(self):
         plugin, ctx = self.build("哈哈！真的假的？我不信。")

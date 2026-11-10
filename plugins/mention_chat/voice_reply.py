@@ -80,7 +80,7 @@ class VoiceReply:
         self._next[room] = now + _INTERVAL_SECONDS
         return True
 
-    def send(self, message, ctx, reply, *, guard):
+    def send(self, message, ctx, reply, *, guard, dispatch=None):
         """合成失败返回 None；已提交则返回微信发送结果。"""
         now = monotonic()
         voice = self.current_voice(message.chat_id, ctx)
@@ -102,7 +102,8 @@ class VoiceReply:
             except (OSError, SubprocessError, ValueError) as error:
                 ctx.logger.warning("本机语音合成失败，改发文字：%s", type(error).__name__)
                 return None
-        sent = ctx.reply_voice(message, wav, transcript=reply, delivery_guard=guard)
+        submit = lambda: ctx.reply_voice(message, wav, transcript=reply, delivery_guard=guard)
+        sent = dispatch(submit) if dispatch is not None else submit()
         ctx.logger.info("艾特语音回复：%s，音色=%s，合成到回执 %.2f 秒",
                         "已提交" if sent else "未确认", voice, monotonic() - now)
         return sent

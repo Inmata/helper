@@ -8,6 +8,7 @@ code:
   - wxbot_framework/plugin_engine/context.py
 related:
   - wxbot_framework/conversation/members.py
+  - wxbot_framework/conversation/turns.py
   - wxbot_framework/integrations/jev.py
   - wxbot_framework/conversation/utterance.py
   - wxbot_framework/feature_config.py
@@ -40,6 +41,12 @@ related:
 | 7 | 定时候选 `hourly_chat.quiet_minutes`（默认 0 关闭）大于 0 时，候选时刻前这么多分钟内本群有任何消息（含机器人）就记为 `filtered`/`not-quiet`，不调用模型。 | — |
 | 8 | `PluginContext.jev` 按需从大模型配置文件构造 `JevClient`（`jev` 段优先，缺省取主模型配置），只读配置、不请求接口。 | 未配置大模型文件：`ValueError`。 |
 | 9 | 支持群图片发送时，模型可从当前表情目录选一张贴合话题的图代替文本；同群上一张主动发过的表情不进入这轮候选。图片与主动文本共用发送守卫和发言预算。 | 表情名不在候选内时跳过。 |
+
+## 发言对象与接梗
+
+事件驱动的决策会保留发言意图和目标原话，交给本群人格生成。已有群友答上、话说给别人或已经换题时，模型可以继续沉默。定向回复接住的消息交给艾特回复插件。
+
+出现有意义的重复线索时，每群可留一个接梗候选，30 分钟后过期。规则 3 的普通流程只对 `reply` 生成；接梗可以用新的同话题消息把 `wait` 推进生成，仍需 Jev 确认，并使用同一份发言预算。静默复判不唤醒旧梗；实际发出后消费候选。
 
 ## 验收
 

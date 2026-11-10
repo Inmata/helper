@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, Mock, patch
 
 from plugins.mention_chat import Plugin
-from wxbot_framework.conversation import utterance
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
 from wxbot_framework.conversation.members import ConversationSnapshot, SnapshotExpired
 from wxbot_framework.conversation.personality import PersonalityState
@@ -466,7 +465,7 @@ class MentionDeliveryTests(unittest.TestCase):
     """艾特回复端到端：分档、拆分、插话丢弃、守卫和去重（不连网、不调用大模型）。"""
 
     def setUp(self):
-        sleeper = patch.object(utterance.time, "sleep")
+        sleeper = patch("time.sleep")
         self.sleep = sleeper.start()
         self.addCleanup(sleeper.stop)
         self.members = FakeMembers()
@@ -487,13 +486,20 @@ class MentionDeliveryTests(unittest.TestCase):
         _, ctx, _ = self.run_plugin("晚安啦", "行吧。那我先睡了。")
         self.assertEqual(ctx.sent, [("reply_at", "行吧"), ("reply", "那我先睡了")])
         self.assertEqual(ctx.guard_calls, 2)  # 每条单独过守卫
-        self.assertEqual(self.sleep.call_count, 1)
-        self.assertTrue(0.9 <= self.sleep.call_args.args[0] <= 3.0)  # 真实时钟只流逝了微秒级
+        self.sleep.assert_not_called()
 
-    def test_interjection_during_gap_drops_the_rest_without_error(self):
-        self.sleep.side_effect = lambda seconds: self.members.interject()
-        _, ctx, _ = self.run_plugin("晚安啦", "哈哈！真的假的？我不信。")
-        # 条间隔结束后的预检查发现插话，第二条的发送函数根本没有被调用。
+    def test_interjection_after_first_send_drops_the_rest_without_error(self):
+        plugin, ctx = self.build("哈哈！真的假的？我不信。")
+        original = ctx.reply_at
+
+        def send_first(*args, **kwargs):
+            sent = original(*args, **kwargs)
+            self.members.interject()
+            return sent
+
+        ctx.reply_at = send_first
+        plugin.on_message(mention("晚安啦"), ctx)
+        # 首条发送结束后的预检查发现插话，第二条的发送函数根本没有被调用。
         self.assertEqual(ctx.sent, [("reply_at", "哈哈！")])
         self.assertEqual(ctx.guard_calls, 1)
 

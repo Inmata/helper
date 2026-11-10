@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 from plugins.mention_chat import Plugin
 from tests.test_mention_chat import ROOM, FakeCtx, FakeMembers, mention
-from wxbot_framework.conversation import utterance
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
 from wxbot_framework.conversation.members import ConversationSnapshot
 from wxbot_framework.conversation.mention_tools import (ASK_FOR_IMAGE, ASK_WHICH_IMAGE, ASK_WHICH_OTHER_IMAGE,
@@ -650,9 +649,6 @@ class DialogueToolSectionTests(unittest.TestCase):
 
 class MentionChatToolTests(unittest.TestCase):
     def setUp(self):
-        sleeper = patch.object(utterance.time, "sleep")
-        sleeper.start()
-        self.addCleanup(sleeper.stop)
         RECENT_IMAGES.clear()
         self.addCleanup(RECENT_IMAGES.clear)
 

@@ -1,9 +1,9 @@
-import random
 import unittest
 from contextlib import contextmanager
+from unittest.mock import patch
 
 from wxbot_framework.conversation.utterance import (
-    CHAT, DETAIL, QA, InterjectionGate, Interjected, SpeakResult, classify_tier, chat_parts, gap_seconds,
+    CHAT, DETAIL, QA, InterjectionGate, Interjected, SpeakResult, classify_tier, chat_parts,
     interjection_probe, plan_utterance, speak, split_sentences)
 
 
@@ -73,14 +73,12 @@ class SplitTests(unittest.TestCase):
         plan = plan_utterance("行吧。那我先睡了。", CHAT, byte_budget=1000)
         self.assertEqual(plan.parts, ("行吧", "那我先睡了"))
         self.assertFalse(plan.at_all)
-        self.assertTrue(plan.paced)
         self.assertTrue(plan.gated)
 
     def test_comma_split_is_not_interruptible(self):
         # 只按逗号切开的本来是一句话：插话也不丢后半句，否则会留下半句。
         plan = plan_utterance("凯恩要是能拿金球奖，违约金都够买他一只手了", CHAT, byte_budget=1000)
         self.assertEqual(len(plan.parts), 2)
-        self.assertTrue(plan.paced)
         self.assertFalse(plan.gated)
 
     def test_plan_qa_never_splits_even_with_sentence_ends(self):
@@ -94,7 +92,6 @@ class SplitTests(unittest.TestCase):
         self.assertTrue(all(len(part.encode("utf-8")) <= 300 for part in plan.parts))
         self.assertEqual("".join(plan.parts).replace("\n", ""), text.replace("\n", ""))
         self.assertTrue(plan.at_all)
-        self.assertFalse(plan.paced)
 
     def test_oversized_non_detail_reply_is_segmented_not_truncated(self):
         text = "中" * 1200 + "[TAIL]"
@@ -103,100 +100,37 @@ class SplitTests(unittest.TestCase):
         self.assertEqual("".join(plan.parts), text)
 
 
-class GapTests(unittest.TestCase):
-    def test_gap_target_stays_within_one_to_three_seconds(self):
-        rng = random.Random(7)
-        for text in ("好", "哈" * 8, "哈" * 20, "哈" * 40):
-            for _ in range(50):
-                gap = gap_seconds(text, rng)
-                self.assertGreaterEqual(gap, 1.0)
-                self.assertLessEqual(gap, 3.0)
-
-    def test_longer_text_waits_at_least_as_long(self):
-        rng_short, rng_long = random.Random(1), random.Random(1)
-        self.assertLessEqual(gap_seconds("短", rng_short), gap_seconds("长" * 18, rng_long) + 1.0)
-
-
 class SpeakTests(unittest.TestCase):
     def collect(self):
         sent = []
         return sent, (lambda part: sent.append(("at", part)) or True), (lambda part: sent.append(("plain", part)) or True)
 
-    def test_chat_split_first_at_then_plain_with_gaps(self):
+    def test_chat_split_first_at_then_plain_without_extra_wait(self):
         sent, send_at, send_plain = self.collect()
-        waits = []
-        result = speak("行吧。那我先睡了。", tier=CHAT, byte_budget=1000, send_at=send_at, send_plain=send_plain,
-                       interjected=lambda: False, sleep=waits.append, rng=random.Random(3))
+        with patch("time.sleep") as sleep:
+            result = speak("行吧。那我先睡了。", tier=CHAT, byte_budget=1000, send_at=send_at,
+                           send_plain=send_plain, interjected=lambda: False)
         self.assertEqual(sent, [("at", "行吧"), ("plain", "那我先睡了")])
-        self.assertEqual(len(waits), 1)
+        sleep.assert_not_called()
         self.assertFalse(result.interrupted)
 
-    def test_gap_runs_from_previous_return_to_next_call_within_one_to_three_seconds(self):
-        now = [100.0]
-        waits, events = [], []
-
-        def sleep(seconds):
-            waits.append(seconds)
-            now[0] += seconds
-
-        def send(part):
-            events.append((part, now[0]))
-            now[0] += 5.0  # 发送函数本身耗时（含发送层的打字节奏），不应计入条间隔
-            return True
-
-        for seed in range(30):
-            waits.clear(), events.clear()
-            speak("哈哈！真的假的？我不信。", tier=CHAT, byte_budget=1000, send_at=send, interjected=lambda: False,
-                  sleep=sleep, rng=random.Random(seed), clock=lambda: now[0])
-            self.assertEqual(len(waits), 2)
-            for wait in waits:
-                self.assertGreaterEqual(wait, 1.0)
-                self.assertLessEqual(wait, 3.0)
-            # 下一条被调用的时刻 = 上一条返回时刻 + 等待值。
-            self.assertAlmostEqual(events[1][1] - (events[0][1] + 5.0), waits[0])
-
-    def test_gap_only_waits_the_remaining_time(self):
-        waits = []
-        readings = iter([10.0, 10.4, 11.0])  # 首条返回时刻、计算剩余等待时的时刻、末条返回时刻
-
-        class FixedRng:
-            def uniform(self, low, high):
-                return 0.0
-
-        speak("行吧。那我先睡了。", tier=CHAT, byte_budget=1000, send_at=lambda part: True,
-              interjected=lambda: False, sleep=waits.append, rng=FixedRng(), clock=lambda: next(readings))
-        # 目标值 = max(1, 0.8 + 0.1 * 5) = 1.3，已过去 0.4 秒，只补足 0.9 秒。
-        self.assertEqual(len(waits), 1)
-        self.assertAlmostEqual(waits[0], 0.9)
-
-    def test_no_wait_when_the_gap_has_already_passed(self):
-        now = [0.0]
-        waits = []
-
-        def send(part):
-            return True
-
-        def clock():
-            value = now[0]
-            now[0] += 10.0  # 每次读时钟前进 10 秒，剩余时间为负
-            return value
-
-        speak("行吧。那我先睡了。", tier=CHAT, byte_budget=1000, send_at=send, interjected=lambda: False,
-              sleep=waits.append, clock=clock)
-        self.assertEqual(waits, [])
-
-    def test_qa_is_a_single_message_with_no_wait(self):
+    def test_three_chat_parts_are_sent_without_extra_wait(self):
         sent, send_at, send_plain = self.collect()
-        waits = []
-        speak("可以。先点设置。", tier=QA, byte_budget=1000, send_at=send_at, send_plain=send_plain,
-              sleep=waits.append)
+        with patch("time.sleep") as sleep:
+            speak("哈哈！真的假的？我不信。", tier=CHAT, byte_budget=1000, send_at=send_at,
+                  send_plain=send_plain, interjected=lambda: False)
+        self.assertEqual(sent, [("at", "哈哈！"), ("plain", "真的假的？"), ("plain", "我不信")])
+        sleep.assert_not_called()
+
+    def test_qa_is_a_single_message(self):
+        sent, send_at, send_plain = self.collect()
+        speak("可以。先点设置。", tier=QA, byte_budget=1000, send_at=send_at, send_plain=send_plain)
         self.assertEqual(sent, [("at", "可以。先点设置。")])
-        self.assertEqual(waits, [])
 
     def test_detail_sends_every_segment_with_at(self):
         sent, send_at, send_plain = self.collect()
         text = "\n".join("行" + "字" * 80 for _ in range(10))
-        speak(text, tier=DETAIL, byte_budget=300, send_at=send_at, send_plain=send_plain, sleep=lambda s: self.fail())
+        speak(text, tier=DETAIL, byte_budget=300, send_at=send_at, send_plain=send_plain)
         self.assertGreater(len(sent), 1)
         self.assertTrue(all(kind == "at" for kind, _ in sent))
 
@@ -204,7 +138,7 @@ class SpeakTests(unittest.TestCase):
         sent, send_at, send_plain = self.collect()
         flags = iter([False, True])
         result = speak("哈哈！真的假的？我不信。", tier=CHAT, byte_budget=1000, send_at=send_at,
-                       send_plain=send_plain, interjected=lambda: next(flags), sleep=lambda s: None)
+                       send_plain=send_plain, interjected=lambda: next(flags))
         self.assertEqual([part for _, part in sent], ["哈哈！", "真的假的？"])
         self.assertEqual(result.dropped, 1)
         self.assertTrue(result.interrupted)
@@ -212,23 +146,23 @@ class SpeakTests(unittest.TestCase):
     def test_interjection_before_second_part_drops_all_remaining(self):
         sent, send_at, send_plain = self.collect()
         result = speak("哈哈！真的假的？我不信。", tier=CHAT, byte_budget=1000, send_at=send_at,
-                       send_plain=send_plain, interjected=lambda: True, sleep=lambda s: None)
+                       send_plain=send_plain, interjected=lambda: True)
         self.assertEqual([part for _, part in sent], ["哈哈！"])
         self.assertEqual(result.dropped, 2)
 
     def test_comma_split_sends_every_part_even_when_interrupted(self):
         sent, send_at, send_plain = self.collect()
-        waits = []
-        result = speak("行吧，那我先睡了", tier=CHAT, byte_budget=1000, send_at=send_at, send_plain=send_plain,
-                       interjected=lambda: True, sleep=waits.append)
+        with patch("time.sleep") as sleep:
+            result = speak("行吧，那我先睡了", tier=CHAT, byte_budget=1000, send_at=send_at,
+                           send_plain=send_plain, interjected=lambda: True)
         self.assertEqual([part for _, part in sent], ["行吧", "那我先睡了"])
         self.assertEqual(result.dropped, 0)
-        self.assertEqual(len(waits), 1)  # 仍然保持条间隔的节奏
+        sleep.assert_not_called()
 
     def test_first_send_failure_stops_and_reports(self):
         calls = []
         result = speak("行吧。那我先睡了。", tier=CHAT, byte_budget=1000,
-                       send_at=lambda part: calls.append(part) or False, sleep=lambda s: None)
+                       send_at=lambda part: calls.append(part) or False)
         self.assertTrue(result.failed)
         self.assertEqual(calls, ["行吧"])
         self.assertEqual(result.sent, [])
@@ -243,8 +177,7 @@ class SpeakTests(unittest.TestCase):
             return True
 
         with self.assertRaises(RuntimeError):
-            speak("行吧。那我先睡了。", tier=CHAT, byte_budget=1000, send_at=send, interjected=lambda: False,
-                  sleep=lambda s: None)
+            speak("行吧。那我先睡了。", tier=CHAT, byte_budget=1000, send_at=send, interjected=lambda: False,)
         self.assertEqual(sent, ["行吧"])
 
     def test_interjected_guard_inside_send_counts_as_dropped_not_failed(self):
@@ -256,8 +189,7 @@ class SpeakTests(unittest.TestCase):
             sent.append(part)
             return True
 
-        result = speak("哈哈！真的假的？我不信。", tier=CHAT, byte_budget=1000, send_at=send, interjected=lambda: False,
-                       sleep=lambda s: None)
+        result = speak("哈哈！真的假的？我不信。", tier=CHAT, byte_budget=1000, send_at=send, interjected=lambda: False)
         self.assertEqual(sent, ["哈哈！"])
         self.assertEqual(result.dropped, 2)
         self.assertFalse(result.failed)
@@ -285,8 +217,8 @@ class SpeakTests(unittest.TestCase):
 
         result = SpeakResult()
         speak("哈哈！真的假的？我不信。", tier=CHAT, byte_budget=1000, send_at=send, interjected=gate,
-              sleep=lambda s: None, result=result)
-        # 首条发出后，等待结束的预检查就发现了插话，第二条根本没有调用发送函数。
+              result=result)
+        # 首条发出后，下一条的预检查就发现了插话，第二条根本没有调用发送函数。
         self.assertEqual(calls, ["哈哈！"])
         self.assertEqual(result.dropped, 2)
 
@@ -326,7 +258,7 @@ class SpeakTests(unittest.TestCase):
     def test_guard_runs_for_every_segment(self):
         guarded = []
         speak("哈哈！真的假的？我不信。", tier=CHAT, byte_budget=1000,
-              send_at=lambda part: guarded.append(part) or True, interjected=lambda: False, sleep=lambda s: None)
+              send_at=lambda part: guarded.append(part) or True, interjected=lambda: False)
         self.assertEqual(len(guarded), 3)
 
 

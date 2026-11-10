@@ -435,7 +435,7 @@ class PluginTests(unittest.TestCase):
             if count == 1:
                 raise SnapshotExpired("清空")
         sent = self.guarded_reply(fail_second)
-        with patch("wxbot_framework.conversation.utterance.time.sleep"), self.assertRaises(SnapshotExpired):
+        with self.assertRaises(SnapshotExpired):
             self.consider()
         self.assertEqual(len(sent), 1)
         self.assertEqual(self.plugin.budget.count(ROOM), 1)

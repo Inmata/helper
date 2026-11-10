@@ -1,4 +1,4 @@
-"""发言：艾特回复和定时发言发出文字前的唯一出口，集中处理分档、拆分、条间隔和插话丢弃。
+"""发言：艾特回复和定时发言发出文字前的唯一出口，集中处理分档、拆分和插话丢弃。
 
 三档：
 
@@ -9,14 +9,13 @@
 这是兜底而不是常态。每一条都经调用方给的发送函数发出，调用方在发送函数里套 ``delivery_guard``，
 所以守卫对每条单独检查；守卫抛出的异常（如快照过期）原样向上传播，已发出的段不重发。
 
-条间隔：闲聊拆分的后续条，在“上一条发送函数返回之后、下一条发送函数被调用之前”等待 1—3 秒
-（按下一条字数取目标值，用 ``time.monotonic`` 扣掉已过去的时间，只补足剩余部分）。
-底层发送层（``TextSendDelay``，默认每 10 字 0.1—0.3 秒）自己的打字节奏另外叠加，这里不估计也不扣除。
+拆分后的各条依次调用发送函数，不额外等待条间隔。
+底层发送层（``TextSendDelay``，默认每 10 字 0.1—0.3 秒）的打字节奏保留。
 
-插话检测有两处：后续每条在条间隔等待之后、调用发送函数之前检查一次；再通过 ``InterjectionGate.wrap``
+插话检测有两处：后续每条调用发送函数之前检查一次；再通过 ``InterjectionGate.wrap``
 把检查并入 ``delivery_guard``，在拿到守卫之后、原生发送之前再查一次，使判定贴近真实发送时刻。
-被插话丢弃的段落计入 ``dropped``，不算 ``failed``。已知的残余窗口（可接受）：
-底层发送层在守卫之前的打字节奏等待期间出现的新消息，要到下一条才能发现；
+被插话丢弃的段落计入 ``dropped``，不算 ``failed``。
+守卫内复检之后、发送期间到达的新消息只能在下一条发送前发现，最后一条发送后不再检测；
 只有文字消息计为插话，非文本消息和控制指令不计。
 只按逗号切开的闲聊拆分本来是一句话，整句发完为止，不做插话丢弃（否则会留下半句）。
 
@@ -25,9 +24,7 @@
 from __future__ import annotations
 
 import logging
-import random
 import re
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -48,7 +45,6 @@ CHAT_SPLIT_MAX_CHARS = 40  # 闲聊拆分的总长上限
 CHAT_SPLIT_MAX_PARTS = 3
 CHAT_SENTENCE_MAX_CHARS = 20  # 拆分后每句不超过这个长度
 SENTENCE_END = "。！？!?…~～"
-GAP_MIN_SECONDS, GAP_MAX_SECONDS = 1.0, 3.0
 PROBE_ROWS = 30
 
 
@@ -123,18 +119,11 @@ def chat_split(text):
     return parts, by_comma
 
 
-def gap_seconds(next_text, rng=None):
-    """条间隔目标值：按下一条的字数取 1—3 秒。发送层自己的打字节奏另外叠加，不在这里扣除。"""
-    rng = rng or random
-    return min(GAP_MAX_SECONDS, max(GAP_MIN_SECONDS, 0.8 + 0.1 * len(next_text) + rng.uniform(0, 0.4)))
-
-
 @dataclass(frozen=True)
 class Plan:
     tier: str
     parts: tuple
     at_all: bool  # True：每条都带艾特；False：只有第一条带艾特
-    paced: bool  # True：条间加间隔
     gated: bool = False  # True：条间与守卫内检查插话，被插话丢弃剩余条
 
 
@@ -142,17 +131,17 @@ def plan_utterance(text, tier, *, byte_budget):
     """把一条回复规划成待发送的各条。``byte_budget`` 为第一条正文可用的 UTF-8 字节数（已扣艾特前缀）。"""
     text = text.strip()
     if tier == DETAIL:
-        return Plan(tier, tuple(split_text(text, byte_limit=byte_budget)), True, False)
+        return Plan(tier, tuple(split_text(text, byte_limit=byte_budget)), True)
     if tier == CHAT:
         split = chat_split(text)
         parts = split[0] if split else None
         if parts and all(len(part.encode("utf-8")) <= byte_budget for part in parts):
             # 句末标点处切开的各句是独立的话，插话就丢弃剩余；只按逗号切开的本是一句话，发完为止。
-            return Plan(tier, tuple(parts), False, True, gated=not split[1])
+            return Plan(tier, tuple(parts), False, gated=not split[1])
     if len(text.encode("utf-8")) <= byte_budget:
-        return Plan(tier, (text,), True, False)
+        return Plan(tier, (text,), True)
     # 兜底：非详细档的单条超过字节预算时仍完整发出，不截断。
-    return Plan(tier, tuple(split_text(text, byte_limit=byte_budget)), True, False)
+    return Plan(tier, tuple(split_text(text, byte_limit=byte_budget)), True)
 
 
 @dataclass
@@ -239,8 +228,7 @@ def interjection_probe(members, room, *, baseline=None):
     return probe
 
 
-def speak(text, *, tier, byte_budget, send_at, send_plain=None, interjected=None, sleep=None, rng=None,
-          clock=None, result=None):
+def speak(text, *, tier, byte_budget, send_at, send_plain=None, interjected=None, result=None):
     """按档位发出一条回复，返回 ``SpeakResult``。
 
     * ``send_at(part)`` / ``send_plain(part)``：发送一条并返回真值表示已发出；``send_plain`` 缺省时都用 ``send_at``。
@@ -248,33 +236,23 @@ def speak(text, *, tier, byte_budget, send_at, send_plain=None, interjected=None
       只有 ``Interjected`` 会被接住并计为丢弃。
     * ``interjected()``：仅闲聊拆分时在后续每条的发送函数被调用前检查，返回真则丢弃剩余条目；
       若它带 ``arm()``（``InterjectionGate``），发完首条后会调用，使并入守卫的检查开始生效。
-    * ``sleep(seconds)`` / ``clock()``：条间隔的等待和计时，默认 ``time.sleep`` / ``time.monotonic``；
-      只在闲聊拆分的条与条之间使用，等待值 = 目标值（1—3 秒）减去上一条返回后已过去的时间。
     * ``result``：可传入预先创建的 ``SpeakResult``，发送中途抛出异常时调用方仍能看到已发出的部分。
     某条返回假值时标记 ``failed`` 并停止，由调用方决定是否抛错。
     """
     plan = plan_utterance(text, tier, byte_budget=byte_budget)
-    sleep = sleep or time.sleep
-    clock = clock or time.monotonic
     plain = send_plain or send_at
     result = SpeakResult() if result is None else result
     arm = getattr(interjected, "arm", None)
-    returned_at = None
     for index, part in enumerate(plan.parts):
-        if index > 0 and plan.paced:
-            remaining = gap_seconds(part, rng) - (clock() - returned_at)
-            if remaining > 0:
-                sleep(remaining)
-            if plan.gated and interjected is not None and interjected():
-                result.dropped = len(plan.parts) - index
-                break
+        if index > 0 and plan.gated and interjected is not None and interjected():
+            result.dropped = len(plan.parts) - index
+            break
         send = send_at if plan.at_all or index == 0 else plain
         try:
             sent = send(part)
         except Interjected:
             result.dropped = len(plan.parts) - index
             break
-        returned_at = clock()
         if not sent:
             result.failed = True
             break

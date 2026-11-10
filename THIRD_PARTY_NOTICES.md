@@ -12,4 +12,6 @@
 
 图片接收的原图优先策略参考 [Prometheus-first/helper 的 5fc55e1](https://github.com/Prometheus-first/helper/commit/5fc55e1c58c69684ae1aee11d03886fe280ff44c)，本项目在原图失败时回退到普通图，继续跳过仅有缩略图引用的消息。上游许可同上。
 
+图片发送适配自 [Prometheus-first/helper 的原生图片发送](https://github.com/Prometheus-first/helper/blob/bb2df75f19ebc00d5f4fefb1c429a215d0c2d09e/native/image_send.h)，沿用已核对构建的地址和图片暂存流程。上游许可同上。
+
 成语接龙的扩展词表来自 [pwxcoo/chinese-xinhua](https://github.com/pwxcoo/chinese-xinhua)，Copyright (c) 2018 PWXCOO，MIT License。仅提取四字词条；固定版本、筛选规则与校验值见 `plugins/idiom_chain/data/README.md`，完整许可证见 `plugins/idiom_chain/data/LICENSE.chinese-xinhua.txt`。

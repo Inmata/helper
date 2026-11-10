@@ -201,7 +201,7 @@ def _validate_download_image(download_image):
 
 
 def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_report=True,
-        bridge_path=None, target="filehelper", mentions=None, download_image=None):
+        bridge_path=None, target="filehelper", mentions=None, download_image=None, image_path=None):
     dll = Path(bridge_path or DLL).resolve()
     if dll not in (DLL.resolve(), TEXT_DLL.resolve()):
         raise ValueError("不支持的桥接 DLL 路径")
@@ -220,6 +220,13 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
             raise ValueError("艾特成员列表仅用于通用文本发送")
         from wxbot_framework.messaging.text import validate_mentions
         mentions = validate_mentions(target, mentions)
+    if image_path is not None:
+        if not generic or mode != "--dispatch" or mentions is not None:
+            raise ValueError("图片仅用于通用桥接发送")
+        image = Path(image_path).resolve(strict=True)
+        if not image.is_file():
+            raise ValueError("图片路径须指向文件")
+        text = str(image)
     if mode not in ("--arm", "--dispatch", "--receive", "--listen", "--remove", "--probe-at", "--download-image"):
         raise RuntimeError("不支持的原生桥接操作")
     if mode == "--probe-at" and not generic:
@@ -274,6 +281,8 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
                     "--download-image": b"WxDownloadImage"}[mode]
             if mentions is not None:
                 name = b"WxSendAtText"
+            if image_path is not None:
+                name = b"WxSendImage"
         else:
             name = b"WxArmMentionProbe" if mode == "--probe-at" else {
                 "--arm":b"WxArmSelfTest", "--dispatch":b"WxDispatchSelfTest", "--receive":b"WxArmReceiveTest",

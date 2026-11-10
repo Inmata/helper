@@ -1,0 +1,6 @@
+{
+  "api": "v1",
+  "author": "Inmata",
+  "description": "在群里用 /表情 发送内置表情包",
+  "requires": ["group.text.receive", "group.image.send"]
+}

@@ -371,6 +371,15 @@ class NativeTextService(NativeFileHelperService):
         members = validate_mentions(room_wxid, at_list)
         return self._send_text(room_wxid, content, mentions=members)
 
+    def send_image(self, to_wxid, path):
+        with self._calls:
+            if not self._owns_bridge or self._stop.is_set():
+                raise RuntimeError("原生图片服务没有运行")
+            self._check_account(force=True)
+            self.last_result = self._run("--dispatch", pid=self.pid, target=to_wxid, image_path=path,
+                                        keep_loaded=True, preserve_report=self.preserve_reports)
+            return self.last_result["success"]
+
     def _send_text(self, to_wxid, content, *, mentions=None):
         validate_target(to_wxid)
         with self._calls:

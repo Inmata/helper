@@ -87,6 +87,13 @@ class ServiceFacade:
         return self.send_text(room_wxid, labels + "\n" + content,
                               expected_session=expected_session, _mentions=members, delivery_guard=delivery_guard)
 
+    def send_image(self, room_wxid, path, *, expected_session, delivery_guard=None):
+        with self._send_lock, self._lock:
+            if not self._available or self._backend.session_id != expected_session:
+                raise RuntimeError("消息所属的微信连接已结束，跳过旧会话回复")
+            with delivery_guard() if delivery_guard is not None else nullcontext():
+                return self._backend.send_image(room_wxid, path)
+
     def _check_pending(self, backend, cancel):
         if cancel.is_set() or not self._available or self._backend is not backend or self._cancel is not cancel:
             raise RuntimeError("微信连接已结束，取消待发送文本")

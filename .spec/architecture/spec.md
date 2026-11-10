@@ -16,7 +16,7 @@ related:
 
 ## 边界
 
-- 运行平台为 Windows x64 与 64 位 Python；原生桥接负责文本收发与群图片下载；图片接收时只保存到本地，只在艾特回复里按需经 Magpie 识别（见 [mention-reply](../mention-reply/spec.md)）；C++ 内部不在本规范范围。
+- 运行平台为 Windows x64 与 64 位 Python；原生桥接负责文本及群图片收发；图片接收时只保存到本地，只在艾特回复里按需经 Magpie 识别（见 [mention-reply](../mention-reply/spec.md)）；C++ 内部不在本规范范围。
 - 统一入口是 `main.py`：解析参数、装配应用、启动主循环。
 - 功能以插件实现；配置字段、用户命令、脚本入口与插件目录名保持兼容。
 - spec 只写已经实现的行为；计划中的改动留在 `docs/` 的计划文档。

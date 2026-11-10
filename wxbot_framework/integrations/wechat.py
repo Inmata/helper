@@ -15,6 +15,7 @@ IMAGE_CAPABILITIES = frozenset({"image.receive", "friend.image.receive", "group.
 # 图片事件依赖 V4 媒体队列，下载依赖原生 CDN 接口；两者都编译进当前 DLL 才声明能力。
 IMAGE_RECEIVE_EXPORT = b"WxPollMediaMessageV4"
 IMAGE_DOWNLOAD_EXPORT = b"WxDownloadImage"
+GROUP_IMAGE_SEND = "group.image.send"
 TEXT_DLL = Path(__file__).resolve().parents[2] / "native/build_text/text_bridge.dll"
 
 
@@ -35,9 +36,12 @@ def text_capabilities(exports=None):
     否则依赖图片的插件会通过检查却始终收不到图。
     """
     exports = compiled_bridge_exports() if exports is None else frozenset(exports)
+    capabilities = TEXT_CAPABILITIES_BASE
     if {IMAGE_RECEIVE_EXPORT, IMAGE_DOWNLOAD_EXPORT} <= exports:
-        return TEXT_CAPABILITIES_BASE | IMAGE_CAPABILITIES
-    return TEXT_CAPABILITIES_BASE
+        capabilities |= IMAGE_CAPABILITIES
+    if b"WxSendImage" in exports:
+        capabilities |= {GROUP_IMAGE_SEND}
+    return capabilities
 
 
 def text_scope(capabilities=None):
@@ -124,6 +128,9 @@ class NativeTextBackend(NativeFileHelperBackend):
 
     def send_at_text(self, room_wxid, content, at_list):
         return self.raw.send_at_text(room_wxid, content, at_list)
+
+    def send_image(self, room_wxid, path):
+        return self.raw.send_image(room_wxid, path)
 
     def read_room_directory(self, room_wxid):
         return self.raw.read_room_directory(room_wxid)

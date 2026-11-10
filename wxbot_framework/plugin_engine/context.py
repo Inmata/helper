@@ -121,6 +121,12 @@ class PluginContext:
             self._record_bot_reply(message.chat_id, text)
         return sent
 
+    def reply_image(self, message, path, *, delivery_guard=None):
+        if "group.image.send" not in self.capabilities:
+            raise CapabilityError("当前后端尚未开放群图片发送")
+        return self._service.send_image(message.chat_id, path, expected_session=message.session_id,
+                                        delivery_guard=delivery_guard)
+
     def reply_at(self, message, text, *, display_name=None, delivery_guard=None):
         if not message.is_group:
             raise ValueError("reply_at 仅用于群消息")

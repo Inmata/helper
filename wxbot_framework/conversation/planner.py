@@ -277,7 +277,7 @@ PROACTIVE_SYSTEM = """群里没人艾特你，但现在适合你像群友一样�
 PROACTIVE_MAX_CHARS = 60
 
 
-def generate_proactive(model, lines, *, examples=(), recent_bot=(), local_time="", max_tokens=512):
+def generate_proactive(model, lines, *, examples=(), recent_bot=(), local_time="", stickers=(), max_tokens=512):
     """生成主动发言正文；不该说、为空或格式不合时返回空串（调用方视为 skip）。
 
     model 为带人格的模型（``PersonalityLLM``），它抛出的 ``LLMError`` / 人格过期原样传播。
@@ -292,14 +292,18 @@ def generate_proactive(model, lines, *, examples=(), recent_bot=(), local_time="
     user += "【最近聊天】（从旧到新，who=机器人 的是你自己）\n" + json.dumps(payload["recent"], ensure_ascii=False)
     if payload["examples"]:
         user += "\n【群友说话的样子】\n" + json.dumps(payload["examples"], ensure_ascii=False)
-    text = _proactive_once(model, user, max_tokens=max_tokens)
+    system = PROACTIVE_SYSTEM
+    if stickers:
+        system += ("\n只有一张表情就足以接梗时，可以把 text 写成下列完整标记之一："
+                   + "、".join("表情:" + name for name in stickers) + "。不要加别的字。")
+    text = _proactive_once(model, user, max_tokens=max_tokens, system=system)
     if not text:
         return ""
     repeated = too_similar(text, recent_bot)
     if repeated is None:
         return text
     retried = _proactive_once(model, user, max_tokens=max_tokens,
-                              system=PROACTIVE_SYSTEM + "\n" + AVOID_REPEAT.format(text=str(repeated)[:40]))
+                              system=system + "\n" + AVOID_REPEAT.format(text=str(repeated)[:40]))
     return retried if retried and too_similar(retried, recent_bot) is None else ""
 
 

@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from .._shared import idiom_state
+from .._shared.stickers import STICKERS
 
 from wxbot_framework.commands import is_control
 from wxbot_framework.conversation.context_tools import pick_speech_examples
@@ -288,9 +289,14 @@ class Plugin:
         if action.type != REPLY or self._superseded(room, version):
             return False
         model = ctx.llm_for(message, personality=persona)
+        stickers = STICKERS if "group.image.send" in ctx.capabilities else {}
         text = personality_text(generate_proactive(model, context.lines, local_time=context.local_time,
                                                    recent_bot=self._recent_bot_texts(room),
+                                                   stickers=stickers,
                                                    examples=pick_speech_examples(self.members, room)))
+        sticker = stickers.get(text.removeprefix("表情:")) if text.startswith("表情:") else None
+        if text.startswith("表情:") and sticker is None:
+            return False
         if not text:
             ctx.logger.info("主动发言跳过：room=%s reason=nothing-to-say", room)
             return False
@@ -311,7 +317,13 @@ class Plugin:
             gate = InterjectionGate(interjection_probe(self.members, room))
             guard = gate.wrap(self._fresh_guard(room, version, newer,
                                                 lambda: ctx.response_guard(snapshot, persona)))
-            speak(text, tier=CHAT, byte_budget=1023, interjected=gate, result=result, send_at=send)
+            if sticker is not None:
+                if ctx.reply_image(message, sticker, delivery_guard=guard):
+                    result.sent.append(text)
+                else:
+                    result.failed = True
+            else:
+                speak(text, tier=CHAT, byte_budget=1023, interjected=gate, result=result, send_at=send)
         finally:
             # 拆分发送中途抛异常时，已发出的部分照样计入配额。
             self.budget.release(room, sent=bool(result.sent))

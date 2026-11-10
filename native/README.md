@@ -2,7 +2,7 @@
 
 当前识别 Windows x64 微信 4.1.15.13 和 4.2.0.12 的指定构建。加载前核对客户端版本及 `compatibility.json` 中核心文件的大小和 SHA-256；原生桥接还核对已加载映像的 PE 标识。
 
-4.2.0.12 使用本项目配套构建的 `native_text` 桥接。已实测群文本收发、引用接收、图片下载、退出卸载和重新连接。旧文件传输助手后端和诊断探针保留在 4.1.15.13；新版可通过 `native_text` 与文件传输助手收发文本。
+4.2.0.12 使用本项目配套构建的 `native_text` 桥接。已实测群文本收发、引用接收、图片下载与发送、退出卸载和重新连接。旧文件传输助手后端和诊断探针保留在 4.1.15.13；新版可通过 `native_text` 与文件传输助手收发文本。
 
 运行需要的组件：
 
@@ -11,6 +11,7 @@
 - `run_selftest.py`：进程、版本、远程调用与桥接生命周期封装。
 - `core_version.h`：原生调用、接收与卸载共用的构建地址配置；`wxbot_framework/native_profiles.py` 记录 Python 读取账号和群成员缓存的对应地址。
 - `image_download.h`：V4 图片 CDN 下载实现与 `WxDownloadImage` 导出，由 `text_bridge.cpp` 包含；旧 V3/V2 DLL 不含该能力。
+- `image_send.h`：本地图片发送实现与 `WxSendImage` 导出，用于在群聊发送表情包小图。
 - `build_text/text_bridge.dll`：当前文本收发和真实艾特桥接；重编后同时导出 `WxPollMediaMessageV4` 与 `WxDownloadImage`，前端才会声明图片接收能力。
 - `build/selftest_bridge.dll`：兼容文件传输助手后端。
 

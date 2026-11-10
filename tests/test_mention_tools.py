@@ -690,6 +690,25 @@ class MentionChatToolTests(unittest.TestCase):
         self.assertIn("双11", ctx.magpie.queries[-1])
         self.assertIn("散片算正常公道价", jev.calls[0]["补充语境"])
 
+    def test_short_esports_clarification_searches_original_question_instead_of_own_image(self):
+        jev = FakeJev(vision=0.04, search=0.96)
+        plugin, ctx = self.build("IG 对手是 Gen.G。", jev=jev)
+        now = datetime.now(timezone.utc)
+        base = {"received_at": now - timedelta(seconds=20), "speaker_name": "群友"}
+        history = ({**base, "text": "ig打谁", "sender_id": OTHER, "bot_generated": 0},
+                   {**base, "text": "你问的是哪个比赛啊", "sender_id": ROBOT, "bot_generated": 1},
+                   {**base, "text": "老头杯还是德杯？", "sender_id": ROBOT, "bot_generated": 1})
+        snapshot = plugin.members.conversation_snapshot
+        plugin.members.conversation_snapshot = lambda msg: replace(snapshot(msg), history=history)
+        image(RECENT_IMAGES, message_id=1)
+        plugin.on_message(mention("S16", received_at=time.monotonic()), ctx)
+        self.assertEqual(ctx.magpie.images, [])
+        self.assertEqual(len(ctx.magpie.queries), 1)
+        self.assertIn("ig打谁", ctx.magpie.queries[0])
+        self.assertIn("S16", ctx.magpie.queries[0])
+        self.assertNotIn("老头杯", ctx.magpie.queries[0])
+        self.assertIn("【联网搜索结果】", ctx.last_user)
+
     def test_two_slow_turns_do_not_hold_a_fast_reply_and_same_sender_keeps_order(self):
         started, release, dispatched, followed = (threading.Event() for _ in range(4))
 

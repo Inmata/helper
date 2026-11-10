@@ -16,7 +16,7 @@ from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue, resolve_repl
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
 from wxbot_framework.conversation.mention_tools import (ASK_PUBLIC_SEARCH_TARGET, ASK_SEARCH_TARGET, IMAGE_WINDOW_SECONDS,
                                                         SEARCH_RETRY_SECONDS, MentionTools, ToolOutcome,
-                                                        previous_question, public_search_topic, read_tool_options,
+                                                        previous_question, public_search_topic, read_tool_options, recent_clarification,
                                                         strip_links)
 from wxbot_framework.conversation.repetition import too_similar
 from wxbot_framework.conversation.turns import COLLECT_SECONDS, judge_turn, likely_incomplete, turn_key
@@ -235,11 +235,13 @@ class Plugin:
             previous = self.members.turns.continuation(message)
             if previous is not None:
                 reference = previous.text
+        clarification = (recent_clarification(snapshot.history, now)
+                         if snapshot is not None and not raw_quote and 0 < len(question) <= 16 else ("", ""))
         outcome = yield from tools.steps(question=question, room=message.chat_id, sender=message.sender_id,
                                          received_at=arrived, quote=message.data.get("quote"), context_question=context_question,
                                          image_choices=choices, previous_search=last_search, followup_topic=followup_topic,
                                          previous_subject=last_subject, search_reference=reference,
-                                         search_date=now.astimezone(BEIJING).date().isoformat())
+                                         search_date=now.astimezone(BEIJING).date().isoformat(), clarification=clarification)
         with self._followup_lock:
             if outcome.image_choices:
                 _remember_tool_followup(self._image_choices, key, arrived, outcome.image_choices)

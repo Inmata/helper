@@ -29,16 +29,17 @@ MAX_QUESTION_CHARS = 2000
 MAX_SUMMARY_CHARS = 600
 
 VISION_QUESTION = {
-    "instructions": "判断这条群聊提问是否需要先看随消息附带的图片才能可靠回答。",
+    "instructions": "判断这条群聊提问是否需要先看随消息附带的图片才能可靠回答。结合补充语境判断它是不是正在回答上轮追问。",
     "true": "提问针对图片本身（截图、照片、图表、界面、图中的文字），不看图就无法可靠回答。",
-    "false": "看图对回答没有帮助，或提问与图片无关；只是提到图片、发表情或闲聊也算 false。",
+    "false": "看图对回答没有帮助，或提问与图片无关；只是提到图片、发表情或闲聊也算 false。补的是赛事、版本等文字条件时不看图。",
 }
 SEARCH_QUESTION = {
     "instructions": "判断回复的核心结论是否依赖需要核对的公开事实。结合补充语境理解短句，但语境只帮助理解本轮，"
                     "以前搜过或提到过时效话题本身不算本轮要查。看到前一轮答复也不要默认它说得对。",
-    "true": "要回答当前价格或值不值、优惠、库存、版本、是否上线或已发布、最近事件、赛果、天气或特定网页内容，"
+    "true": "要回答当前价格或值不值、优惠、库存、版本、是否上线或已发布、最近事件、赛果、赛程和对手、"
+            "现役队员所属队伍、电竞队伍的赛区或所属国家、天气或特定网页内容，"
             "即使没说‘现在’‘最新’也算；追问新增平台、活动日期、地区或版本，足以改变此前结论时也要查，"
-            "比如问过商品好价后补一句‘双11’。问公开网络梗、人物或作品的具体来历，或明确要求上网搜也算。",
+            "比如问过商品好价后补一句‘双11’，或问完哪个赛事后补一句‘S16’。问公开网络梗、人物或作品的具体来历，或明确要求上网搜也算。",
     "false": "只是在闲聊、吐槽、玩梗、表达观点，或问群内人事、常识、稳定的原理、算术、创作。"
              "泛问购物策略（分开买还是一起买、要不要蹲好价）或按已知报价做取舍不用搜；要查的是具体优惠或当前报价。"
              "‘现在去健身是不是自律’不查。"
@@ -107,13 +108,16 @@ class JevToolRouter:
         self.vision_threshold = _threshold(vision_threshold, "vision_threshold")
         self.search_threshold = _threshold(search_threshold, "search_threshold")
 
-    def decide_vision(self, *, question, has_image, timeout=None):
+    def decide_vision(self, *, question, has_image, context="", timeout=None):
         if type(has_image) is not bool:
             raise ValueError("has_image 必须是布尔值")
         question = _question(question)
         if not has_image:
             return ToolDecision(VISION, False, NOT_APPLICABLE)
-        return self._decide(VISION, {"提问": question}, VISION_QUESTION, self.vision_threshold, timeout)
+        state = {"提问": question}
+        if context:
+            state["补充语境"] = _summary(context)
+        return self._decide(VISION, state, VISION_QUESTION, self.vision_threshold, timeout)
 
     def decide_search(self, *, question, vision_text=None, context="", timeout=None):
         question = _question(question)
@@ -177,11 +181,11 @@ class ToolTurn:
     def search_used(self):
         return self._search_summary is not None
 
-    def consider_vision(self, *, timeout=None):
+    def consider_vision(self, *, context="", timeout=None):
         if self._vision_decision is not None:
             return ToolDecision(VISION, False, BUDGET_EXHAUSTED, threshold=self.router.vision_threshold)
         self._vision_decision = self.router.decide_vision(question=self.question, has_image=self.has_image,
-                                                          timeout=timeout)
+                                                          context=context, timeout=timeout)
         return self._vision_decision
 
     def record_vision(self, text):

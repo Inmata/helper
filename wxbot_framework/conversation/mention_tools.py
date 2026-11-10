@@ -50,6 +50,8 @@ _PUBLIC_FACT_CHALLENGE = re.compile(r"不是(?:同一个|一个)(?:游戏|作品
 _PUBLIC_TOPIC_WORDS = ("游戏", "作品", "版本", "发售", "发布", "时间线", "官网", "Steam")
 _PUBLIC_TITLE = re.compile(r"《([^《》\r\n]{2,48})》")
 PREVIOUS_QUESTION_SECONDS = 90
+CLARIFICATION_SECONDS = 60
+_CLARIFYING = re.compile(r"你(?:问|指|说)的是|哪个|哪(?:一)?[场款天年]|什么(?:时间|平台|赛事)|还是[^。！!]{1,18}[?？]")
 IMPLICIT_QUESTION_CHARS = 4  # 艾特正文的字母和数字合计不超过这么多（标点、表情符号不计）当作没有实质问题
 MENTION_MARK = chr(0x2005)  # 微信 @ 后面的分隔符：带它的上一条发言本身是一次艾特，已经回答过
 PENDING_WAIT_SECONDS = 6
@@ -133,6 +135,23 @@ def wants(text, hints):
 def vague_question(text):
     """艾特正文的字母和数字合计不超过 4 个（标点、表情符号不计；空、“现在呢”“咋样”）：没有实质问题。"""
     return sum(char.isalnum() for char in text or "") <= IMPLICIT_QUESTION_CHARS
+
+
+def recent_clarification(history, now):
+    """刚问完缺哪项条件时，沿用这轮原问题，不受原提问人与补充人是否相同影响。"""
+    replies = []
+    for row in reversed(history[-4:]):
+        if not 0 <= (now - parse_utc(row["received_at"])).total_seconds() <= CLARIFICATION_SECONDS:
+            break
+        text = strip_at_labels(row["text"]).strip()
+        if row.get("bot_generated") or row.get("is_self"):
+            replies.append(text)
+        else:
+            reply = " ".join(reversed(replies))[:220]
+            if _CLARIFYING.search(reply):
+                return text[:180], reply
+            break
+    return "", ""
 
 
 def strip_links(reply):
@@ -265,7 +284,8 @@ class MentionTools:
                 return result.value
 
     def steps(self, *, question, room, sender, received_at, quote=None, context_question="", image_choices=(),
-              previous_search="", followup_topic=None, previous_subject="", search_reference="", search_date=""):
+              previous_search="", followup_topic=None, previous_subject="", search_reference="", search_date="",
+              clarification=("", "")):
         """``context_question``：艾特没有正文时提问人上一条发言（见 ``previous_question``），只用来判断和调用工具。"""
         started = self.clock()
         deadline = started + self.budget
@@ -318,16 +338,21 @@ class MentionTools:
         turn = ToolTurn(self.router, question=(question or "（只艾特了机器人，没有正文）")[:MAX_QUESTION_CHARS],
                         has_image=has_image)
 
+        clarified_question, clarification_reply = clarification
+        clarification_context = (f"待回答的群友问题：{clarified_question}\n机器人刚追问：{clarification_reply}"
+                                 if clarified_question else "")
         vision_reason = "explicit" if (quoted_image or explicit_vision) else None
         if vision_reason is None and has_image:
-            if not has_quote and own_candidates and vague_question(asked):
+            if not has_quote and not clarification_context and own_candidates and vague_question(asked) and not any(
+                    c.isascii() and c.isalnum() for c in asked):
                 # 没有引用、提问人自己刚发了一张没看过的图，这次艾特又没问出实质内容（只有艾特、“现在呢”）：
                 # 默认就是要看那张图，不必再让 Jev 判断（实测这类提问概率偏低，容易被拒）。
                 # 引用了别的消息（如引用一句文本回“谢谢”）时不算，仍按原有 Jev 判断。
                 self.logger.info("艾特工具：隐式看图，跳过看图判断")
                 vision_reason = "implicit"
             else:
-                decision = self._judge(turn.consider_vision, deadline, "看图")
+                decision = self._judge(lambda *, timeout: turn.consider_vision(context=clarification_context, timeout=timeout),
+                                       deadline, "看图")
                 vision_reason = "jev" if decision is not None and decision.use else None
         vision_text = None
         if vision_reason:
@@ -361,17 +386,22 @@ class MentionTools:
                 turn.record_vision(vision_text)
             search_reason = "explicit" if explicit_search else None
             if search_reason is None:
-                context = (f"此前搜索词：{previous_subject[:230]}\n上轮答复：{search_reference[:220]}"
-                           if previous_subject and search_reference else "")
+                context = clarification_context or (
+                    f"此前搜索词：{previous_subject[:230]}\n上轮答复：{search_reference[:220]}"
+                    if previous_subject and search_reference else "")
                 decision = self._judge(lambda *, timeout: turn.consider_search(context=context, timeout=timeout),
                                        deadline, "搜索")
                 search_reason = "jev" if decision is not None and decision.use else None
             if search_reason:
                 query = _search_query(question, vision_text)
-                if previous_subject and search_reference:
-                    outcome.search_subject = previous_subject
-                    query = (f"本轮问题：{query[:500]}\n可能承接的公开搜索主题：{previous_subject[:230]}\n"
-                             f"日期：{search_date}。以本轮为准，仅在相关时沿用此前主题，优先核对相应日期的来源。")
+                subject = clarified_question or (previous_subject if search_reference else "")
+                if subject:
+                    query = (f"本轮问题：{query[:500]}\n可能承接的公开搜索主题：{subject[:180]}\n"
+                             "以本轮为准，仅在相关时沿用此前主题。")
+                if search_date and (subject or search_reason == "jev"):
+                    outcome.search_subject = subject or question
+                    query = (f"{query[:750]}\n核对日期：{search_date}。优先用一手来源；赛事赛程、赛果和队伍归属"
+                             "优先核对赛事官网的当届记录。区分俱乐部来源、当前赛区和队员国籍，只写查到的内容。")
                 outcome.search_query = query[:1000]
                 yield
                 result = self._search(outcome.search_query, deadline)

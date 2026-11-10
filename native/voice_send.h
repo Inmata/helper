@@ -64,6 +64,8 @@ static void send_voice_on_task(const VoiceSendLease& lease) {
     *reinterpret_cast<uint64_t*>(options + 48) = 15;
     auto duration = config.duration_ms;
     TestResult report{};
+    char client_message_id[37]{};
+    auto& result_message = *reinterpret_cast<SharedMessage*>(result + 40);
     report.native_status = 0xffffffffu;
     __try {
         report.stage = 60;
@@ -95,9 +97,16 @@ static void send_voice_on_task(const VoiceSendLease& lease) {
         report.native_status = *reinterpret_cast<const uint32_t*>(result);
         report.native_status_high = *reinterpret_cast<const uint32_t*>(result + 4);
         report.stage = 64;
+        // 发送回执先给出客户端 UUID；引用卡片的 clientmsgid 末尾携带同一个 UUID。
+        if (core_profile_id == 4 && !report.native_status && !report.native_status_high && result_message.object) {
+            auto receipt = static_cast<const unsigned char*>(result_message.object);
+            const auto id = reinterpret_cast<const SmallString*>(receipt + 0x30);
+            if (receipt[0x50] == 1 && id->length == 36)
+                std::memcpy(client_message_id, *reinterpret_cast<const char* const*>(id->data), 36);
+        }
     } __except (record_exception(GetExceptionInformation(), &report)) {}
 
-    release_image_object(*reinterpret_cast<SharedMessage*>(result + 40), &report);
+    release_image_object(result_message, &report);
     release_image_string(reinterpret_cast<SmallString*>(result + 8), &report);
     release_image_object(message, &report);
     release_image_object(manager, &report);
@@ -109,6 +118,10 @@ static void send_voice_on_task(const VoiceSendLease& lease) {
                      "\"bytes\":%u,\"stage\":%lu,\"exception\":%lu,\"native_status\":%u,\"target\":",
                      duration, config.audio_size, report.stage, report.exception, report.native_status);
         write_json_string(log, config.base.target);
+        if (client_message_id[0]) {
+            std::fputs(",\"client_message_id\":", log);
+            write_json_string(log, client_message_id);
+        }
         std::fputs(",\"text\":", log);
         write_json_string(log, config.base.base.text);
         std::fprintf(log, ",\"completion_success\":%s}\n",

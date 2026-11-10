@@ -188,6 +188,13 @@ class ConversationHistory:
             self.rollover()
             db.execute("INSERT OR IGNORE INTO room_members(account,room,wxid) VALUES(?,?,?)",
                        (members.account, message.chat_id, message.sender_id))
+            quote = message.data.get("quote") or {}
+            if (quote.get("voice_client_id") and quote.get("svrid") and
+                    members.account in (quote.get("chatusr"), quote.get("fromusr"))):
+                # 首次引用同时携带客户端 UUID 和服务器编号，后续直接按服务器编号查找。
+                db.execute("""UPDATE messages SET context_message_id=?
+                    WHERE account=? AND room=? AND context_message_id=? AND context_kind='voice' AND bot_generated=1""",
+                    (quote["svrid"], members.account, message.chat_id, quote["voice_client_id"]))
             now = iso_utc(members.now())
             if message.data.get("bot_generated"):
                 # 原生回显可能带 "@昵称 " 标签行或尾部空白；落库的是裸正文，几种形式都要比对。
@@ -226,7 +233,7 @@ class ConversationHistory:
                 (members.account, room, message_id)).fetchone()
             return row[0] if row else ""
 
-    def record_bot_reply(self, room, text):
+    def record_bot_reply(self, room, text, *, voice_id=""):
         """把成功发出的机器人回复按真实时间落库，供多轮对话承接自己刚才的话。"""
         members = self.members
         if not members.history_enabled or room not in members.groups:
@@ -238,6 +245,12 @@ class ConversationHistory:
             with members.transaction() as db:
                 moment = members.now()
                 now = iso_utc(moment)
+                if voice_id:
+                    result = db.execute("""INSERT OR IGNORE INTO messages
+                        (account,room,sender_id,text,received_at,session_id,sequence,is_self,bot_generated,
+                         context_message_id,context_kind) VALUES(?,?,?,?,?,'bot-reply',0,1,1,?,'voice')""",
+                        (members.account, room, members.account, text.strip(), now, voice_id))
+                    return result.rowcount > 0
                 # 原生回显可能先于这里落库；已有回显时不再补一条裸正文。
                 # 逐行取回再按去空白后的正文比对，避免尾部换行或 LIKE 通配符误判。
                 echoes = db.execute("""SELECT text FROM messages WHERE account=? AND room=?

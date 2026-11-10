@@ -13,6 +13,11 @@ class CapabilityError(NotImplementedError):
 
 
 @dataclass(frozen=True)
+class VoiceSubmission:
+    client_message_id: str = ""
+
+
+@dataclass(frozen=True)
 class Message:
     text: str
     chat_id: str

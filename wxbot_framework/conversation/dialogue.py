@@ -132,7 +132,7 @@ def resolve_reply_quote(raw, find_context_text):
         saved = find_context_text(message_id)
         if not saved:
             return None, "我没读到这条语音的转写。"
-        context_id, text, kind = message_id, "[语音转写] " + saved, "voice"
+        context_id, text, kind = message_id, "[语音] " + saved, "voice"
     elif ref_type == "49":
         if ref_app_type != "57":
             saved = find_context_text(message_id)

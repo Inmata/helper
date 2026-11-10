@@ -6,13 +6,15 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
+from xml.sax.saxutils import escape
 
 from support.recyclable_tempdir import RecyclableTemporaryDirectory
 
 from plugins.member_identity import Plugin
-from wxbot_framework.conversation.dialogue import Dialogue
+from wxbot_framework.conversation.dialogue import Dialogue, resolve_reply_quote
 from wxbot_framework.memory.knowledge import KnowledgeStore
 from wxbot_framework.conversation.members import MemberError, MemberStore, name_key
+from wxbot_framework.messaging.mentions import parse_quote
 from wxbot_framework.sdk import Message, PluginContext, ServiceFacade
 from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.config import ConfigStore
@@ -154,6 +156,20 @@ class MemberTests(unittest.TestCase):
         self.assertNotIn("宝子", prompt)
         self.assertEqual(history, [{"role": "user", "content": "[P1] 成员乙：照平时的方式说话"},
                                    {"role": "assistant", "content": "[机器人发言] 宝子，别急。"}])
+
+    def test_bot_voice_quote_reads_original_by_server_id(self):
+        voice_id = "12345678901234567890"
+        client_id = "12345678-abcd-4123-8abc-123456789abc"
+        self.store.record_bot_reply(ROOM, "今晚十点南门集合。", voice_id=client_id)
+        self.store.record_bot_reply(ROOM, "我先去吃饭。", voice_id="87654321-dcba-4123-8abc-123456789abc")
+        content = escape(f'<msg><voicemsg clientmsgid="{"a" * 32}{client_id}"/></msg>')
+        quote_data = parse_quote(f"<appmsg><refermsg><type>34</type><svrid>{voice_id}</svrid>"
+                                 f"<chatusr>{ROBOT}</chatusr><content>{content}</content></refermsg></appmsg>")
+        self.store.record(self.message("几点集合？", data={"quote": quote_data}))
+        quote, missing = resolve_reply_quote(quote_data,
+                                             lambda number: self.store.context_text(ROOM, number))
+        self.assertEqual(missing, "")
+        self.assertEqual(quote["text"], "[语音] 今晚十点南门集合。")
 
     def test_limit_and_time_filter_return_chronological_records(self):
         self.store.bind("成员乙", ROOM, JING)

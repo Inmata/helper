@@ -18,6 +18,7 @@ from wxbot_framework.messaging.forwarded import forwarded_text
 from wxbot_framework.messaging.mentions import parse_at_members, parse_quote
 from run_selftest import (TEXT_DLL, K, check, compatible_core_version, download_aeskey_supported,
                           modules, wechat_candidates, run)
+from wxbot_framework.messaging.message import VoiceSubmission
 from wxbot_framework.messaging.text import TextRouter, validate_target, validate_mentions
 from wxbot_framework.account import read_current_account, read_current_profile, select_account_process, validate_account
 from wxbot_framework.contacts import read_chatroom_members, read_contact_name
@@ -305,7 +306,7 @@ class NativeTextService(NativeFileHelperService):
             elif quote is not None:
                 # 回复正文在被引用卡片里，群友真正说的话是 title；被引用的原文单独带给模型。
                 data["quote"] = {key: quote[key] for key in ("name", "text", "chatusr", "fromusr", "ref_type",
-                                                             "ref_app_type", "svrid", "image_md5")}
+                                                             "ref_app_type", "svrid", "image_md5", "voice_client_id")}
                 data["msg"] = data["content"] = quote["title"]
             name = self._sender_wechat_name(data["sender_id"]) if data["sender_id"] else None
             if name:
@@ -451,11 +452,12 @@ class NativeTextService(NativeFileHelperService):
             self.last_result = self._run("--dispatch", pid=self.pid, target=to_wxid, keep_loaded=True,
                                          preserve_report=self.preserve_reports,
                                          voice=(audio, duration_ms, self.self_wxid))
+            report = self.last_result.get("report", {})
             if not self.last_result["success"]:
-                report = self.last_result.get("report", {})
                 logger.warning("语音发送未确认：入口=%s 阶段=%s 状态=%s",
                                self.last_result.get("code"), report.get("stage"), report.get("native_status"))
-            return self.last_result["success"]
+                return None
+            return VoiceSubmission(report.get("client_message_id", "").lower())
 
     def _send_text(self, to_wxid, content, *, mentions=None):
         validate_target(to_wxid)

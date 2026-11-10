@@ -87,12 +87,12 @@ class PluginContext:
             self._record_bot_reply(chat_id, text)
         return sent
 
-    def _record_bot_reply(self, chat_id, text):
+    def _record_bot_reply(self, chat_id, text, *, voice_id=""):
         """成功发出的机器人回复也进入聊天记录，供多轮对话引用自己的上一轮。"""
         if self._members is None:
             return
         try:
-            self._members.record_bot_reply(chat_id, text)
+            self._members.record_bot_reply(chat_id, text, voice_id=voice_id)
         except Exception:
             self.logger.debug("机器人回复未能落库：chat_id=%s", chat_id)
 
@@ -133,8 +133,8 @@ class PluginContext:
         sent = self._service.send_voice(message.chat_id, path, expected_session=message.session_id,
                                         delivery_guard=delivery_guard)
         if sent and transcript:
-            self._record_bot_reply(message.chat_id, transcript)
-        return sent
+            self._record_bot_reply(message.chat_id, transcript, voice_id=sent.client_message_id)
+        return bool(sent)
 
     def reply_at(self, message, text, *, display_name=None, delivery_guard=None):
         if not message.is_group:

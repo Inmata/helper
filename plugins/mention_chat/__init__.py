@@ -117,6 +117,8 @@ class Plugin:
             raise ValueError("艾特上下文对话需要 history_enabled: true")
         ctx.llm  # 启动时核对配置，不请求接口。
         self._slow = SlowReplies(ctx.logger)
+        if "voice.send" in getattr(ctx, "capabilities", ()):
+            self.voice_reply.start(ctx.logger)
 
     def has_pending_callbacks(self):
         return self._slow is not None and self._slow.busy()
@@ -124,6 +126,7 @@ class Plugin:
     def on_unload(self, ctx):
         if self._slow is not None:
             self._slow.close()
+        self.voice_reply.close()
 
     def _ensure_running(self):
         if self._slow is not None and self._slow.stopped.is_set():

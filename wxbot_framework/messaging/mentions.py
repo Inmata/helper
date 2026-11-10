@@ -24,6 +24,7 @@ _VISIBLE_AT = re.compile(r"@([^@\s\u2005]{1,24})\u2005")
 QUOTE_MAX_CHARS = 8191
 QUOTE_TEXT_MAX_CHARS = 300
 _IMAGE_MD5 = re.compile(r"(?<![\w])md5\s*=\s*[\"']([0-9a-fA-F]{32})[\"']")
+_VOICE_CLIENT_ID = re.compile(r"[0-9a-f]{32}([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})", re.I)
 
 _learned = {}
 _learned_lock = threading.Lock()
@@ -68,6 +69,16 @@ def strip_at_labels(text):
 def _quoted_image_md5(content):
     """被引用图片 XML 里的 md5；只取这一项，aeskey、CDN 地址等不带出来。"""
     match = _IMAGE_MD5.search(content or "")
+    return match.group(1).lower() if match else ""
+
+
+def _quoted_voice_id(content):
+    try:
+        root = ElementTree.fromstring(content)
+    except ElementTree.ParseError:
+        return ""
+    voice = root if root.tag == "voicemsg" else root.find("voicemsg")
+    match = _VOICE_CLIENT_ID.fullmatch(voice.get("clientmsgid", "")) if voice is not None else None
     return match.group(1).lower() if match else ""
 
 
@@ -125,7 +136,8 @@ def parse_quote(source):
             "chatusr": (refer.findtext("chatusr") or "").strip(),
             "fromusr": (refer.findtext("fromusr") or "").strip(),
             "svrid": svrid if svrid.isascii() and svrid.isdigit() and len(svrid) <= 20 else "",
-            "image_md5": _quoted_image_md5(content) if ref_type == "3" else ""}
+            "image_md5": _quoted_image_md5(content) if ref_type == "3" else "",
+            "voice_client_id": _quoted_voice_id(content) if ref_type == "34" else ""}
 
 
 def typed_at(text, names=()):

@@ -6,6 +6,7 @@ import threading
 import time
 import ctypes as c
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from filehelper_service import (NativeFileHelperService, ReceivedTextMessage, ReceivedTextMessageV2,
@@ -99,7 +100,7 @@ class NativeTextService(NativeFileHelperService):
         # 启动前按已编译 DLL 的实际导出选定接收协议；V4 未编译时退回 V3/V2。
         self._poll_export, self._message_type = text_message_binding()
         if self._poll_export == VOICE_EXPORT:
-            logger.info("桥接支持引用、图片及内联语音")
+            logger.info("桥接支持引用、图片及语音")
         elif self._poll_export == V4_EXPORT:
             logger.info("桥接为 V4 协议：正文上限 8KB，接收引用消息与图片")
         elif self._poll_export == V3_EXPORT:
@@ -117,8 +118,14 @@ class NativeTextService(NativeFileHelperService):
         self.image_allowlist = frozenset(image_allowlist)
         self.voice_rooms = frozenset(voice_rooms)
         self.transcriber = transcriber
+        self._voice_worker = None
         self._image_receiver = None
         self._image_receiver_lock = threading.Lock()
+
+    def _listen(self):
+        if self.transcriber and self.voice_rooms:
+            return self._run("--listen", pid=self.pid, text="voice\n" + "\n".join(sorted(self.voice_rooms)))
+        return super()._listen()
 
     @property
     def self_wxid(self):
@@ -198,6 +205,10 @@ class NativeTextService(NativeFileHelperService):
 
     def stop(self):
         self._stop.set()
+        with self._calls:
+            worker, self._voice_worker = self._voice_worker, None
+        if worker is not None:
+            worker.shutdown(cancel_futures=True)
         if self._image_receiver is not None:
             self._image_receiver.close(timeout=30)
             if self._image_receiver.is_alive:
@@ -218,6 +229,8 @@ class NativeTextService(NativeFileHelperService):
             raise RuntimeError("目标进程登录的不是绑定的机器人账号，等待正确账号登录")
         self.router.set_account(account)
         self._next_account_check = time.monotonic() + 1
+        if self.transcriber and self.voice_rooms:
+            self._voice_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="WxVoice")
 
     def _check_account(self, *, force=False):
         if not force and time.monotonic() < self._next_account_check:
@@ -280,10 +293,11 @@ class NativeTextService(NativeFileHelperService):
         if data:
             data["native_message_id"] = str(getattr(message, "native_message_id", 0) or "")
             if message.type == 34:
-                transcript = self._transcribe_voice(message, data)
-                if not transcript:
-                    return None
-                data.update(msg=transcript, content=transcript, context_kind="voice")
+                if data["chat_id"] in self.voice_rooms and not data["is_self"]:
+                    with self._calls:
+                        if self._voice_worker is not None and not self._stop.is_set():
+                            self._voice_worker.submit(self._deliver_voice, message, data)
+                return None
             elif forwarded:
                 if not data["room_wxid"]:
                     return None
@@ -346,22 +360,27 @@ class NativeTextService(NativeFileHelperService):
                 logger.warning("群文本作者格式未匹配，已跳过；需要用测试群消息核对实际布局")
         return data
 
-    def _transcribe_voice(self, message, data):
-        if (self.transcriber is None or data["chat_id"] not in self.voice_rooms or data["is_self"] or
-                not isinstance(message, ReceivedMediaMessageV5)):
-            return ""
+    def _deliver_voice(self, message, data):
+        if not isinstance(message, ReceivedMediaMessageV5):
+            return
         if not 0 < message.payload_size <= len(message.payload):
-            logger.info("群语音未附带可读取音频，未转写")
-            return ""
+            logger.info("群语音未取得音频 | 补取耗时=%d毫秒", message.voice_fetch_ms)
+            return
+        started = time.perf_counter()
         try:
             text = self.transcriber.transcribe(bytes(message.payload[:message.payload_size]), data["msg"])
         except Exception as error:
             logger.warning("语音转写失败：%s", type(error).__name__)
-            return ""
+            return
         if not text or self._stop.is_set():
-            return ""
-        logger.info("群语音转写完成")
-        return text
+            return
+        logger.info("群语音识别完成 | 音频=%d字节 | 补取=%d毫秒 | 识别=%.0f毫秒",
+                    message.payload_size, message.voice_fetch_ms, (time.perf_counter() - started) * 1000)
+        data.update(msg=text, content=text, context_kind="voice")
+        name = self._sender_wechat_name(data["sender_id"])
+        if name:
+            data["sender_wechat_name"] = name
+        self._publish_message(data)
 
     def _map_image(self, data, body):
         """图片事件进入异步队列；下载完成后才以 type=3 投递给插件。"""

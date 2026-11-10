@@ -3,6 +3,7 @@
 #define WXBOT_EXTENDED_RECEIVE
 #include "selftest_bridge.cpp"
 #include "image_download.h"
+#include "voice_download.h"
 
 struct TextConfig {
     TestConfig base;
@@ -277,7 +278,7 @@ static void sample_all_text(const uintptr_t* batch) {
             const uint64_t message_id = *reinterpret_cast<const uint64_t*>(message + 0x50);
             char text[8192]{};
             if (type == 34) {
-                // 4.2.0.12 的 Sync AddMsg 可携带完整 SILK；没有载荷时不发起额外下载。
+                // 有完整内联 SILK 时直接交付；缺音频时等客户端生成可下载的原消息对象。
                 if (core_profile_id != 4) continue;
                 const char* audio = nullptr;
                 uint32_t audio_size = 0;
@@ -293,6 +294,7 @@ static void sample_all_text(const uintptr_t* batch) {
                     }
                 }
                 read_pb_string(message, 0x20, text, sizeof(text));
+                if (!audio_size && remember_voice(message_id, sender, receiver, text, source)) continue;
                 enqueue_received(sender, receiver, text, source, 34, nullptr, message_id, audio, audio_size);
                 continue;
             }
@@ -341,8 +343,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxStartTextReceiver(void* paramete
     void* target = reinterpret_cast<void*>(core_address(core_base, 0x17b9010));
     status = MH_CreateHook(target, reinterpret_cast<void*>(&text_receive), reinterpret_cast<void**>(&original_receive));
     if (status != MH_OK) { MH_Uninitialize(); return 600 + status; }
-    status = MH_EnableHook(target);
-    if (status != MH_OK) { MH_RemoveHook(target); MH_Uninitialize(); return 600 + status; }
+    if (core_profile_id == 4 && !std::strncmp(config.base.text, "voice\n", 6)) {
+        status = install_voice_download(config.base.text + 6);
+        if (status != MH_OK) { MH_Uninitialize(); return 600 + status; }
+    }
+    status = MH_EnableHook(MH_ALL_HOOKS);
+    if (status != MH_OK) { MH_Uninitialize(); return 600 + status; }
     receive_hook_created = true;
     return 0;
 }

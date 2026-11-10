@@ -5,6 +5,15 @@ import xml.etree.ElementTree as ET
 
 SILK_HEADERS = (b"\x02#!SILK_V3", b"#!SILK_V3")
 SAMPLE_RATE = 16000
+SOUND_EVENTS = {
+    "<|BGM|>": "音乐声",
+    "<|Applause|>": "掌声",
+    "<|Laughter|>": "笑声",
+    "<|Cry|>": "哭声",
+    "<|Sneeze|>": "喷嚏声",
+    "<|Breath|>": "呼吸声",
+    "<|Cough|>": "咳嗽声",
+}
 
 
 class VoiceTranscriber:
@@ -34,4 +43,9 @@ class VoiceTranscriber:
         stream = self._recognizer.create_stream()
         stream.accept_waveform(SAMPLE_RATE, [sample / 32768.0 for sample in samples])
         self._recognizer.decode_stream(stream)
-        return stream.result.text.strip()
+        result = stream.result
+        text = result.text.strip()
+        if any(character.isalnum() for character in text):
+            return text
+        event = SOUND_EVENTS.get(result.event)
+        return f"（听起来像{event}）" if event else ""

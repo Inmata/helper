@@ -9,6 +9,7 @@ code:
   - wxbot_framework/integrations/voice_asr.py
   - wxbot_framework/messaging/forwarded.py
   - native/text_service.py
+  - native/voice_download.h
 related:
   - wxbot_framework/plugin_engine/manager.py
   - tests/test_idiom_ordering.py
@@ -78,9 +79,9 @@ related:
 
 ## 群语音（微信类型 34）
 
-微信 4.2.0.12 的配套桥接通过 `WxPollMediaMessageWithVoice` 接收消息自带的完整 SILK。对已启用记录且在收发范围内的群，在本机解码转写，按接收顺序把结果作为原发言者的文本交给消息入口。
+对已启用记录且在收发范围内的群，微信 4.2.0.12 的配套桥接优先接收消息自带的完整 SILK。音频未随消息送达时，桥接按 64 位原消息编号关联微信已保存的消息对象，并提交微信自己的语音下载任务。任务收到完整音频后仍经 `WxPollMediaMessageWithVoice` 投递。下载与本机识别均独立于文字接收。
 
-转写正文进现有聊天记录和插件上下文，原始语音编号随记录保存，用于引用定位。不保存音频或自动向群内发送转写。缺少模型、音频不全或未识别出文字时跳过该语音。
+识别结果以原发言者的名义进入聊天记录和插件上下文，保留原始语音编号供引用定位。优先使用转写正文；没有文字时，可以记录模型识别到的咳嗽、笑声等常见声音。机器人不把音频落盘，也不主动在群里发转写。缺少模型、音频不全或没有有效识别结果时跳过该语音。
 
 ## 合并转发（微信类型 49，卡片类型 19）
 

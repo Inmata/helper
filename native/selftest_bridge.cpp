@@ -82,7 +82,7 @@ struct ReceivedMediaMessageV4 {
 };
 static_assert(sizeof(ReceivedMediaMessageV4) == 28968, "Unexpected media receive ABI");
 struct ReceivedMediaMessageV5 : ReceivedMediaMessageV4 {
-    uint32_t payload_size, payload_reserved;
+    uint32_t payload_size, voice_fetch_ms;
     char payload[262144];
 };
 static_assert(sizeof(ReceivedMediaMessageV5) == 291120, "Unexpected voice receive ABI");
@@ -102,7 +102,7 @@ static size_t bounded_length(const char* text, size_t capacity) {
 
 static void enqueue_received(const char* sender, const char* receiver, const char* text, const char* source = nullptr,
                              uint32_t type = 1, const char* media = nullptr, uint64_t message_id = 0,
-                             const char* payload = nullptr, uint32_t payload_size = 0) {
+                             const char* payload = nullptr, uint32_t payload_size = 0, uint32_t fetch_ms = 0) {
     RECEIVED_QUEUE_TYPE message{};
     message.size = sizeof(message);
     message.present = 1;
@@ -118,6 +118,7 @@ static void enqueue_received(const char* sender, const char* receiver, const cha
     const size_t media_length = bounded_length(media, sizeof(message.image_xml));
     if (media_length) std::memcpy(message.image_xml, media, media_length);
     message.native_message_id = message_id;
+    message.voice_fetch_ms = fetch_ms;
     if (payload && payload_size && payload_size <= sizeof(message.payload)) {
         std::memcpy(message.payload, payload, payload_size);
         message.payload_size = payload_size;
@@ -128,6 +129,7 @@ static void enqueue_received(const char* sender, const char* receiver, const cha
     (void)message_id;
     (void)payload;
     (void)payload_size;
+    (void)fetch_ms;
 #endif
     AcquireSRWLockExclusive(&receive_lock);
     if (receive_count == std::size(received_messages)) {
@@ -631,47 +633,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxWaitForTasks(void*) {
 }
 
 extern "C" __declspec(dllexport) DWORD WINAPI WxRemoveSelfTest(void*) {
-    const auto target = reinterpret_cast<void*>(core_address(core_base, 0x178f100));
-    MH_STATUS status = MH_OK;
-    if (hook_created) {
-        status = MH_DisableHook(target);
-        if (status != MH_OK && status != MH_ERROR_DISABLED) return 600 + status;
-    }
-    void* receive_target = reinterpret_cast<void*>(core_address(core_base, 0x17b9010));
-    if (receive_hook_created) {
-        status = MH_DisableHook(receive_target);
-        if (status != MH_OK && status != MH_ERROR_DISABLED) return 600 + status;
-    }
-    void* factory_target = reinterpret_cast<void*>(core_address(core_base, 0x6f4c70));
-    if (factory_hook_created) {
-        status = MH_DisableHook(factory_target);
-        if (status != MH_OK && status != MH_ERROR_DISABLED) return 600 + status;
-    }
-    void* image_factory_target = reinterpret_cast<void*>(core_address(core_base, 0x5240720));
-    if (image_download_factory_hook_created) {
-        status = MH_DisableHook(image_factory_target);
-        if (status != MH_OK && status != MH_ERROR_DISABLED) return 600 + status;
-    }
+    MH_STATUS status = MH_DisableHook(MH_ALL_HOOKS);
+    if (status != MH_OK && status != MH_ERROR_NOT_INITIALIZED) return 600 + status;
     for (int attempt = 0; (active_callbacks != 0 || live_completions != 0 || live_tasks != 0) && attempt < 100; ++attempt) Sleep(50);
     if (active_callbacks != 0 || live_completions != 0 || live_tasks != 0) return ERROR_BUSY;
-    if (!hook_created && !receive_hook_created && !factory_hook_created &&
-        !image_download_factory_hook_created) return 0;
-    if (hook_created) {
-        status = MH_RemoveHook(target);
-        if (status != MH_OK) return 600 + status;
-    }
-    if (receive_hook_created) {
-        status = MH_RemoveHook(receive_target);
-        if (status != MH_OK) return 600 + status;
-    }
-    if (factory_hook_created) {
-        status = MH_RemoveHook(factory_target);
-        if (status != MH_OK) return 600 + status;
-    }
-    if (image_download_factory_hook_created) {
-        status = MH_RemoveHook(image_factory_target);
-        if (status != MH_OK) return 600 + status;
-    }
+    if (status == MH_ERROR_NOT_INITIALIZED) return 0;
     status = MH_Uninitialize();
     if (status == MH_OK) {
         hook_created = false; receive_hook_created = false; factory_hook_created = false;

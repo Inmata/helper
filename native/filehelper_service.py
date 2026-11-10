@@ -55,7 +55,7 @@ class ReceivedMediaMessageV4(ReceivedTextMessage):
     _fields_ = [("image_xml", c.c_char * 16384), ("native_message_id", c.c_uint64)]
 
 class ReceivedMediaMessageV5(ReceivedMediaMessageV4):
-    _fields_ = [("payload_size", c.c_uint32), ("payload_reserved", c.c_uint32),
+    _fields_ = [("payload_size", c.c_uint32), ("voice_fetch_ms", c.c_uint32),
                 ("payload", c.c_ubyte * 262144)]
 
 
@@ -161,7 +161,7 @@ class NativeFileHelperService:
             raise RuntimeError("服务已经启动")
         self._stop.clear()
         self.last_error = None
-        armed = self._run("--listen", pid=self.pid)
+        armed = self._listen()
         self.pid = armed["pid"]
         self.wechat_version = armed["wechat_version"]
         self._owns_bridge = True
@@ -179,6 +179,9 @@ class NativeFileHelperService:
             raise
         return True
 
+    def _listen(self):
+        return self._run("--listen", pid=self.pid)
+
     def _receive_loop(self):
         try:
             while not self._stop.is_set():
@@ -191,15 +194,18 @@ class NativeFileHelperService:
                 data = self._map_message(message)
                 if data is None:
                     continue
-                for handler in list(self.msg_handlers):
-                    try:
-                        handler(self.pid, 11046, data, self)
-                    except Exception:
-                        logger.exception("Python 消息处理器异常")
+                self._publish_message(data)
         except Exception as error:
             self.last_error = error
             self._stop.set()
             logger.exception("原生接收服务停止")
+
+    def _publish_message(self, data):
+        for handler in list(self.msg_handlers):
+            try:
+                handler(self.pid, 11046, data, self)
+            except Exception:
+                logger.exception("Python 消息处理器异常")
 
     def _prepare_channel(self):
         """子类在开始消息线程前读取必要的当前连接信息。"""

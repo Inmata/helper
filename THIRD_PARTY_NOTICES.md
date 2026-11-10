@@ -19,3 +19,5 @@
 合并转发的内嵌记录格式参考 [Prometheus-first/helper 的 028b86a](https://github.com/Prometheus-first/helper/commit/028b86af59b17aaa7c0c3f15a9c72716391ff517)，本项目读取文字、原署名和时间。上游许可同上。
 
 成语接龙的扩展词表来自 [pwxcoo/chinese-xinhua](https://github.com/pwxcoo/chinese-xinhua)，Copyright (c) 2018 PWXCOO，MIT License。仅提取四字词条；固定版本、筛选规则与校验值见 `plugins/idiom_chain/data/README.md`，完整许可证见 `plugins/idiom_chain/data/LICENSE.chinese-xinhua.txt`。
+
+`plugins/_shared/stickers/` 中的「笑不活了」「我先化了」「这对吗」「猫猫震惊」「我裂开了」「你继续」「一句都不想说」「我看看怎么个事」「给您鼓掌」「小丑竟是我」「就这」「当场去世」取自 Google 的 [Animated Noto Emoji](https://googlefonts.github.io/noto-emoji-animation/)。本项目提取动画的一帧并加上中文字幕，这些图片适用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)。

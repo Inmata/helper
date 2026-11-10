@@ -704,26 +704,31 @@ class ColdReplyTests(unittest.TestCase):
 
     def test_real_mention_target_cooldown_and_room_scope(self):
         self.command("@小 明  30m", targets=(self.PLAYER,))
+        self.ctx.reply_text = "你手边那个搜索框烫手？"
         self.ask("搜一下")
         first = self.ctx.sent[-1]
         self.assertEqual(self.ctx.at_target, self.PLAYER)
-        self.assertEqual(first, ("reply_at", "咋了，离了我你这话就不会说了？"))
+        self.assertEqual(first, ("reply_at", "你手边那个搜索框烫手？"))
+        self.assertEqual(self.ctx.last_user, "对方刚说：搜一下")
         self.now += 599
         self.ask("还在吗")
         self.assertEqual(len(self.ctx.sent), 2)
-        self.assertEqual(self.ctx.completions, 0)
+        self.assertEqual(self.ctx.completions, 1)
+        self.ctx.reply_text = "正常回复"
         self.ask("另一个群", chat_id=self.OTHER_ROOM)
         self.ask("另一个人", sender_id=self.OWNER)
-        self.assertEqual(self.ctx.completions, 2)
+        self.assertEqual(self.ctx.completions, 3)
         self.now += 1
+        self.ctx.reply_text = "咋了，还要我签个到？"
         self.ask("还在吗")
-        self.assertEqual(self.ctx.sent[-1], ("reply_at", "又点我名。你是有事，还是就想看我搭不搭理你？"))
-        self.assertEqual(self.ctx.completions, 2)
+        self.assertEqual(self.ctx.sent[-1], ("reply_at", "咋了，还要我签个到？"))
+        self.assertEqual(self.ctx.last_user, "对方刚说：还在吗")
+        self.assertEqual(self.ctx.completions, 4)
 
     def test_number_lookup_restart_expiry_and_early_release(self):
         self.command("M1 1h")
         self.ask("第一次")
-        self.assertEqual(self.ctx.completions, 0)
+        self.assertEqual(self.ctx.completions, 1)
         self.members.close()
         reopened = MemberStore(self.config, "wxid_robot")
         self.addCleanup(reopened.close)
@@ -754,9 +759,10 @@ class ColdReplyTests(unittest.TestCase):
         data = {**mention("").data, "room_states": {"idiom_chain": active_game()}}
         self.ask("意气风发", data=data)
         self.assertEqual(len(self.ctx.sent), 1)
+        self.assertEqual(self.ctx.completions, 0)
         self.ask("有空吗", data=data)
         self.assertEqual(self.ctx.sent[-1][0], "reply_at")
-        self.assertEqual(self.ctx.completions, 0)
+        self.assertEqual(self.ctx.completions, 1)
 
 
 if __name__ == "__main__":

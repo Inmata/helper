@@ -250,7 +250,7 @@ class Plugin:
         game = self.room_game(message.chat_id, ctx, message=message)
         if game and self.is_move(clean_query, game):
             return  # 答案由接龙插件判定。
-        if self.cold is not None and self.cold.handle_mention(message, ctx):
+        if self.cold is not None and self.cold.handle_mention(message, ctx, clean_query):
             return
         key = (message.session_id, message.chat_id, message.sender_id)
         resume = lambda: self._reply_turn(message, ctx, clean_query, game)

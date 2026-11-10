@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from .._shared import idiom_state
-from .._shared.stickers import STICKERS
+from .._shared.stickers import sticker_catalog
 
 from wxbot_framework.commands import is_control
 from wxbot_framework.conversation.context_tools import pick_speech_examples
@@ -75,6 +75,7 @@ class Plugin:
         self._pending = {}
         self._waiting = {}
         self._versions = {}
+        self._last_sticker = {}
 
     def on_load(self, ctx):
         self._thread = None
@@ -289,12 +290,14 @@ class Plugin:
         if action.type != REPLY or self._superseded(room, version):
             return False
         model = ctx.llm_for(message, personality=persona)
-        stickers = STICKERS if "group.image.send" in ctx.capabilities else {}
+        stickers = sticker_catalog() if "group.image.send" in ctx.capabilities else {}
+        stickers.pop(self._last_sticker.get(room), None)
         text = personality_text(generate_proactive(model, context.lines, local_time=context.local_time,
                                                    recent_bot=self._recent_bot_texts(room),
                                                    stickers=stickers,
                                                    examples=pick_speech_examples(self.members, room)))
-        sticker = stickers.get(text.removeprefix("表情:")) if text.startswith("表情:") else None
+        sticker_name = text.removeprefix("表情:") if text.startswith("表情:") else ""
+        sticker = stickers.get(sticker_name)
         if text.startswith("表情:") and sticker is None:
             return False
         if not text:
@@ -319,6 +322,7 @@ class Plugin:
                                                 lambda: ctx.response_guard(snapshot, persona)))
             if sticker is not None:
                 if ctx.reply_image(message, sticker, delivery_guard=guard):
+                    self._last_sticker[room] = sticker_name
                     result.sent.append(text)
                 else:
                     result.failed = True

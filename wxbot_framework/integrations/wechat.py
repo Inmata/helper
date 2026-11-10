@@ -1,12 +1,15 @@
 """原生收发后端；框架和插件只依赖公开接口。"""
 from __future__ import annotations
 
+import logging
 import sys
 import uuid
 from pathlib import Path
 
 from ..messaging.message import Message
+from .voice_asr import VoiceTranscriber
 
+logger = logging.getLogger("NativeText")
 CAPABILITIES = frozenset({"text.receive", "text.send"})
 TEXT_CAPABILITIES_BASE = CAPABILITIES | frozenset({"friend.text.receive", "friend.text.send",
                                                    "group.text.receive", "group.text.send",
@@ -96,7 +99,7 @@ class NativeTextBackend(NativeFileHelperBackend):
         # 连接日志会展示该范围；必须与后端实际声明的图片能力一致。
         return text_scope()
 
-    def __init__(self, root, config):
+    def __init__(self, root, config, *, voice_rooms=()):
         native = Path(root) / "native"
         if not native.is_dir():
             raise RuntimeError("未找到原生适配目录")
@@ -105,9 +108,19 @@ class NativeTextBackend(NativeFileHelperBackend):
         from text_service import NativeTextService
         # 图片目录可按配置覆盖；未配置图片名单时沿用群收发名单，避免下载名单外的图片。
         image_allowlist = config.get("image_allowlist", config.get("chat_allowlist", ()))
+        model = Path(root) / ".runtime/voice-asr"
+        transcriber = None
+        if voice_rooms and (model / "model.int8.onnx").is_file() and (model / "tokens.txt").is_file():
+            try:
+                transcriber = VoiceTranscriber(model)
+            except (ImportError, OSError, RuntimeError) as error:
+                logger.warning("本机语音模型未启动：%s", type(error).__name__)
+            else:
+                logger.info("本机群语音转写已启用")
         self.raw = NativeTextService(pid=config.get("wechat_pid"), account=config.get("wechat_account"),
                                      media_directory=config.get("image_directory"),
                                      image_allowlist=image_allowlist or (),
+                                     voice_rooms=voice_rooms, transcriber=transcriber,
                                      preserve_reports=False)
         self.session_id = uuid.uuid4().hex
 

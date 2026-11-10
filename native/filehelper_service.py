@@ -54,11 +54,16 @@ class ReceivedMediaMessageV4(ReceivedTextMessage):
     """V4 媒体接收：图片 XML 与 64 位原始消息编号追加在 V3 正文之后。"""
     _fields_ = [("image_xml", c.c_char * 16384), ("native_message_id", c.c_uint64)]
 
+class ReceivedMediaMessageV5(ReceivedMediaMessageV4):
+    _fields_ = [("voice_size", c.c_uint32), ("voice_reserved", c.c_uint32),
+                ("voice", c.c_ubyte * 262144)]
+
 
 assert c.sizeof(ReceivedMessage) == 1312
 assert c.sizeof(ReceivedTextMessageV2) == 5408
 assert c.sizeof(ReceivedTextMessage) == 12576
 assert c.sizeof(ReceivedMediaMessageV4) == 28968
+assert c.sizeof(ReceivedMediaMessageV5) == 291120
 
 
 class ReceiveChannel:

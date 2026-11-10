@@ -279,6 +279,9 @@ class Plugin:
         quote = message.data.get("quote") or {}
         # 引用非文本消息时没有正文，仍把引用人带给模型，别把整条引用丢掉；引用图片时标明是图片。
         quote_text = quote.get("text") or ("[图片]" if quote.get("ref_type") == "3" else "")
+        if quote.get("ref_type") == "34":
+            transcript = self.members.voice_text(message.chat_id, quote.get("svrid", ""))
+            quote_text = "[语音转写] " + transcript if transcript else "[语音未转写]"
         quote = ({"name": quote.get("name") or "", "text": quote_text}
                  if quote.get("name") or quote_text else None)
         key = (message.session_id, message.chat_id, message.sender_id, clean_query)
@@ -299,7 +302,7 @@ class Plugin:
                 rows = self.members.recent_snapshot(message.chat_id, limit=100, before_id=snapshot.anchor_id,
                                                     context=True).messages
                 reply = Dialogue(ctx.llm_for(message, personality=personality),
-                                 display_timezone=ctx.display_timezone).catch_up(rows, clean_query)
+                                 display_timezone=ctx.display_timezone).catch_up(rows, clean_query, quote=quote)
                 self._ensure_running()
                 speak(reply, tier=QA, byte_budget=budget, result=result, send_at=send_at)
                 if result.failed:

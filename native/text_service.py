@@ -9,7 +9,7 @@ from collections import deque
 from pathlib import Path
 
 from filehelper_service import (NativeFileHelperService, ReceivedTextMessage, ReceivedTextMessageV2,
-                                ReceivedMediaMessageV4)
+                                ReceivedMediaMessageV4, ReceivedMediaMessageV5)
 from wxbot_framework.image_receiver import ImageDownloadSkipped
 from wxbot_framework.image_metadata import image_download_reference, parse_image_metadata
 from wxbot_framework.recent_images import RECENT_IMAGES
@@ -25,6 +25,7 @@ logger = logging.getLogger("NativeText")
 # 已编译的桥接可能是旧协议：V2 正文只有 1KB，V3 扩到 8KB，V4 再带图片 XML
 # 与 64 位原始消息编号。按实际导出选择接收约定，避免新代码直接对着旧 DLL 启动失败。
 V4_EXPORT = b"WxPollMediaMessageV4"
+VOICE_EXPORT = b"WxPollMediaMessageWithVoice"
 V3_EXPORT = b"WxPollTextMessageV3"
 V2_EXPORT = b"WxPollTextMessageV2"
 
@@ -41,6 +42,8 @@ def text_message_binding(exports=None):
         exports = exports if exports is not None else bridge_exports()
     except Exception:  # 读不到 PE 时按最保守的旧协议走，启动阶段另有模块检查兜底
         return V2_EXPORT, ReceivedTextMessageV2
+    if VOICE_EXPORT in exports:
+        return VOICE_EXPORT, ReceivedMediaMessageV5
     if V4_EXPORT in exports:
         return V4_EXPORT, ReceivedMediaMessageV4
     if V3_EXPORT in exports:
@@ -89,11 +92,14 @@ class NativeTextService(NativeFileHelperService):
     _message_type = ReceivedTextMessageV2
     _run = staticmethod(run_text)
 
-    def __init__(self, *, account=None, media_directory=None, image_allowlist=(), **options):
+    def __init__(self, *, account=None, media_directory=None, image_allowlist=(),
+                 voice_rooms=(), transcriber=None, **options):
         super().__init__(**options)
         # 启动前按已编译 DLL 的实际导出选定接收协议；V4 未编译时退回 V3/V2。
         self._poll_export, self._message_type = text_message_binding()
-        if self._poll_export == V4_EXPORT:
+        if self._poll_export == VOICE_EXPORT:
+            logger.info("桥接支持引用、图片及内联语音")
+        elif self._poll_export == V4_EXPORT:
             logger.info("桥接为 V4 协议：正文上限 8KB，接收引用消息与图片")
         elif self._poll_export == V3_EXPORT:
             logger.info("桥接为 V3 协议：正文上限 8KB，接收引用消息；图片接收未编译")
@@ -108,6 +114,8 @@ class NativeTextService(NativeFileHelperService):
         self.image_messages = 0
         self.media_directory = Path(media_directory or Path(__file__).resolve().parent.parent / ".runtime/images")
         self.image_allowlist = frozenset(image_allowlist)
+        self.voice_rooms = frozenset(voice_rooms)
+        self.transcriber = transcriber
         self._image_receiver = None
         self._image_receiver_lock = threading.Lock()
 
@@ -248,8 +256,8 @@ class NativeTextService(NativeFileHelperService):
         return members, names
 
     def _map_message(self, message):
-        # 1 是文本；3 是图片；49 是应用消息，只有引用（refermsg）才当文本处理，其余卡片丢弃。
-        if message.type not in (1, 3, 49):
+        # 49 是应用消息，只有引用（refermsg）才当文本处理。
+        if message.type not in (1, 3, 34, 49):
             return None
         body = (getattr(message, "image_xml", b"") if message.type == 3 else
                 getattr(message, "text", b"")).decode("utf-8", errors="replace")
@@ -266,6 +274,8 @@ class NativeTextService(NativeFileHelperService):
             logger.info("当前账号已识别；好友和群聊文本已就绪")
         if data:
             data["native_message_id"] = str(getattr(message, "native_message_id", 0) or "")
+            if message.type == 34:
+                return self._transcribe_voice(message, data)
             if quote is not None:
                 # 回复正文在被引用卡片里，群友真正说的话是 title；被引用的原文单独带给模型。
                 data["quote"] = {key: quote[key] for key in ("name", "text", "chatusr", "fromusr", "ref_type",
@@ -320,6 +330,24 @@ class NativeTextService(NativeFileHelperService):
             # 第一条失败时提示；后续通过 status 查看累计数。
             if self.router.unparsed_groups == 1:
                 logger.warning("群文本作者格式未匹配，已跳过；需要用测试群消息核对实际布局")
+        return data
+
+    def _transcribe_voice(self, message, data):
+        if (self.transcriber is None or data["chat_id"] not in self.voice_rooms or data["is_self"] or
+                not isinstance(message, ReceivedMediaMessageV5) or not 0 < message.voice_size <= len(message.voice)):
+            return None
+        try:
+            text = self.transcriber.transcribe(bytes(message.voice[:message.voice_size]), data["msg"])
+        except Exception as error:
+            logger.warning("语音转写失败：%s", type(error).__name__)
+            return None
+        if not text or self._stop.is_set():
+            return None
+        data.update(msg=text, content=text, voice_transcript=True)
+        name = self._sender_wechat_name(data["sender_id"])
+        if name:
+            data["sender_wechat_name"] = name
+        logger.info("群语音已转写并进入上下文")
         return data
 
     def _map_image(self, data, body):

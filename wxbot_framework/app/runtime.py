@@ -56,8 +56,7 @@ class BotApplication:
         self.maintenance_options = maintenance_options(self.config, contributors=self.contributors)
         if self.maintenance is not None:
             self.maintenance.options = self.maintenance_options
-        backend_type = NativeTextBackend if generic else NativeFileHelperBackend
-        self.backend_factory = backend_factory or (lambda: backend_type(root, self.config))
+        self.backend_factory = backend_factory or self._make_backend
         self.backend = None
         self.stop_event = threading.Event()
         self.commands = queue.Queue()
@@ -67,6 +66,13 @@ class BotApplication:
         self._last_connection_error = ""
         # 控制台命令只做解析；命令实现见 app/console.py。
         self.console = ConsoleCommands(self)
+
+    def _make_backend(self):
+        if self.config.get("backend") != "native_text":
+            return NativeFileHelperBackend(self.root, self.config)
+        rooms = self.members.groups if self.members is not None and self.members.history_enabled else ()
+        allowed = self.config.get("chat_allowlist") or rooms
+        return NativeTextBackend(self.root, self.config, voice_rooms=set(rooms).intersection(allowed))
 
     def _log_connection_error(self, error):
         text = f"{type(error).__name__}: {error}"

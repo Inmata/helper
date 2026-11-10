@@ -81,7 +81,12 @@ struct ReceivedMediaMessageV4 {
     uint64_t native_message_id;
 };
 static_assert(sizeof(ReceivedMediaMessageV4) == 28968, "Unexpected media receive ABI");
-#define RECEIVED_QUEUE_TYPE ReceivedMediaMessageV4
+struct ReceivedMediaMessageV5 : ReceivedMediaMessageV4 {
+    uint32_t voice_size, voice_reserved;
+    char voice[262144];
+};
+static_assert(sizeof(ReceivedMediaMessageV5) == 291120, "Unexpected voice receive ABI");
+#define RECEIVED_QUEUE_TYPE ReceivedMediaMessageV5
 #else
 #define RECEIVED_QUEUE_TYPE ReceivedMessage
 #endif
@@ -96,12 +101,9 @@ static size_t bounded_length(const char* text, size_t capacity) {
 }
 
 static void enqueue_received(const char* sender, const char* receiver, const char* text, const char* source = nullptr,
-                             uint32_t type = 1, const char* media = nullptr, uint64_t message_id = 0) {
-#ifdef WXBOT_EXTENDED_RECEIVE
-    ReceivedMediaMessageV4 message{};
-#else
-    ReceivedMessage message{};
-#endif
+                             uint32_t type = 1, const char* media = nullptr, uint64_t message_id = 0,
+                             const char* voice = nullptr, uint32_t voice_size = 0) {
+    RECEIVED_QUEUE_TYPE message{};
     message.size = sizeof(message);
     message.present = 1;
     message.type = type;
@@ -116,10 +118,16 @@ static void enqueue_received(const char* sender, const char* receiver, const cha
     const size_t media_length = bounded_length(media, sizeof(message.image_xml));
     if (media_length) std::memcpy(message.image_xml, media, media_length);
     message.native_message_id = message_id;
+    if (voice && voice_size && voice_size <= sizeof(message.voice)) {
+        std::memcpy(message.voice, voice, voice_size);
+        message.voice_size = voice_size;
+    }
 #else
     (void)source;
     (void)media;
     (void)message_id;
+    (void)voice;
+    (void)voice_size;
 #endif
     AcquireSRWLockExclusive(&receive_lock);
     if (receive_count == std::size(received_messages)) {
@@ -610,11 +618,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxStartFileHelperReceiver(void* pa
 extern "C" __declspec(dllexport) DWORD WINAPI WxPollFileHelperMessage(void* parameter) {
     if (!parameter) return ERROR_INVALID_PARAMETER;
     _InterlockedIncrement(&active_callbacks);
-#ifdef WXBOT_EXTENDED_RECEIVE
-    ReceivedMediaMessageV4 message{};
-#else
-    ReceivedMessage message{};
-#endif
+    RECEIVED_QUEUE_TYPE message{};
     const DWORD code = poll_received(&message);
     copy_legacy_message(message, static_cast<LegacyReceivedMessage*>(parameter));
     _InterlockedDecrement(&active_callbacks);

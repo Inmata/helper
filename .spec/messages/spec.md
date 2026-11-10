@@ -6,6 +6,7 @@ code:
   - wxbot_framework/image_metadata.py
   - wxbot_framework/images.py
   - wxbot_framework/integrations/wechat.py
+  - wxbot_framework/integrations/voice_asr.py
   - native/text_service.py
 related:
   - wxbot_framework/plugin_engine/manager.py
@@ -73,6 +74,12 @@ related:
 - 只保存会话、发送者、状态、本地路径、md5 与原消息编号，不保存 XML、CDN 地址或密钥；进程内按群有界（每群 64 条、至多 256 个群），服务启动时清空，插件热重载不影响。
 - 记录带“已看过”标记：艾特回复看图成功后标记，之后不再按“刚发的图”选中，按引用仍能找到。按“刚发的图”查找时可选自己发的或别人发的（`from_others`）。
 - 引用消息解析出的 `quote` 在被引用的是图片（`ref_type=3`）时额外带 `svrid` 与 `image_md5`，供艾特回复对上索引；不带缩略图 md5、密钥或 CDN 地址。
+
+## 群语音（微信类型 34）
+
+微信 4.2.0.12 的配套桥接通过 `WxPollMediaMessageWithVoice` 接收消息自带的完整 SILK。对已启用记录且在收发范围内的群，在本机解码转写，按接收顺序把结果作为原发言者的文本交给消息入口。
+
+转写正文进现有聊天记录和插件上下文，原始语音编号随记录保存，用于引用定位。不保存音频或自动向群内发送转写。缺少模型、音频不全或未识别出文字时跳过该语音。
 
 ## 验收
 

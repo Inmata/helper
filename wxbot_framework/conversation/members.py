@@ -317,6 +317,9 @@ class MemberStore:
     def message_id(self, message):
         return self.transcript.message_id(message)
 
+    def voice_text(self, room, message_id):
+        return self.transcript.voice_text(room, message_id)
+
     def latest_id(self, room):
         return self.transcript.latest_id(room)
 

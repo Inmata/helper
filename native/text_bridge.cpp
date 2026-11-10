@@ -250,7 +250,7 @@ static void sample_all_text(const uintptr_t* batch) {
             const uint32_t type = *reinterpret_cast<const uint32_t*>(message + 0x14);
             // 1 是文本；3 是图片；49 只放行带 refermsg 的引用消息，
             // 链接、文件、转发等其他卡片不要。
-            if (type != 1 && type != 3 && type != 49) continue;
+            if (type != 1 && type != 3 && type != 34 && type != 49) continue;
             char sender[128]{}, receiver[128]{};
             if (!read_pb_string(message, 8, sender, sizeof(sender)) || !valid_target(sender) ||
                 !read_pb_string(message, 0x18, receiver, sizeof(receiver)) || !valid_target(receiver)) continue;
@@ -260,6 +260,22 @@ static void sample_all_text(const uintptr_t* batch) {
             // Sync AddMsg +0x50 -> 消息对象 +0x148；保留 64 位服务器编号，
             // 供图片事件与引用消息后续按原始编号关联。
             const uint64_t message_id = *reinterpret_cast<const uint64_t*>(message + 0x50);
+            char text[8192]{};
+            if (type == 34) {
+                // 4.2.0.12 的 Sync AddMsg 可携带完整 SILK；没有载荷时不发起额外下载。
+                if (core_profile_id != 4) continue;
+                const auto buffer = *reinterpret_cast<const unsigned char* const*>(message + 0x30);
+                if (!buffer) continue;
+                const auto length = *reinterpret_cast<const uint32_t*>(buffer + 0x10);
+                const auto value = *reinterpret_cast<const SmallString* const*>(buffer + 8);
+                if (!value || !length || length > 262144 || value->length != length ||
+                    value->capacity < length) continue;
+                const char* audio = value->capacity > 15 ?
+                    *reinterpret_cast<const char* const*>(value->data) : value->data;
+                if (audio && read_pb_string(message, 0x20, text, sizeof(text)))
+                    enqueue_received(sender, receiver, text, source, 34, nullptr, message_id, audio, length);
+                continue;
+            }
             if (type == 3) {
                 // 群图片正文同样是“成员 ID:\n<msg><img .../></msg>”，由 Python 路由剥离前缀。
                 char image_xml[16384]{};
@@ -267,7 +283,6 @@ static void sample_all_text(const uintptr_t* batch) {
                 enqueue_received(sender, receiver, "", source, 3, image_xml, message_id);
                 continue;
             }
-            char text[8192]{};
             if (!read_pb_string(message, 0x20, text, sizeof(text))) continue;
             if (type == 49 && !std::strstr(text, "<refermsg")) continue;
             enqueue_received(sender, receiver, text, source, type, nullptr, message_id);
@@ -312,14 +327,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxStartTextReceiver(void* paramete
 extern "C" __declspec(dllexport) DWORD WINAPI WxPollTextMessage(void* parameter) {
     // 保留旧接口的 1312 字节边界，旧调用者不会被 V2/V4 写越界。
     if (!parameter) return ERROR_INVALID_PARAMETER;
-    ReceivedMediaMessageV4 message{};
+    RECEIVED_QUEUE_TYPE message{};
     const DWORD code = poll_received(&message);
     copy_legacy_message(message, static_cast<LegacyReceivedMessage*>(parameter));
     return code;
 }
 
-// V2 调用方只分配 5408 字节（正文 1KB + 艾特来源 4KB）。队列内部是 28968 字节的
-// V4 结构，所以这里先取到本地再按旧布局截断复制，绝不能把新结构直接写进旧缓冲区。
+// V2 调用方只分配 5408 字节（正文 1KB + 艾特来源 4KB），按旧布局复制。
 struct LegacyReceivedText {
     uint32_t size, present, type, thread_id, dropped, reserved;
     uint64_t sequence;
@@ -345,7 +359,7 @@ static void copy_legacy_text(const ReceivedMediaMessageV4& source, LegacyReceive
 
 extern "C" __declspec(dllexport) DWORD WINAPI WxPollTextMessageV2(void* parameter) {
     if (!parameter) return ERROR_INVALID_PARAMETER;
-    ReceivedMediaMessageV4 message{};
+    RECEIVED_QUEUE_TYPE message{};
     const DWORD code = poll_received(&message);
     if (code) return code;
     copy_legacy_text(message, static_cast<LegacyReceivedText*>(parameter));
@@ -362,7 +376,7 @@ static_assert(sizeof(LegacyReceivedTextV3) == 12576, "Unexpected V3 receive ABI"
 
 extern "C" __declspec(dllexport) DWORD WINAPI WxPollTextMessageV3(void* parameter) {
     if (!parameter) return ERROR_INVALID_PARAMETER;
-    ReceivedMediaMessageV4 message{};
+    RECEIVED_QUEUE_TYPE message{};
     const DWORD code = poll_received(&message);
     if (code) return code;
     auto output = static_cast<LegacyReceivedTextV3*>(parameter);
@@ -387,7 +401,18 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxPollMediaMessageV4(void* paramet
     if (!parameter) return ERROR_INVALID_PARAMETER;
     _InterlockedIncrement(&active_callbacks);
     auto output = static_cast<ReceivedMediaMessageV4*>(parameter);
-    const DWORD code = poll_received(output);
+    RECEIVED_QUEUE_TYPE message{};
+    const DWORD code = poll_received(&message);
+    *output = message;
+    output->size = sizeof(*output);
+    _InterlockedDecrement(&active_callbacks);
+    return code;
+}
+
+extern "C" __declspec(dllexport) DWORD WINAPI WxPollMediaMessageWithVoice(void* parameter) {
+    if (!parameter) return ERROR_INVALID_PARAMETER;
+    _InterlockedIncrement(&active_callbacks);
+    const DWORD code = poll_received(static_cast<ReceivedMediaMessageV5*>(parameter));
     _InterlockedDecrement(&active_callbacks);
     return code;
 }

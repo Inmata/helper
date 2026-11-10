@@ -116,8 +116,13 @@ def initialize_base_schema(db):
     db.executescript(BASE_SCHEMA)
     if "self_named" not in {row["name"] for row in db.execute("PRAGMA table_info(people)")}:
         db.execute("ALTER TABLE people ADD COLUMN self_named INTEGER NOT NULL DEFAULT 0")
-    if "bot_generated" not in {row["name"] for row in db.execute("PRAGMA table_info(messages)")}:
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
+    if "bot_generated" not in columns:
         db.execute("ALTER TABLE messages ADD COLUMN bot_generated INTEGER NOT NULL DEFAULT 0")
+    if "voice_message_id" not in columns:
+        db.execute("ALTER TABLE messages ADD COLUMN voice_message_id TEXT")
+    db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS messages_by_voice ON messages(account, room, voice_message_id)
+                  WHERE voice_message_id IS NOT NULL""")
     if "context_floor" not in {row["name"] for row in db.execute("PRAGMA table_info(chat_buffers)")}:
         db.execute("ALTER TABLE chat_buffers ADD COLUMN context_floor INTEGER NOT NULL DEFAULT 0")
     # revision：每次切换生效版（含回退、回基准）单调加一，用来识别 1→2→1 这类往返切换。

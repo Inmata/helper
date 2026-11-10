@@ -205,12 +205,22 @@ class ConversationHistory:
                 WHERE account=? AND room=? AND wxid=?""",
                        (now, now, members.account, message.chat_id, message.sender_id))
             result = db.execute("""INSERT OR IGNORE INTO messages
-                (account,room,sender_id,text,received_at,session_id,sequence,is_self,bot_generated)
-                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (account,room,sender_id,text,received_at,session_id,sequence,is_self,bot_generated,voice_message_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (members.account, message.chat_id, message.sender_id, message.text,
                  now, message.session_id, message.sequence,
-                 int(message.is_self), int(bool(message.data.get("bot_generated")))))
+                 int(message.is_self), int(bool(message.data.get("bot_generated"))),
+                 (message.data.get("native_message_id") or None) if message.data.get("voice_transcript") else None))
             return result.rowcount > 0
+
+    def voice_text(self, room, message_id):
+        members = self.members
+        with self._lock:
+            row = members.connection().execute("""
+                SELECT m.text FROM messages m JOIN chat_buffers b ON m.account=b.account AND m.room=b.room
+                WHERE m.account=? AND m.room=? AND m.voice_message_id=? AND m.id>b.context_floor""",
+                (members.account, room, message_id)).fetchone()
+            return row[0] if row else ""
 
     def record_bot_reply(self, room, text):
         """把成功发出的机器人回复按真实时间落库，供多轮对话承接自己刚才的话。"""

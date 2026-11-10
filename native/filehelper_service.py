@@ -55,8 +55,8 @@ class ReceivedMediaMessageV4(ReceivedTextMessage):
     _fields_ = [("image_xml", c.c_char * 16384), ("native_message_id", c.c_uint64)]
 
 class ReceivedMediaMessageV5(ReceivedMediaMessageV4):
-    _fields_ = [("voice_size", c.c_uint32), ("voice_reserved", c.c_uint32),
-                ("voice", c.c_ubyte * 262144)]
+    _fields_ = [("payload_size", c.c_uint32), ("payload_reserved", c.c_uint32),
+                ("payload", c.c_ubyte * 262144)]
 
 
 assert c.sizeof(ReceivedMessage) == 1312

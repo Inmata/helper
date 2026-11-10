@@ -316,13 +316,14 @@ class MemoryWorker:
                                        (members.account, room)).fetchone()[0]
             authors = [row[0] for row in db.execute(
                 """SELECT sender_id FROM messages WHERE account=? AND room=? AND id>? AND bot_generated=0
+                   AND context_kind<>'forwarded'
                    GROUP BY sender_id HAVING COUNT(*)>=30""",
                 (members.account, room, context_floor))]
         for wxid in authors:
             if self.stop_event.is_set():
                 return
             rows = [row for row in members.recent_rows(room, sender_id=wxid, limit=200)
-                    if row["id"] > context_floor]
+                    if row["id"] > context_floor and row["context_kind"] != "forwarded"]
             if len(rows) < 30:
                 continue
             entity = self.knowledge.member_entity(room, wxid)

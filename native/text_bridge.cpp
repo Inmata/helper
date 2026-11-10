@@ -241,6 +241,22 @@ static bool try_read_source(const unsigned char* message, size_t offset, char* o
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
+static bool chat_card(const char* xml) {
+    return std::strstr(xml, "<refermsg") || std::strstr(xml, "<recorditem");
+}
+
+static void copy_large_chat_card(const unsigned char* message, const char* sender,
+                                 const char* receiver, const char* source, uint64_t message_id) {
+    constexpr size_t capacity = sizeof(ReceivedMediaMessageV5::payload);
+    auto xml = static_cast<char*>(HeapAlloc(GetProcessHeap(), 0, capacity));
+    if (!xml) return;
+    __try {
+        if (read_pb_string(message, 0x20, xml, capacity) && chat_card(xml))
+            enqueue_received(sender, receiver, "", source, 49, nullptr, message_id,
+                             xml, static_cast<uint32_t>(std::strlen(xml)));
+    } __finally { HeapFree(GetProcessHeap(), 0, xml); }
+}
+
 static void sample_all_text(const uintptr_t* batch) {
     __try {
         if (!batch || batch[1] < batch[0] || (batch[1] - batch[0]) % 0x78 != 0 ||
@@ -248,8 +264,7 @@ static void sample_all_text(const uintptr_t* batch) {
         for (uintptr_t address = batch[0]; address < batch[1]; address += 0x78) {
             const auto message = reinterpret_cast<const unsigned char*>(address);
             const uint32_t type = *reinterpret_cast<const uint32_t*>(message + 0x14);
-            // 1 是文本；3 是图片；49 只放行带 refermsg 的引用消息，
-            // 链接、文件、转发等其他卡片不要。
+            // 49 仅放行引用和合并转发，普通链接与文件不进入聊天。
             if (type != 1 && type != 3 && type != 34 && type != 49) continue;
             char sender[128]{}, receiver[128]{};
             if (!read_pb_string(message, 8, sender, sizeof(sender)) || !valid_target(sender) ||
@@ -283,8 +298,11 @@ static void sample_all_text(const uintptr_t* batch) {
                 enqueue_received(sender, receiver, "", source, 3, image_xml, message_id);
                 continue;
             }
-            if (!read_pb_string(message, 0x20, text, sizeof(text))) continue;
-            if (type == 49 && !std::strstr(text, "<refermsg")) continue;
+            if (!read_pb_string(message, 0x20, text, sizeof(text))) {
+                if (type == 49) copy_large_chat_card(message, sender, receiver, source, message_id);
+                continue;
+            }
+            if (type == 49 && !chat_card(text)) continue;
             enqueue_received(sender, receiver, text, source, type, nullptr, message_id);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {

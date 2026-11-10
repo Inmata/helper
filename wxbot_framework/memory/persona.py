@@ -105,7 +105,7 @@ def collect_messages(members, room, *, days=7, limit=2000):
     with members.database.lock:
         rows = members.connection().execute(
             "SELECT sender_id, text, received_at FROM messages WHERE account=? AND room=? "
-            "AND is_self=0 AND bot_generated=0 ORDER BY id DESC LIMIT ?",
+            "AND is_self=0 AND bot_generated=0 AND context_kind<>'forwarded' ORDER BY id DESC LIMIT ?",
             (members.account, room, limit * 2)).fetchall()
     result = []
     for row in rows:

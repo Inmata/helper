@@ -119,10 +119,18 @@ def initialize_base_schema(db):
     columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
     if "bot_generated" not in columns:
         db.execute("ALTER TABLE messages ADD COLUMN bot_generated INTEGER NOT NULL DEFAULT 0")
-    if "voice_message_id" not in columns:
-        db.execute("ALTER TABLE messages ADD COLUMN voice_message_id TEXT")
-    db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS messages_by_voice ON messages(account, room, voice_message_id)
-                  WHERE voice_message_id IS NOT NULL""")
+    if "context_message_id" not in columns:
+        if "voice_message_id" in columns:
+            db.execute("ALTER TABLE messages RENAME COLUMN voice_message_id TO context_message_id")
+            db.execute("DROP INDEX IF EXISTS messages_by_voice")
+        else:
+            db.execute("ALTER TABLE messages ADD COLUMN context_message_id TEXT")
+    if "context_kind" not in columns:
+        db.execute("ALTER TABLE messages ADD COLUMN context_kind TEXT NOT NULL DEFAULT ''")
+        if "voice_message_id" in columns:
+            db.execute("UPDATE messages SET context_kind='voice' WHERE context_message_id IS NOT NULL")
+    db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS messages_by_context ON messages(account, room, context_message_id)
+                  WHERE context_message_id IS NOT NULL""")
     if "context_floor" not in {row["name"] for row in db.execute("PRAGMA table_info(chat_buffers)")}:
         db.execute("ALTER TABLE chat_buffers ADD COLUMN context_floor INTEGER NOT NULL DEFAULT 0")
     # revision：每次切换生效版（含回退、回基准）单调加一，用来识别 1→2→1 这类往返切换。

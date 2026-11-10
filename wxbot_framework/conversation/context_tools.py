@@ -138,7 +138,8 @@ def pick_speech_examples(members, room, *, count=EXAMPLE_COUNT, pool=EXAMPLE_POO
         return []
     seen, candidates = set(), []
     for row in rows:
-        if not isinstance(row, dict) or row.get("bot_generated") or row.get("is_self"):
+        if (not isinstance(row, dict) or row.get("bot_generated") or row.get("is_self")
+                or row.get("context_kind") == "forwarded"):
             continue
         text = row.get("text")
         if usable_example(text) and text.strip() not in seen:

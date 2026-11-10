@@ -279,10 +279,13 @@ class Plugin:
         quote = message.data.get("quote") or {}
         # 引用非文本消息时没有正文，仍把引用人带给模型，别把整条引用丢掉；引用图片时标明是图片。
         quote_text = quote.get("text") or ("[图片]" if quote.get("ref_type") == "3" else "")
-        if quote.get("ref_type") == "34":
-            transcript = self.members.voice_text(message.chat_id, quote.get("svrid", ""))
+        ref_type = quote.get("ref_type")
+        if ref_type == "34":
+            transcript = self.members.context_text(message.chat_id, quote.get("svrid", ""))
             quote_text = "[语音转写] " + transcript if transcript else "[语音未转写]"
-        quote = ({"name": quote.get("name") or "", "text": quote_text}
+        if ref_type == "49":
+            quote_text = self.members.context_text(message.chat_id, quote.get("svrid", "")) or quote_text
+        quote = ({"name": quote.get("name") or "", "text": quote_text, "ref_type": ref_type}
                  if quote.get("name") or quote_text else None)
         key = (message.session_id, message.chat_id, message.sender_id, clean_query)
         if not self._claim(key, message.received_at):

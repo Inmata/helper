@@ -13,6 +13,7 @@ from filehelper_service import (NativeFileHelperService, ReceivedTextMessage, Re
 from wxbot_framework.image_receiver import ImageDownloadSkipped
 from wxbot_framework.image_metadata import image_download_reference, parse_image_metadata
 from wxbot_framework.recent_images import RECENT_IMAGES
+from wxbot_framework.messaging.forwarded import forwarded_text
 from wxbot_framework.messaging.mentions import parse_at_members, parse_quote
 from run_selftest import (TEXT_DLL, K, check, compatible_core_version, download_aeskey_supported,
                           modules, wechat_candidates, run)
@@ -256,16 +257,20 @@ class NativeTextService(NativeFileHelperService):
         return members, names
 
     def _map_message(self, message):
-        # 49 是应用消息，只有引用（refermsg）才当文本处理。
+        # 49 只接收引用与合并转发。
         if message.type not in (1, 3, 34, 49):
             return None
         body = (getattr(message, "image_xml", b"") if message.type == 3 else
                 getattr(message, "text", b"")).decode("utf-8", errors="replace")
-        quote = None
+        quote, forwarded = None, ""
         if message.type == 49:
+            if isinstance(message, ReceivedMediaMessageV5) and message.payload_size:
+                body = bytes(message.payload[:message.payload_size]).decode("utf-8", errors="replace")
             quote = parse_quote(body)
             if quote is None:
-                return None
+                forwarded = forwarded_text(body)
+                if not forwarded:
+                    return None
         previous = self.self_wxid
         previous_unparsed = self.router.unparsed_groups
         data = self.router.convert(message.sender.decode("utf-8"), message.receiver.decode("utf-8"), body,
@@ -276,6 +281,14 @@ class NativeTextService(NativeFileHelperService):
             data["native_message_id"] = str(getattr(message, "native_message_id", 0) or "")
             if message.type == 34:
                 return self._transcribe_voice(message, data)
+            if forwarded:
+                if not data["room_wxid"]:
+                    return None
+                data.update(msg=forwarded, content=forwarded, context_kind="forwarded", dispatch_to_plugins=False)
+                name = self._sender_wechat_name(data["sender_id"])
+                if name:
+                    data["sender_wechat_name"] = name
+                return data
             if quote is not None:
                 # 回复正文在被引用卡片里，群友真正说的话是 title；被引用的原文单独带给模型。
                 data["quote"] = {key: quote[key] for key in ("name", "text", "chatusr", "fromusr", "ref_type",
@@ -334,16 +347,16 @@ class NativeTextService(NativeFileHelperService):
 
     def _transcribe_voice(self, message, data):
         if (self.transcriber is None or data["chat_id"] not in self.voice_rooms or data["is_self"] or
-                not isinstance(message, ReceivedMediaMessageV5) or not 0 < message.voice_size <= len(message.voice)):
+                not isinstance(message, ReceivedMediaMessageV5) or not 0 < message.payload_size <= len(message.payload)):
             return None
         try:
-            text = self.transcriber.transcribe(bytes(message.voice[:message.voice_size]), data["msg"])
+            text = self.transcriber.transcribe(bytes(message.payload[:message.payload_size]), data["msg"])
         except Exception as error:
             logger.warning("语音转写失败：%s", type(error).__name__)
             return None
         if not text or self._stop.is_set():
             return None
-        data.update(msg=text, content=text, voice_transcript=True)
+        data.update(msg=text, content=text, context_kind="voice")
         name = self._sender_wechat_name(data["sender_id"])
         if name:
             data["sender_wechat_name"] = name

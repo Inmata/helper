@@ -12,7 +12,7 @@
 - `core_version.h`：原生调用、接收与卸载共用的构建地址配置；`wxbot_framework/native_profiles.py` 记录 Python 读取账号和群成员缓存的对应地址。
 - `image_download.h`：V4 图片 CDN 下载实现与 `WxDownloadImage` 导出，由 `text_bridge.cpp` 包含；旧 V3/V2 DLL 不含该能力。
 - `image_send.h`：本地图片发送实现与 `WxSendImage` 导出，用于在群聊发送表情包小图。
-- `WxPollMediaMessageWithVoice`：在 V4 字段之后追加 SILK 数据；微信 4.2.0.12 的群语音随消息携带完整载荷时可在本机转写。
+- `WxPollMediaMessageWithVoice`：在 V4 字段之后追加媒体载荷，用于微信 4.2.0.12 的内联 SILK 和大于旧正文缓冲区的聊天卡片。
 - `build_text/text_bridge.dll`：当前文本收发和真实艾特桥接；重编后同时导出 `WxPollMediaMessageV4` 与 `WxDownloadImage`，前端才会声明图片接收能力。
 - `build/selftest_bridge.dll`：兼容文件传输助手后端。
 

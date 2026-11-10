@@ -42,7 +42,7 @@ class LearningBatch:
         with self.knowledge.lock:
             result, effective = [], 0
             for row in self.knowledge.connection().execute("""SELECT * FROM messages
-                WHERE account=? AND room=? AND id>? ORDER BY id LIMIT ?""",
+                WHERE account=? AND room=? AND id>? AND context_kind<>'forwarded' ORDER BY id LIMIT ?""",
                 (self.account, room, self.cursor(room), max(1000, limit))):
                 result.append(dict(row))
                 effective += int(not row["bot_generated"] and effective_text(row["text"]))

@@ -7,6 +7,7 @@ code:
   - wxbot_framework/images.py
   - wxbot_framework/integrations/wechat.py
   - wxbot_framework/integrations/voice_asr.py
+  - wxbot_framework/messaging/forwarded.py
   - native/text_service.py
 related:
   - wxbot_framework/plugin_engine/manager.py
@@ -80,6 +81,10 @@ related:
 微信 4.2.0.12 的配套桥接通过 `WxPollMediaMessageWithVoice` 接收消息自带的完整 SILK。对已启用记录且在收发范围内的群，在本机解码转写，按接收顺序把结果作为原发言者的文本交给消息入口。
 
 转写正文进现有聊天记录和插件上下文，原始语音编号随记录保存，用于引用定位。不保存音频或自动向群内发送转写。缺少模型、音频不全或未识别出文字时跳过该语音。
+
+## 合并转发（微信类型 49，卡片类型 19）
+
+群内实时收到的卡片含内嵌记录时，读取文字、原署名和原时间。整张卡片以转发者名下的一条资料进入聊天记录，不拆成群友实时发言，不参与个人长期学习，也不触发插件指令或自动回复。引用按原始消息编号取同群保存的资料。图片、语音、文件和嵌套卡片不展开。
 
 ## 验收
 

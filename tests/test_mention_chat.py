@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
+from xml.sax.saxutils import escape
 
 from support.recyclable_tempdir import RecyclableTemporaryDirectory
 from plugins.mention_chat import Plugin
@@ -16,6 +17,7 @@ from wxbot_framework.conversation.members import ConversationSnapshot, MemberSto
 from wxbot_framework.conversation.personality import PersonalityState
 from wxbot_framework.conversation.room_state import RoomStateStore
 from wxbot_framework.integrations.llm import LLMError
+from wxbot_framework.messaging.mentions import parse_quote
 from wxbot_framework.sdk import Message
 
 ROOM = "12345678@chatroom"
@@ -563,15 +565,31 @@ class MentionDeliveryTests(unittest.TestCase):
         self.assertIn("【引用】", ctx.last_user)
         self.assertIn("机器人", ctx.last_user)
 
+    def test_quote_of_a_reply_uses_its_title_instead_of_treating_it_as_a_forward(self):
+        inner = ("<msg><appmsg><type>57</type><title>我八点到</title>"
+                 "<refermsg><type>1</type><content>几点来</content></refermsg></appmsg></msg>")
+        source = ("<msg><appmsg><type>57</type><title>他几点到</title><refermsg><type>49</type>"
+                  "<svrid>123</svrid><displayname>甲</displayname>"
+                  f"<content>{escape(inner)}</content></refermsg></appmsg></msg>")
+        plugin, ctx = self.build("八点到")
+        message = mention("他几点到")
+        message.data["quote"] = parse_quote(source)
+        plugin.on_message(message, ctx)
+        self.assertEqual(ctx.sent, [("reply_at", "八点到")])
+        self.assertIn("【引用】甲：我八点到", ctx.last_user)
+        self.assertNotIn("几点来", ctx.last_user)
+
     def test_missing_voice_and_app_card_are_reported_without_asking_model(self):
-        for ref_type, expected in (
-            ("34", "我没读到这条语音的转写。"),
-            ("49", "我没读到这张卡片的正文。可以把原卡片再发一次。"),
+        for ref_type, ref_app_type, expected in (
+            ("34", "", "我没读到这条语音的转写。"),
+            ("49", "19", "我没读到这张卡片的正文。可以把原卡片再发一次。"),
+            ("49", "", "我没读到你引用的那条消息。可以把原话发来。"),
         ):
             with self.subTest(ref_type=ref_type):
                 plugin, ctx = self.build("模型不应被调用")
                 message = mention("说了什么")
-                message.data["quote"] = {"name": "小明", "ref_type": ref_type, "svrid": "123"}
+                message.data["quote"] = {"name": "小明", "ref_type": ref_type,
+                                         "ref_app_type": ref_app_type, "svrid": "123"}
                 plugin.on_message(message, ctx)
                 self.assertEqual(ctx.sent, [("reply_at", expected)])
                 self.assertEqual(ctx.completions, 0)

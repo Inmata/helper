@@ -305,7 +305,7 @@ class NativeTextService(NativeFileHelperService):
             elif quote is not None:
                 # 回复正文在被引用卡片里，群友真正说的话是 title；被引用的原文单独带给模型。
                 data["quote"] = {key: quote[key] for key in ("name", "text", "chatusr", "fromusr", "ref_type",
-                                                             "svrid", "image_md5")}
+                                                             "ref_app_type", "svrid", "image_md5")}
                 data["msg"] = data["content"] = quote["title"]
             name = self._sender_wechat_name(data["sender_id"]) if data["sender_id"] else None
             if name:
@@ -327,8 +327,8 @@ class NativeTextService(NativeFileHelperService):
                 self.mention_messages += 1
             if quote is not None:
                 # 引用图片时原文里有 aeskey 和 CDN 地址，只记结构字段，不记原始 XML。
-                logger.info("引用消息：room=%s sender=%s ref_type=%s name=%s svrid=%s is_at_self=%s at=%s",
-                            data["chat_id"], data["sender_id"], quote["ref_type"], quote["name"],
+                logger.info("引用消息：room=%s sender=%s ref_type=%s ref_app_type=%s name=%s svrid=%s is_at_self=%s at=%s",
+                            data["chat_id"], data["sender_id"], quote["ref_type"], quote["ref_app_type"], quote["name"],
                             quote["svrid"], data["is_at_self"], data["at_members"])
             if data["is_self"] and any(chat == data["chat_id"] and text == data["msg"] and
                                        time.monotonic() - sent_at < 120

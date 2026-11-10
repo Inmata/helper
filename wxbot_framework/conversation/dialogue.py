@@ -126,20 +126,22 @@ def resolve_reply_quote(raw, find_context_text):
     raw = raw or {}
     name, text = raw.get("name") or "", raw.get("text") or ""
     ref_type, message_id = raw.get("ref_type"), raw.get("svrid", "")
+    ref_app_type = raw.get("ref_app_type", "")
     context_id, kind = "", ""
-    if ref_type in ("34", "49"):
+    if ref_type == "34":
         saved = find_context_text(message_id)
-        if saved:
-            context_id, text = message_id, saved
-        if ref_type == "34":
-            if not saved:
-                return None, "我没读到这条语音的转写。"
-            text = "[语音转写] " + saved
-            kind = "voice"
-        elif not text:
-            return None, "我没读到这张卡片的正文。可以把原卡片再发一次。"
-        else:
-            kind = "forwarded"
+        if not saved:
+            return None, "我没读到这条语音的转写。"
+        context_id, text, kind = message_id, "[语音转写] " + saved, "voice"
+    elif ref_type == "49":
+        if ref_app_type != "57":
+            saved = find_context_text(message_id)
+            if saved:
+                context_id, text, kind = message_id, saved, "forwarded"
+        if not text:
+            if ref_app_type == "19":
+                return None, "我没读到这张卡片的正文。可以把原卡片再发一次。"
+            return None, "我没读到你引用的那条消息。可以把原话发来。"
     elif ref_type == "3" and not text:
         text = "[图片]"
     quote = {"name": name, "text": text, "kind": kind, "context_id": context_id} if name or text else None

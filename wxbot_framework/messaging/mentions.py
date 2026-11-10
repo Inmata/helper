@@ -71,8 +71,23 @@ def _quoted_image_md5(content):
     return match.group(1).lower() if match else ""
 
 
+def _quoted_app_fields(content):
+    """49 是应用消息外壳；57 的 title 才是这条引用回复自己说的话。"""
+    if not content.startswith("<") or "<!DOCTYPE" in content.upper() or "<!ENTITY" in content.upper():
+        return "", ""
+    try:
+        root = ElementTree.fromstring(content)
+    except ElementTree.ParseError:
+        return "", ""
+    app = root if root.tag == "appmsg" else root.find("appmsg")
+    if app is None:
+        return "", ""
+    kind = (app.findtext("type") or "").strip()
+    return kind, (app.findtext("title") or "").strip() if kind == "57" else ""
+
+
 def parse_quote(source):
-    """解析引用消息 XML：返回 ``{title, name, text, ref_type, chatusr, fromusr, svrid, image_md5}``，
+    """解析引用消息 XML：返回当前正文、被引用人的标识、消息类型和可用正文，
     不是引用时返回 None。
 
     ``title`` 是这次回复的正文，``text`` 是被引用的原文（只取文本类引用，截断到 300 字）；
@@ -97,15 +112,20 @@ def parse_quote(source):
     if refer is None:
         return None
     ref_type = (refer.findtext("type") or "").strip()
+    content = (refer.findtext("content") or "").strip()
+    ref_app_type, text = "", content if ref_type == "1" else ""
+    if ref_type == "49":
+        ref_app_type, text = _quoted_app_fields(content)
     svrid = (refer.findtext("svrid") or "").strip()
     return {"title": (appmsg.findtext("title") or "").strip(),
             "name": (refer.findtext("displayname") or "").strip(),
-            "text": (refer.findtext("content") or "").strip()[:QUOTE_TEXT_MAX_CHARS] if ref_type == "1" else "",
+            "text": text[:QUOTE_TEXT_MAX_CHARS],
             "ref_type": ref_type,
+            "ref_app_type": ref_app_type,
             "chatusr": (refer.findtext("chatusr") or "").strip(),
             "fromusr": (refer.findtext("fromusr") or "").strip(),
             "svrid": svrid if svrid.isascii() and svrid.isdigit() and len(svrid) <= 20 else "",
-            "image_md5": _quoted_image_md5(refer.findtext("content")) if ref_type == "3" else ""}
+            "image_md5": _quoted_image_md5(content) if ref_type == "3" else ""}
 
 
 def typed_at(text, names=()):

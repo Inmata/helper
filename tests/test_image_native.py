@@ -347,19 +347,23 @@ class DownloadRunEntryTests(unittest.TestCase):
 
     UUID_HEX = "0" * 32
     EXPORTS = {b"WxDownloadImage": 0x100, b"WxWaitForTasks": 0x200,
-               b"WxRemoveSelfTest": 0x300, b"WxSendText": 0x400}
+               b"WxRemoveSelfTest": 0x300, b"WxSendText": 0x400,
+               b"WxInspectHelperCoreVersion": 0x500}
 
     @unittest.skipUnless(sys.platform == "win32", "本机 Windows ABI 检查")
-    def test_download_image_mode_uses_image_export(self):
+    def test_updated_build_guards_and_download_entry(self):
         native_imports()
         import run_selftest
         with RecyclableTemporaryDirectory(prefix="wxbot-run-entry-") as directory:
             root = Path(directory)
             (root / "native").mkdir()
+            fixture = b"core"
+            profiles = [{"size": len(fixture), "sha256": run_selftest.hashlib.sha256(fixture).hexdigest(),
+                         "wechat_version": "4.2.0.12"}]
             (root / "native/compatibility.json").write_text(
-                json.dumps({"sha256": "f" * 64}), encoding="utf-8")
+                json.dumps({"profiles": profiles}), encoding="utf-8")
             core = root / "weixin.dll"
-            core.write_bytes(b"core")
+            core.write_bytes(b"fake")
             destination = root / "target.bin"
             report_directory = root / ".runtime/native_requests"
             report_directory.mkdir(parents=True)
@@ -372,10 +376,16 @@ class DownloadRunEntryTests(unittest.TestCase):
             addresses = []
 
             class FakePE:
-                VS_FIXEDFILEINFO = [SimpleNamespace(FileVersionMS=0x40001, FileVersionLS=0xF000D)]
+                VS_FIXEDFILEINFO = [SimpleNamespace(FileVersionMS=0x40002, FileVersionLS=0xC)]
                 DIRECTORY_ENTRY_EXPORT = SimpleNamespace(
                     symbols=[SimpleNamespace(name=name, address=address)
                              for name, address in DownloadRunEntryTests.EXPORTS.items()])
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    pass
 
             def query(process, flags, path, length):
                 path.value = r"C:\Weixin\Weixin.exe"
@@ -401,16 +411,28 @@ class DownloadRunEntryTests(unittest.TestCase):
                     mock.patch.object(run_selftest, "K", fake_kernel), \
                     mock.patch.object(run_selftest, "pefile") as pefile_module, \
                     mock.patch.object(run_selftest.uuid, "uuid4",
-                                      lambda: SimpleNamespace(hex=self.UUID_HEX)), \
-                    mock.patch.object(run_selftest.hashlib, "sha256") as sha256:
+                                      lambda: SimpleNamespace(hex=self.UUID_HEX)):
                 pefile_module.PE.side_effect = lambda path: FakePE()
-                sha256.return_value.hexdigest.return_value = "f" * 64
-                result = run_selftest.run(
-                    "--download-image", pid=1, keep_loaded=True,
+                options = dict(pid=1, keep_loaded=True,
                     bridge_path=run_selftest.TEXT_DLL,
                     download_image={"destination": str(destination), "filekey": "k" * 32,
                                     "aeskey": "a" * 32, "image_type": 2})
+                with self.assertRaisesRegex(RuntimeError, "指纹不匹配"):
+                    run_selftest.run("--download-image", **options)
+                core.write_bytes(fixture)
+                with mock.patch.object(FakePE, "VS_FIXEDFILEINFO", [
+                        SimpleNamespace(FileVersionMS=0x40001, FileVersionLS=0xF000D)]):
+                    with self.assertRaisesRegex(RuntimeError, "版本与核心 DLL 指纹不一致"):
+                        run_selftest.run("--download-image", **options)
+                old_symbols = [item for item in FakePE.DIRECTORY_ENTRY_EXPORT.symbols
+                               if item.name != b"WxInspectHelperCoreVersion"]
+                with mock.patch.object(FakePE, "DIRECTORY_ENTRY_EXPORT", SimpleNamespace(symbols=old_symbols)):
+                    with self.assertRaisesRegex(RuntimeError, "配套的新文本桥接 DLL"):
+                        run_selftest.run("--download-image", **options)
+                self.assertEqual(addresses, [])
+                result = run_selftest.run("--download-image", **options)
             self.assertEqual(result["mode"], "--download-image")
+            self.assertEqual(result["wechat_version"], "4.2.0.12")
             self.assertEqual(addresses[0], 0x20000000 + self.EXPORTS[b"WxDownloadImage"])
             self.assertEqual(addresses[1], 0x20000000 + self.EXPORTS[b"WxWaitForTasks"])
             self.assertTrue(result["success"])

@@ -141,6 +141,7 @@ class NativeFileHelperService:
         self.msg_handlers = []
         self.last_result = None
         self.last_error = None
+        self.wechat_version = None
         self._channel = None
         self._thread = None
         self._stop = threading.Event()
@@ -157,6 +158,7 @@ class NativeFileHelperService:
         self.last_error = None
         armed = self._run("--listen", pid=self.pid)
         self.pid = armed["pid"]
+        self.wechat_version = armed["wechat_version"]
         self._owns_bridge = True
         if armed["code"]:
             self.stop()

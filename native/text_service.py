@@ -14,7 +14,8 @@ from wxbot_framework.image_receiver import ImageDownloadSkipped
 from wxbot_framework.image_metadata import parse_image_metadata
 from wxbot_framework.recent_images import RECENT_IMAGES
 from wxbot_framework.messaging.mentions import parse_at_members, parse_quote
-from run_selftest import TEXT_DLL, K, check, download_aeskey_supported, modules, wechat_candidates, run
+from run_selftest import (TEXT_DLL, K, check, compatible_core_version, download_aeskey_supported,
+                          modules, wechat_candidates, run)
 from wxbot_framework.messaging.text import TextRouter, validate_target, validate_mentions
 from wxbot_framework.account import read_current_account, read_current_profile, select_account_process, validate_account
 from wxbot_framework.contacts import read_chatroom_members, read_contact_name
@@ -56,6 +57,9 @@ def inspect_account(pid):
     core = modules(pid).get("weixin.dll")
     if not core:
         return None
+    wechat_version = compatible_core_version(core[1])
+    if wechat_version is None:
+        return None
     process = check(K.OpenProcess(0x410, False, pid), "只读核对微信账号")
     try:
         def read(address, size):
@@ -63,7 +67,7 @@ def inspect_account(pid):
             count = c.c_size_t()
             check(K.ReadProcessMemory(process, address, buffer, size, c.byref(count)), "只读核对账号字段")
             return buffer.raw[:count.value]
-        return read_current_account(read, core[0])
+        return read_current_account(read, core[0], wechat_version=wechat_version)
     finally:
         K.CloseHandle(process)
 
@@ -194,7 +198,8 @@ class NativeTextService(NativeFileHelperService):
         return super().stop()
 
     def _read_account(self):
-        return read_current_account(self._channel.read_memory, self._channel.core_base)
+        return read_current_account(self._channel.read_memory, self._channel.core_base,
+                                    wechat_version=self.wechat_version)
 
     def _prepare_channel(self):
         account = self._read_account()
@@ -223,9 +228,10 @@ class NativeTextService(NativeFileHelperService):
         if self._channel is None:
             return None
         name = read_contact_name(self._channel.read_memory, self._channel.core_base, wxid,
-                                 expected_account=self.self_wxid)
+                                 expected_account=self.self_wxid, wechat_version=self.wechat_version)
         if name is None and wxid == self.self_wxid:
-            profile = read_current_profile(self._channel.read_memory, self._channel.core_base)
+            profile = read_current_profile(self._channel.read_memory, self._channel.core_base,
+                                           wechat_version=self.wechat_version)
             name = profile["name"] if profile and profile["wxid"] == wxid else None
         return name
 
@@ -233,7 +239,7 @@ class NativeTextService(NativeFileHelperService):
         if self._channel is None:
             return (), {}
         members = read_chatroom_members(self._channel.read_memory, self._channel.core_base, room_wxid,
-                                        expected_account=self.self_wxid)
+                                        expected_account=self.self_wxid, wechat_version=self.wechat_version)
         names = {}
         for wxid in members:
             name = self._sender_wechat_name(wxid)

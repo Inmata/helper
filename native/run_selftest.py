@@ -148,6 +148,18 @@ def find_wechat():
     return candidates[0]
 
 
+def compatible_core_version(core_path):
+    profiles = json.loads((ROOT / "native/compatibility.json").read_text(encoding="utf-8"))["profiles"]
+    path = Path(core_path)
+    size = path.stat().st_size
+    profile = next((item for item in profiles if item["size"] == size), None)
+    if profile is None:
+        return None
+    with path.open("rb") as core:
+        digest = hashlib.file_digest(core, "sha256").hexdigest()
+    return profile["wechat_version"] if digest == profile["sha256"] else None
+
+
 def download_aeskey_supported(aeskey):
     """原生图片下载接口的密钥规则：32 或 64 位十六进制。
 
@@ -234,19 +246,27 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
         check(K.QueryFullProcessImageNameW(process, 0, path, c.byref(length)), "核对客户端路径")
         client = Path(path.value)
         if client.name.lower() != "weixin.exe": raise RuntimeError("目标不是微信")
-        version = pefile.PE(str(client)).VS_FIXEDFILEINFO[0]
-        if (version.FileVersionMS, version.FileVersionLS) != (0x40001, 0xf000d):
-            raise RuntimeError("客户端版本已改变")
         loaded_modules = modules(pid)
         core = loaded_modules.get("weixin.dll")
         if not core: raise RuntimeError("微信核心模块尚未加载")
-        baseline = json.loads((ROOT / "native/compatibility.json").read_text(encoding="utf-8"))
-        if hashlib.sha256(Path(core[1]).read_bytes()).hexdigest() != baseline["sha256"]:
+        wechat_version = compatible_core_version(core[1])
+        if wechat_version is None:
             raise RuntimeError("微信核心 DLL 指纹不匹配，拒绝加载")
+        with pefile.PE(str(client)) as executable:
+            version = executable.VS_FIXEDFILEINFO[0]
+            major, minor, build, patch = map(int, wechat_version.split("."))
+            if (version.FileVersionMS, version.FileVersionLS) != ((major << 16) | minor, (build << 16) | patch):
+                raise RuntimeError("微信客户端版本与核心 DLL 指纹不一致，拒绝加载")
+        if wechat_version == "4.2.0.12" and (
+                not generic or mode not in ("--listen", "--dispatch", "--download-image", "--remove")):
+            raise RuntimeError("微信 4.2.0.12 请使用 native_text 后端，旧自测与探针仅支持 4.1.15.13")
         other = DLL if generic else TEXT_DLL
         if mode != "--remove" and other.name.lower() in loaded_modules:
             raise RuntimeError("另一版本的桥接仍在运行，请先在旧 main.py 中输入 quit")
         pe = pefile.PE(str(dll))
+        if wechat_version == "4.2.0.12" and not any(
+                item.name == b"WxInspectHelperCoreVersion" for item in pe.DIRECTORY_ENTRY_EXPORT.symbols):
+            raise RuntimeError("微信 4.2.0.12 需要配套的新文本桥接 DLL")
         # 两种桥接的导出表不同，必须先按桥接类型选映射；图片下载只存在于通用桥接。
         if generic:
             name = {"--dispatch": b"WxSendText", "--listen": b"WxStartTextReceiver",
@@ -304,7 +324,8 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
             remote_call(process, remote_system_function(pid, b"FreeLibrary"), loaded[0])
         # Failed initialization or a partially scheduled job must still pass
         # the DLL's cleanup guard before FreeLibrary is allowed.
-        result = {"mode":mode,"pid":pid,"code":exit_code,"target":target,"report_path":str(report_path)}
+        result = {"mode": mode, "pid": pid, "code": exit_code, "target": target,
+                  "report_path": str(report_path), "wechat_version": wechat_version}
         if mode == "--remove":
             result["dll_unloaded"] = dll.name.lower() not in modules(pid)
         if mode in ("--dispatch", "--download-image"):

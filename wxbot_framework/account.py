@@ -1,9 +1,10 @@
-"""微信 4.1.15.13 当前登录账号的只读快照，不保存账号缓存。"""
+"""当前微信登录账号的只读快照，不保存账号缓存。"""
 from __future__ import annotations
 
 import struct
 
 from .messaging.text import SYSTEM_PEERS, validate_target
+from .native_profiles import LEGACY_VERSION, memory_rva
 
 # 由该版本的反汇编及当前进程核对；使用前后端已校验核心 DLL SHA256。
 APP_GLOBAL_RVA = 0xB912690
@@ -47,7 +48,7 @@ def select_account_process(candidates, preferred_account=None):
     raise RuntimeError("等待微信账号完成登录")
 
 
-def read_current_account(read_memory, core_base):
+def read_current_account(read_memory, core_base, *, wechat_version=LEGACY_VERSION):
     """返回稳定的当前账号 ID；未登录、读取中发生切换时返回 None。
 
     read_memory(address, length) 必须返回完整字节串，只读取已确认的对象链。
@@ -63,19 +64,20 @@ def read_current_account(read_memory, core_base):
         return struct.unpack("<Q", read(address, 8))[0]
 
     try:
-        app = _pointer(ptr(core_base + APP_GLOBAL_RVA))
+        app_address = core_base + memory_rva(wechat_version, APP_GLOBAL_RVA)
+        app = _pointer(ptr(app_address))
         app_table = ptr(app)
-        if app_table != core_base + APP_VTABLE_RVA:
+        if app_table != core_base + memory_rva(wechat_version, APP_VTABLE_RVA):
             return None
-        if ptr(app_table + 0x60) != core_base + APP_CONTEXT_GETTER_RVA:
+        if ptr(app_table + 0x60) != core_base + memory_rva(wechat_version, APP_CONTEXT_GETTER_RVA):
             return None
         context = _pointer(ptr(app + 0x68))
         table = ptr(context)
-        if table != core_base + CONTEXT_VTABLE_RVA:
+        if table != core_base + memory_rva(wechat_version, CONTEXT_VTABLE_RVA):
             return None
-        if ptr(table + 0x18) != core_base + IDENTITY_GETTER_RVA:
+        if ptr(table + 0x18) != core_base + memory_rva(wechat_version, IDENTITY_GETTER_RVA):
             return None
-        if read(core_base + IDENTITY_GETTER_RVA, 5) != b"\x48\x8d\x41\x48\xc3":
+        if read(core_base + memory_rva(wechat_version, IDENTITY_GETTER_RVA), 5) != b"\x48\x8d\x41\x48\xc3":
             return None
         address = context + 0x48
         header = read(address, 32)
@@ -86,7 +88,7 @@ def read_current_account(read_memory, core_base):
         body = read(buffer, length)
         account = validate_account(body.decode("ascii"))
         if (read(address, 32) != header or read(buffer, length) != body or
-                ptr(core_base + APP_GLOBAL_RVA) != app or ptr(app + 0x68) != context or ptr(context) != table):
+                ptr(app_address) != app or ptr(app + 0x68) != context or ptr(context) != table):
             return None
         return account
     except (OSError, ValueError, struct.error):
@@ -94,9 +96,9 @@ def read_current_account(read_memory, core_base):
         return None
 
 
-def read_current_profile(read_memory, core_base):
+def read_current_profile(read_memory, core_base, *, wechat_version=LEGACY_VERSION):
     """只读当前账号 ID 和微信名；不读取电话等其他资料，不建立群内绑定。"""
-    account = read_current_account(read_memory, core_base)
+    account = read_current_account(read_memory, core_base, wechat_version=wechat_version)
     if not account:
         return None
     try:
@@ -105,7 +107,7 @@ def read_current_profile(read_memory, core_base):
             if len(value) != length:
                 raise ValueError("微信名字字段读取不完整")
             return value
-        app = struct.unpack("<Q", read(core_base + APP_GLOBAL_RVA, 8))[0]
+        app = struct.unpack("<Q", read(core_base + memory_rva(wechat_version, APP_GLOBAL_RVA), 8))[0]
         context = struct.unpack("<Q", read(app + 0x68, 8))[0]
         address = context + 0x88
         header = read(address, 32)
@@ -119,7 +121,7 @@ def read_current_profile(read_memory, core_base):
             return None
         if (read(address, 32) != header or read(buffer, length) != body or
                 struct.unpack("<Q", read(app + 0x68, 8))[0] != context or
-                read_current_account(read_memory, core_base) != account):
+                read_current_account(read_memory, core_base, wechat_version=wechat_version) != account):
             return None
         return {"wxid": account, "name": name.strip()}
     except (OSError, ValueError, struct.error):

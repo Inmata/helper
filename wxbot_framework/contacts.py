@@ -1,9 +1,10 @@
-"""微信 4.1.15.13 联系人缓存的只读名字快照；调用方必须先核对核心 DLL 指纹。"""
+"""微信联系人缓存的只读名字快照；调用方必须先核对核心 DLL 指纹。"""
 from __future__ import annotations
 
 import struct
 
 from .account import APP_GLOBAL_RVA, _pointer, read_current_account, validate_account
+from .native_profiles import LEGACY_VERSION, memory_rva
 
 CACHE_PROVIDER_GETTER_RVA = 0x36C7B0
 CACHE_PROVIDER_VTABLE_RVA = 0x8F9BF98
@@ -28,13 +29,14 @@ def _fnv1a64(text):
     return hash_value
 
 
-def read_contact_name(read_memory, core_base, wxid, *, expected_account=None):
+def read_contact_name(read_memory, core_base, wxid, *, expected_account=None,
+                      wechat_version=LEGACY_VERSION):
     """按实际成员 ID 读取微信名。缺失、切换、重建缓存时返回 None，不猜名字。
 
     仅遍历已核对的缓存对象，不调用微信函数、不扫描整个进程、不读取群昵称或备注。
     """
     validate_account(wxid)
-    account = read_current_account(read_memory, core_base)
+    account = read_current_account(read_memory, core_base, wechat_version=wechat_version)
     if not account or (expected_account is not None and account != expected_account):
         return None
     try:
@@ -58,15 +60,16 @@ def read_contact_name(read_memory, core_base, wxid, *, expected_account=None):
                 raise ValueError("联系人字符串发生变化")
             return body.decode("utf-8")
 
-        app = ptr(core_base + APP_GLOBAL_RVA)
+        app = ptr(core_base + memory_rva(wechat_version, APP_GLOBAL_RVA))
         context = ptr(app + 0x68)
         table = ptr(context)
-        if ptr(table + 0x38) != core_base + CACHE_PROVIDER_GETTER_RVA:
+        getter = core_base + memory_rva(wechat_version, CACHE_PROVIDER_GETTER_RVA)
+        if ptr(table + 0x38) != getter:
             return None
-        if read(core_base + CACHE_PROVIDER_GETTER_RVA + 28, 8) != bytes.fromhex("48 83 b9 60 04 00 00 00"):
+        if read(getter + 28, 8) != bytes.fromhex("48 83 b9 60 04 00 00 00"):
             return None
         provider = _pointer(ptr(context + 0x460))
-        if ptr(provider) != core_base + CACHE_PROVIDER_VTABLE_RVA:
+        if ptr(provider) != core_base + memory_rva(wechat_version, CACHE_PROVIDER_VTABLE_RVA):
             return None
         registry = read(provider + 0x90, 16)
         head, size = struct.unpack("<QQ", registry)
@@ -79,7 +82,7 @@ def read_contact_name(read_memory, core_base, wxid, *, expected_account=None):
                 break
             visited.add(node)
             value = ptr(node + 0x30)
-            if value and ptr(value) == core_base + CONTACT_CACHE_VTABLE_RVA:
+            if value and ptr(value) == core_base + memory_rva(wechat_version, CONTACT_CACHE_VTABLE_RVA):
                 cache = value
                 break
             node = ptr(node)
@@ -111,7 +114,7 @@ def read_contact_name(read_memory, core_base, wxid, *, expected_account=None):
                     return None
                 if (ptr(node + 0x30) != contact or string(node + 0x10, 127) != wxid or
                         read(cache + 0xC8, 0x38) != layout or read(bucket_address, 16) != bucket or
-                        ptr(context + 0x460) != provider or read_current_account(read_memory, core_base) != account):
+                        ptr(context + 0x460) != provider or read_current_account(read_memory, core_base, wechat_version=wechat_version) != account):
                     return None
                 return name
             if node == first:
@@ -146,7 +149,7 @@ def read_contact_name(read_memory, core_base, wxid, *, expected_account=None):
                 if (ptr(lru_map_node + 0x30) != lru_node or ptr(lru_node + 0x30) != contact or
                         string(lru_map_node + 0x10, 127) != wxid or read(cache + 0x118, 0x38) != lru_layout or
                         read(lru_bucket_address, 16) != lru_bucket or ptr(context + 0x460) != provider or
-                        read_current_account(read_memory, core_base) != account):
+                        read_current_account(read_memory, core_base, wechat_version=wechat_version) != account):
                     return None
                 return name
             if lru_map_node == lru_first:
@@ -157,11 +160,12 @@ def read_contact_name(read_memory, core_base, wxid, *, expected_account=None):
         return None
 
 
-def read_chatroom_members(read_memory, core_base, room_wxid, *, expected_account=None):
+def read_chatroom_members(read_memory, core_base, room_wxid, *, expected_account=None,
+                          wechat_version=LEGACY_VERSION):
     """只读读取 ChatroomCache 中指定群的成员 wxid 列表；缓存未命中或发生变化时返回空元组。"""
     if not isinstance(room_wxid, str) or not room_wxid.endswith("@chatroom") or not room_wxid.isascii():
         return ()
-    account = read_current_account(read_memory, core_base)
+    account = read_current_account(read_memory, core_base, wechat_version=wechat_version)
     if not account or (expected_account is not None and account != expected_account):
         return ()
     try:
@@ -185,13 +189,13 @@ def read_chatroom_members(read_memory, core_base, room_wxid, *, expected_account
                 raise ValueError("群成员字符串发生变化")
             return body.decode("utf-8")
 
-        app = ptr(core_base + APP_GLOBAL_RVA)
+        app = ptr(core_base + memory_rva(wechat_version, APP_GLOBAL_RVA))
         context = ptr(app + 0x68)
         table = ptr(context)
-        if ptr(table + 0x38) != core_base + CACHE_PROVIDER_GETTER_RVA:
+        if ptr(table + 0x38) != core_base + memory_rva(wechat_version, CACHE_PROVIDER_GETTER_RVA):
             return ()
         provider = _pointer(ptr(context + 0x460))
-        if ptr(provider) != core_base + CACHE_PROVIDER_VTABLE_RVA:
+        if ptr(provider) != core_base + memory_rva(wechat_version, CACHE_PROVIDER_VTABLE_RVA):
             return ()
         registry = read(provider + 0x90, 16)
         head, size = struct.unpack("<QQ", registry)
@@ -204,7 +208,7 @@ def read_chatroom_members(read_memory, core_base, room_wxid, *, expected_account
                 break
             visited.add(node)
             value = ptr(node + 0x30)
-            if value and ptr(value) == core_base + CHATROOM_CACHE_VTABLE_RVA:
+            if value and ptr(value) == core_base + memory_rva(wechat_version, CHATROOM_CACHE_VTABLE_RVA):
                 chatroom_cache = value
                 break
             node = ptr(node)
@@ -228,6 +232,13 @@ def read_chatroom_members(read_memory, core_base, room_wxid, *, expected_account
             room_visited.add(room_node)
             if string(room_node + 0x10, 127) == room_wxid:
                 chatroom_obj = _pointer(ptr(room_node + 0x30))
+                if wechat_version != LEGACY_VERSION:
+                    # 新构建的哈希索引指向 LRU 节点，节点再持有群记录。
+                    if string(chatroom_obj + 0x10, 127) != room_wxid:
+                        return ()
+                    chatroom_obj = _pointer(ptr(chatroom_obj + 0x30))
+                    if string(chatroom_obj + 8, 127) != room_wxid:
+                        return ()
                 break
             if room_node == first:
                 break
@@ -251,7 +262,7 @@ def read_chatroom_members(read_memory, core_base, room_wxid, *, expected_account
             cur = ptr(cur)
         if (read(chatroom_obj + 0xD0, 0x38) != member_layout or
                 read(chatroom_cache + 0x48, 0x38) != layout or
-                read_current_account(read_memory, core_base) != account):
+                read_current_account(read_memory, core_base, wechat_version=wechat_version) != account):
             return ()
         return tuple(members)
     except (OSError, ValueError, struct.error):

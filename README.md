@@ -2,7 +2,7 @@
 项目已在linux.do公开声明[https://linux.do/](https://linux.do/t/topic/3029497/51)
 
 
-面向 Windows x64、微信 4.1.15.13 的 Python 插件框架。统一入口为 `main.py`，原生桥接负责文本收发与群图片接收，功能以插件加载。
+面向 Windows x64 的微信 Python 插件框架。统一入口为 `main.py`，原生桥接负责文本收发与群图片接收，功能以插件加载。支持微信 4.1.15.13 和 4.2.0.12 的指定构建；新版已实测群文本收发、引用接收、图片下载和退出重连。见[原生桥接与版本校验](native/README.md)。
 
 完整操作说明见[使用手册](使用手册.md)。已有用户可运行 `python tools/migrate_memory.py` 升级本地配置及数据库，再正常重启机器人。
 

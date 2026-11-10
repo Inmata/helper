@@ -15,25 +15,29 @@ PROVIDER, HEAD, NODE, CACHE, SENTINEL, BUCKETS, ENTRY, CONTACT, STRINGS = [
 
 
 class ContactMemory(AccountMemory):
-    def __init__(self, name='DemoUser'):
-        super().__init__()
-        self.add(BASE + CONTEXT_VTABLE_RVA, 0x80)
-        self.write(BASE + CONTEXT_VTABLE_RVA + 0x18, struct.pack('<Q', BASE + IDENTITY_GETTER_RVA))
-        self.add(BASE + CACHE_PROVIDER_GETTER_RVA + 28, 8)
-        self.write(BASE + CACHE_PROVIDER_GETTER_RVA + 28, bytes.fromhex('48 83 b9 60 04 00 00 00'))
+    def __init__(self, name='DemoUser', *, updated=False):
+        super().__init__(updated=updated)
+        context_vtable, identity_getter, getter, provider_vtable, contact_vtable = (
+            (0x90D5F68, 0x387920, 0x3847A0, 0x927B3F8, 0x9281968) if updated
+            else (CONTEXT_VTABLE_RVA, IDENTITY_GETTER_RVA, CACHE_PROVIDER_GETTER_RVA,
+                  CACHE_PROVIDER_VTABLE_RVA, CONTACT_CACHE_VTABLE_RVA))
+        self.add(BASE + context_vtable, 0x80)
+        self.q(BASE + context_vtable + 0x18, BASE + identity_getter)
+        self.add(BASE + getter + 28, 8)
+        self.write(BASE + getter + 28, bytes.fromhex('48 83 b9 60 04 00 00 00'))
         self.add(CONTEXT + 0x460, 8)
         self.write(CONTEXT + 0x460, struct.pack('<Q', PROVIDER))
-        self.write(BASE + CONTEXT_VTABLE_RVA + 0x38, struct.pack('<Q', BASE + CACHE_PROVIDER_GETTER_RVA))
+        self.q(BASE + context_vtable + 0x38, BASE + getter)
         for address, length in ((PROVIDER, 0xC0), (HEAD, 0x40), (NODE, 0x40), (CACHE, 0x200),
                                 (SENTINEL, 0x40), (BUCKETS, 32), (ENTRY, 0x40), (CONTACT, 0x100), (STRINGS, 1024)):
             self.add(address, length)
-        self.q(PROVIDER, BASE + CACHE_PROVIDER_VTABLE_RVA)
+        self.q(PROVIDER, BASE + provider_vtable)
         self.q(PROVIDER + 0x90, HEAD)
         self.q(PROVIDER + 0x98, 1)
         self.q(HEAD, NODE)
         self.q(NODE, HEAD)
         self.q(NODE + 0x30, CACHE)
-        self.q(CACHE, BASE + CONTACT_CACHE_VTABLE_RVA)
+        self.q(CACHE, BASE + contact_vtable)
         self.q(CACHE + 0xD0, SENTINEL)
         self.q(CACHE + 0xD8, 1)
         self.q(CACHE + 0xE0, BUCKETS)
@@ -125,7 +129,12 @@ class ContactTests(unittest.TestCase):
         self.assertEqual(read_contact_name(ram.read, BASE, LRU_PEER, expected_account=SELF), '群友昵称甲')
 
     def test_chatroom_cache_reads_group_member_wxids(self):
-        ram = ContactMemory('FriendUser')
+        for version, updated in (('4.1.15.13', False), ('4.2.0.12', True)):
+            with self.subTest(version=version):
+                self.check_chatroom_cache(version, updated)
+
+    def check_chatroom_cache(self, version, updated):
+        ram = ContactMemory('FriendUser', updated=updated)
         room = '12345678@chatroom'
         room_node, room_cache, room_sentinel, room_buckets, room_entry, chatroom_obj, m_sentinel, m1, m2 = [
             0x600020000 + i * 0x1000 for i in range(9)]
@@ -137,7 +146,7 @@ class ContactTests(unittest.TestCase):
         ram.q(NODE, room_node)
         ram.q(room_node, HEAD)
         ram.q(room_node + 0x30, room_cache)
-        ram.q(room_cache, BASE + CHATROOM_CACHE_VTABLE_RVA)
+        ram.q(room_cache, BASE + (0x927B688 if updated else CHATROOM_CACHE_VTABLE_RVA))
         ram.q(room_cache + 0x50, room_sentinel)
         ram.q(room_cache + 0x58, 1)
         ram.q(room_cache + 0x60, room_buckets)
@@ -149,7 +158,15 @@ class ContactTests(unittest.TestCase):
             ram.write(room_buckets + slot, struct.pack('<QQ', room_sentinel, room_sentinel))
         ram.write(room_buckets + (hashed & 1) * 16, struct.pack('<QQ', room_entry, room_entry))
         ram.s(room_entry + 0x10, room, STRINGS + 512)
-        ram.q(room_entry + 0x30, chatroom_obj)
+        if updated:
+            lru = 0x60002A000
+            ram.add(lru, 0x40)
+            ram.q(room_entry + 0x30, lru)
+            ram.s(lru + 0x10, room, STRINGS + 896)
+            ram.q(lru + 0x30, chatroom_obj)
+            ram.s(chatroom_obj + 8, room, STRINGS + 960)
+        else:
+            ram.q(room_entry + 0x30, chatroom_obj)
         ram.q(chatroom_obj + 0xD8, m_sentinel)
         ram.q(chatroom_obj + 0xE0, 2)
         ram.q(m_sentinel, m1)
@@ -157,4 +174,7 @@ class ContactTests(unittest.TestCase):
         ram.q(m2, m_sentinel)
         ram.s(m1 + 0x10, PEER, STRINGS + 640)
         ram.s(m2 + 0x10, LRU_PEER, STRINGS + 768)
-        self.assertEqual(read_chatroom_members(ram.read, BASE, room, expected_account=SELF), (PEER, LRU_PEER))
+        self.assertEqual(read_chatroom_members(ram.read, BASE, room, expected_account=SELF,
+                                               wechat_version=version), (PEER, LRU_PEER))
+        self.assertEqual(read_contact_name(ram.read, BASE, PEER, expected_account=SELF,
+                                           wechat_version=version), 'FriendUser')

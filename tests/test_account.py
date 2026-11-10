@@ -17,22 +17,25 @@ SELF = "wxid_framework_current"
 
 
 class AccountMemory:
-    def __init__(self, account=SELF):
+    def __init__(self, account=SELF, *, updated=False):
         self.regions = {}
-        self.add(BASE + APP_GLOBAL_RVA, 8)
+        app_global, app_vtable, context_vtable, identity_getter = (
+            (0xBD0CE30, 0x9055B98, 0x90D5F68, 0x387920) if updated
+            else (APP_GLOBAL_RVA, APP_VTABLE_RVA, CONTEXT_VTABLE_RVA, IDENTITY_GETTER_RVA))
+        self.add(BASE + app_global, 8)
         self.add(APP, 0x80)
-        self.add(BASE + APP_VTABLE_RVA, 0x80)
+        self.add(BASE + app_vtable, 0x80)
         self.add(CONTEXT, 0x100)
-        self.add(BASE + CONTEXT_VTABLE_RVA, 0x20)
-        self.add(BASE + IDENTITY_GETTER_RVA, 5)
+        self.add(BASE + context_vtable, 0x20)
+        self.add(BASE + identity_getter, 5)
         self.add(HEAP, 128)
-        self.write(BASE + APP_GLOBAL_RVA, struct.pack("<Q", APP))
-        self.write(APP, struct.pack("<Q", BASE + APP_VTABLE_RVA))
+        self.write(BASE + app_global, struct.pack("<Q", APP))
+        self.write(APP, struct.pack("<Q", BASE + app_vtable))
         self.write(APP + 0x68, struct.pack("<Q", CONTEXT))
-        self.write(BASE + APP_VTABLE_RVA + 0x60, struct.pack("<Q", BASE + APP_CONTEXT_GETTER_RVA))
-        self.write(CONTEXT, struct.pack("<Q", BASE + CONTEXT_VTABLE_RVA))
-        self.write(BASE + CONTEXT_VTABLE_RVA + 0x18, struct.pack("<Q", BASE + IDENTITY_GETTER_RVA))
-        self.write(BASE + IDENTITY_GETTER_RVA, b"\x48\x8d\x41\x48\xc3")
+        self.write(BASE + app_vtable + 0x60, struct.pack("<Q", BASE + APP_CONTEXT_GETTER_RVA))
+        self.write(CONTEXT, struct.pack("<Q", BASE + context_vtable))
+        self.write(BASE + context_vtable + 0x18, struct.pack("<Q", BASE + identity_getter))
+        self.write(BASE + identity_getter, b"\x48\x8d\x41\x48\xc3")
         self.set_account(account)
         # 微信号和账号 ID 是不同字段，不能把旁边的别名当成自身 ID。
         alias = b"alias_name"
@@ -66,6 +69,12 @@ class AccountMemory:
 
 
 class AccountTests(unittest.TestCase):
+    def test_updated_account_layout_is_version_bound(self):
+        updated = AccountMemory(updated=True)
+        self.assertEqual(read_current_account(updated.read, BASE, wechat_version="4.2.0.12"), SELF)
+        self.assertIsNone(read_current_account(updated.read, BASE))
+        self.assertIsNone(read_current_account(AccountMemory().read, BASE, wechat_version="4.2.0.12"))
+
     def test_current_profile_reads_only_id_and_wechat_name(self):
         ram = AccountMemory()
         name = '测试号🌸'.encode('utf-8')

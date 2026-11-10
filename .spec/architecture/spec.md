@@ -60,6 +60,7 @@ related:
 - 只有显式初始化会建库与迁移：`app/bootstrap.py` 的 `startup_services()` 与 `open_knowledge()`；解析配置、读取插件上下文属性不写数据库。
 - 停止顺序与未完成时的处理见 [lifecycle](../lifecycle/spec.md)；检查命令（`--check` / `--list-plugins`）不建库、不注入微信、不请求模型。
 - 图片保存目录由 `image_directory` 配置（默认 `.runtime/images`），原生服务按账号隔离后交给 `ImageStore`；原始图片 XML、CDN 地址与密钥只存在于解析和下载请求内部，不进入插件消息。
+- 原生加载只接受已知客户端版本和核心文件指纹。账号、联系人和原生调用按同一构建选择地址；4.2.0.12 使用本项目配套的 `native_text` 桥接。
 - 图片能力只按已编译桥接的实际导出声明：同时存在 V4 媒体队列与 `WxDownloadImage` 时才把 `image.receive` 等加入后端能力；旧 V3/V2 DLL 不声明，依赖图片能力的插件不会加载。`mention_chat` 不把图片能力写进 `requires`，按运行时能力决定能否看图，旧 DLL 下仍可联网搜索。
 - 最近图片索引 `recent_images.RECENT_IMAGES` 是进程内单例：原生服务写、艾特回复读，按群有界、服务启动时清空，不落库。
 

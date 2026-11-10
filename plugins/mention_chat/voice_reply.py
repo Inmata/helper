@@ -49,7 +49,8 @@ class VoiceReply:
         if self._xuanshen is not None:
             try:
                 wav = self._xuanshen.synthesize(reply)
-                voice = "炫神"
+                if wav is not None:
+                    voice = "炫神"
             except (OSError, ValueError) as error:
                 ctx.logger.warning("炫神语音合成失败，改用 Windows 音色：%s", type(error).__name__)
                 self.close()

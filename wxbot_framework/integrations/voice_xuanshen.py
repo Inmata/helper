@@ -31,7 +31,7 @@ class XuanShenVoice:
             while header := wire.read(_LENGTH.size):
                 size, = _LENGTH.unpack(header)
                 self._responses.put(wire.read(size))
-        self._responses.put(b"")
+        self._responses.put(None)
 
     def synthesize(self, text):
         with self._lock:
@@ -42,15 +42,23 @@ class XuanShenVoice:
             except Empty:
                 self.close()
                 raise TimeoutError("炫神语音合成超时") from None
-            if not audio:
+            if audio is None:
                 raise OSError("炫神语音合成没有返回音频")
-            return audio
+            return audio or None
 
     def close(self):
         if self._process.poll() is None:
             self._process.terminate()
         self._process.wait()
         self._process.stdin.close()
+
+
+def _short_samples(model, text):
+    max_seconds = 2 + len(text) / 4
+    # 炫神每秒解码 25 个 token；parrots 将 t2s_max_sec 乘 50 作为 token 上限。
+    model.t2s_max_sec = max_seconds / 2
+    samples = model.predict(text, text_language="zh", top_k=1)
+    return samples if len(samples) <= max_seconds * model.sampling_rate else None
 
 
 def _worker():
@@ -77,11 +85,15 @@ def _worker():
         device="cuda", half=True, ensure_nltk=False,
     )
     with torch.inference_mode():
-        model.predict("大家好。", text_language="zh")
+        _short_samples(model, "大家好。")
     print(f"炫神音色已预热：{time.perf_counter() - started:.2f} 秒", file=sys.stderr)
     for line in sys.stdin.buffer:
         with torch.inference_mode():
-            samples = model.predict(line.decode("utf-8").strip(), text_language="zh")
+            samples = _short_samples(model, line.decode("utf-8").strip())
+        if samples is None:
+            wire.write(_LENGTH.pack(0))
+            wire.flush()
+            continue
         wav = BytesIO()
         samples = resample_poly(samples, 16000, model.sampling_rate)
         soundfile.write(wav, samples, 16000, format="WAV", subtype="PCM_16")

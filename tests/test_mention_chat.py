@@ -707,7 +707,7 @@ class ColdReplyTests(unittest.TestCase):
         self.ask("搜一下")
         first = self.ctx.sent[-1]
         self.assertEqual(self.ctx.at_target, self.PLAYER)
-        self.assertEqual(first, ("reply_at", "收到，今天的演出我就看到这儿。"))
+        self.assertEqual(first, ("reply_at", "咋了，离了我你这话就不会说了？"))
         self.now += 599
         self.ask("还在吗")
         self.assertEqual(len(self.ctx.sent), 2)
@@ -717,7 +717,7 @@ class ColdReplyTests(unittest.TestCase):
         self.assertEqual(self.ctx.completions, 2)
         self.now += 1
         self.ask("还在吗")
-        self.assertEqual(self.ctx.sent[-1], ("reply_at", "你这段循环播放，我这边就不续费了。"))
+        self.assertEqual(self.ctx.sent[-1], ("reply_at", "又点我名。你是有事，还是就想看我搭不搭理你？"))
         self.assertEqual(self.ctx.completions, 2)
 
     def test_number_lookup_restart_expiry_and_early_release(self):

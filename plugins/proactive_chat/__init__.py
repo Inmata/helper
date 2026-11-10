@@ -24,7 +24,7 @@ from wxbot_framework.conversation.planner import (PERSONA_SUMMARY, REPLY, WAIT, 
 from wxbot_framework.conversation.turns import judge_turn
 from wxbot_framework.conversation.utterance import CHAT, InterjectionGate, SpeakResult, interjection_probe, speak
 from wxbot_framework.integrations.llm import LLMError
-from wxbot_framework.messaging.mentions import at_source
+from wxbot_framework.messaging.mentions import addressed_elsewhere, at_source
 from wxbot_framework.timeutil import describe_local, parse_utc
 
 GAME_FEATURE = "idiom_chain"
@@ -136,8 +136,8 @@ class Plugin:
             # 任何群友新消息（含艾特）都让正在判断、生成或发送的一轮作废，挂着的复判也一并作废。
             self._versions[room] = self._versions.get(room, 0) + 1
             self._waiting.pop(room, None)
-            if mentioned:
-                # 艾特由 mention_chat 回复；这一轮不再主动插话。
+            if mentioned or addressed_elsewhere(message):
+                # 已有明确的对话对象时，这一轮不主动插话。
                 self._pending.pop(room, None)
                 return
             now = self.clock()

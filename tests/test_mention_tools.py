@@ -61,6 +61,8 @@ class FakeJev:
         self.calls, self.timeouts = [], []
 
     def noul(self, state, questions, *, timeout=None):
+        if "拟发送的回答" in state:
+            return [0.95]
         kind = "vision" if "图片" in questions[0]["instructions"] else "search"
         self.calls.append((kind, state))
         self.timeouts.append(timeout)
@@ -674,6 +676,8 @@ class MentionChatToolTests(unittest.TestCase):
     def test_quoted_price_update_searches_with_prior_product_but_thanks_does_not(self):
         class FollowupJev(FakeJev):
             def noul(self, state, questions, *, timeout=None):
+                if "拟发送的回答" in state:
+                    return [0.95]
                 self.calls.append(state)
                 context = state.get("补充语境", "")
                 return [0.96 if state["提问"] == "双11" and "9800X3D" in context else 0.02]
@@ -697,7 +701,8 @@ class MentionChatToolTests(unittest.TestCase):
         base = {"received_at": now - timedelta(seconds=20), "speaker_name": "群友"}
         history = ({**base, "text": "ig打谁", "sender_id": OTHER, "bot_generated": 0},
                    {**base, "text": "你问的是哪个比赛啊", "sender_id": ROBOT, "bot_generated": 1},
-                   {**base, "text": "老头杯还是德杯？", "sender_id": ROBOT, "bot_generated": 1})
+                   {**base, "text": "老头杯还是德杯？", "sender_id": ROBOT, "bot_generated": 1},
+                   {**base, "text": "[笑哭]", "sender_id": OTHER, "bot_generated": 0})
         snapshot = plugin.members.conversation_snapshot
         plugin.members.conversation_snapshot = lambda msg: replace(snapshot(msg), history=history)
         image(RECENT_IMAGES, message_id=1)
@@ -707,7 +712,20 @@ class MentionChatToolTests(unittest.TestCase):
         self.assertIn("ig打谁", ctx.magpie.queries[0])
         self.assertIn("S16", ctx.magpie.queries[0])
         self.assertNotIn("老头杯", ctx.magpie.queries[0])
+        self.assertIn("【本轮接话】", ctx.last_user)
         self.assertIn("【联网搜索结果】", ctx.last_user)
+
+    def test_rewrites_search_reply_with_an_unsupported_extra_claim(self):
+        class EvidenceJev(FakeJev):
+            def noul(self, state, questions, *, timeout=None):
+                return [0.03 if "FLY" in state.get("拟发送的回答", "") else 0.95]
+
+        magpie = FakeMagpie(search="当届官方赛果：BLG 3比1 战胜 T1。")
+        plugin, ctx = self.build(["T1输了，GEN也被FLY淘汰了。", "T1半决赛1比3输给BLG了。"],
+                                 jev=EvidenceJev(), magpie=magpie)
+        plugin.on_message(mention("T1不是输了？"), ctx)
+        self.assertEqual(len(magpie.queries), 1)
+        self.assertEqual(ctx.sent, [("reply_at", "T1半决赛1比3输给BLG了。")])
 
     def test_two_slow_turns_do_not_hold_a_fast_reply_and_same_sender_keeps_order(self):
         started, release, dispatched, followed = (threading.Event() for _ in range(4))
@@ -844,11 +862,11 @@ class MentionChatToolTests(unittest.TestCase):
         self.assertEqual(ctx.sent, [("reply_at", "3.14 发了（官网）。见")])
         self.assertNotIn("http", ctx.sent[0][1])
 
-    def test_failed_search_is_told_to_model(self):
-        plugin, ctx = self.build("没查到，搜索挂了", magpie=FakeMagpie(error=MagpieToolsUnavailableError("x")))
+    def test_failed_search_replies_without_model_guessing(self):
+        plugin, ctx = self.build("这是没查到却生成的猜测", magpie=FakeMagpie(error=MagpieToolsUnavailableError("x")))
         plugin.on_message(mention("帮我搜一下今天的新闻"), ctx)
-        self.assertIn("（没成功）工具服务连不上或超时", ctx.last_user)
-        self.assertEqual(ctx.sent, [("reply_at", "没查到，搜索挂了")])
+        self.assertEqual(ctx.sent, [("reply_at", "这条我还没核实，工具服务连不上或超时。")])
+        self.assertEqual(ctx.completions, 0)
 
     def test_search_retry_reuses_the_original_target_after_a_failure(self):
         magpie = FakeMagpie(error=MagpieToolsUnavailableError("x"))

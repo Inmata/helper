@@ -11,7 +11,7 @@
 * 重试：明确要求重试搜索时沿用同一发言者上次搜索词；没有可沿用的目标时请对方补充。
 * 预算：普通看图最多一次，明确要求都看时最多三张；每轮最多搜索一次，所有工具共用同一截止时间。
   客户端的超时只约束单次 socket 操作，所以每次判断 / 调用都在单独线程里执行、最多等到
-  剩余时间，迟到的结果丢弃。艾特没有正文时，提问人 90 秒内的上一条发言当作问题来判断。工具失败如实交给模型说明。回复里不带网址（见 ``strip_links``）。
+  剩余时间，迟到的结果丢弃。艾特没有正文时，提问人 90 秒内的上一条发言当作问题来判断。搜索失败直接说明未核实。回复里不带网址（见 ``strip_links``）。
 """
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from ..recent_images import FAILED, PENDING, READY, SKIPPED
 from ..timeutil import parse_utc
 from .members import SnapshotExpired
 from .tool_router import MAX_QUESTION_CHARS, ToolTurn, read_options
+from .turns import TurnFocus
 
 VISION = "vision"
 SEARCH = "search"
@@ -50,8 +51,6 @@ _PUBLIC_FACT_CHALLENGE = re.compile(r"不是(?:同一个|一个)(?:游戏|作品
 _PUBLIC_TOPIC_WORDS = ("游戏", "作品", "版本", "发售", "发布", "时间线", "官网", "Steam")
 _PUBLIC_TITLE = re.compile(r"《([^《》\r\n]{2,48})》")
 PREVIOUS_QUESTION_SECONDS = 90
-CLARIFICATION_SECONDS = 60
-_CLARIFYING = re.compile(r"你(?:问|指|说)的是|哪个|哪(?:一)?[场款天年]|什么(?:时间|平台|赛事)|还是[^。！!]{1,18}[?？]")
 IMPLICIT_QUESTION_CHARS = 4  # 艾特正文的字母和数字合计不超过这么多（标点、表情符号不计）当作没有实质问题
 MENTION_MARK = chr(0x2005)  # 微信 @ 后面的分隔符：带它的上一条发言本身是一次艾特，已经回答过
 PENDING_WAIT_SECONDS = 6
@@ -71,6 +70,7 @@ NO_IMAGE_SUPPORT = "我这边暂时收不到图片，看不了图"
 TOO_MANY_IMAGES = "一次最多看三张，你分几次发，或者引用最想看的那张。"
 ASK_SEARCH_TARGET = "我没找到你上一次搜的内容，把要查的东西再说一遍。"
 ASK_PUBLIC_SEARCH_TARGET = "你想联网核对哪件事？把名字或要查的内容再说一遍。"
+UNVERIFIED_REPLY = "这条我还没核实，先不下结论。"
 
 _STATUS_NOTE = {FAILED: "图片没下载成功", SKIPPED: "图片没有下载", PENDING: "图片还在下载，没等到"}
 _ERROR_NOTE = {"MagpieToolsUnavailableError": "工具服务连不上或超时", "MagpieToolsAuthError": "工具服务鉴权失败",
@@ -106,6 +106,7 @@ class ToolOutcome:
     image_choices: tuple = ()
     search_query: str = ""
     search_subject: str = ""
+    context: str = ""
 
     @property
     def used(self):
@@ -135,23 +136,6 @@ def wants(text, hints):
 def vague_question(text):
     """艾特正文的字母和数字合计不超过 4 个（标点、表情符号不计；空、“现在呢”“咋样”）：没有实质问题。"""
     return sum(char.isalnum() for char in text or "") <= IMPLICIT_QUESTION_CHARS
-
-
-def recent_clarification(history, now):
-    """刚问完缺哪项条件时，沿用这轮原问题，不受原提问人与补充人是否相同影响。"""
-    replies = []
-    for row in reversed(history[-4:]):
-        if not 0 <= (now - parse_utc(row["received_at"])).total_seconds() <= CLARIFICATION_SECONDS:
-            break
-        text = strip_at_labels(row["text"]).strip()
-        if row.get("bot_generated") or row.get("is_self"):
-            replies.append(text)
-        else:
-            reply = " ".join(reversed(replies))[:220]
-            if _CLARIFYING.search(reply):
-                return text[:180], reply
-            break
-    return "", ""
 
 
 def strip_links(reply):
@@ -284,16 +268,17 @@ class MentionTools:
                 return result.value
 
     def steps(self, *, question, room, sender, received_at, quote=None, context_question="", image_choices=(),
-              previous_search="", followup_topic=None, previous_subject="", search_reference="", search_date="",
-              clarification=("", "")):
+              previous_search="", followup_topic=None, previous_subject="", focus=None, search_date=""):
         """``context_question``：艾特没有正文时提问人上一条发言（见 ``previous_question``），只用来判断和调用工具。"""
         started = self.clock()
         deadline = started + self.budget
         quote = quote or {}
         has_quote = any(quote.get(key) for key in ("name", "text", "ref_type"))  # 引用了任意一条消息
-        outcome = ToolOutcome()
         asked = question  # 艾特自己的正文；回填上一句话后仍用它判断这次艾特有没有实质问题
-        question = question or context_question
+        focus = focus or TurnFocus(question or context_question)
+        question = focus.question
+        context = focus.context(previous_subject if focus.reference else "")
+        outcome = ToolOutcome(context=context)
         retry = _SEARCH_RETRY.search(question.strip())
         if retry and (previous_search or retry[1] not in ("重试", "重试一下")):
             if not previous_search:
@@ -304,6 +289,8 @@ class MentionTools:
             yield
             result = self._search(previous_search, deadline)
             outcome.results.append(replace(result, search_target=previous_search))
+            if not result.ok:
+                outcome.ask = f"这条我还没核实，{result.note}。"
             return self._finish(outcome, started)
         if followup_topic is not None:
             if not followup_topic:
@@ -338,12 +325,9 @@ class MentionTools:
         turn = ToolTurn(self.router, question=(question or "（只艾特了机器人，没有正文）")[:MAX_QUESTION_CHARS],
                         has_image=has_image)
 
-        clarified_question, clarification_reply = clarification
-        clarification_context = (f"待回答的群友问题：{clarified_question}\n机器人刚追问：{clarification_reply}"
-                                 if clarified_question else "")
         vision_reason = "explicit" if (quoted_image or explicit_vision) else None
         if vision_reason is None and has_image:
-            if not has_quote and not clarification_context and own_candidates and vague_question(asked) and not any(
+            if not has_quote and not context and own_candidates and vague_question(asked) and not any(
                     c.isascii() and c.isalnum() for c in asked):
                 # 没有引用、提问人自己刚发了一张没看过的图，这次艾特又没问出实质内容（只有艾特、“现在呢”）：
                 # 默认就是要看那张图，不必再让 Jev 判断（实测这类提问概率偏低，容易被拒）。
@@ -351,7 +335,7 @@ class MentionTools:
                 self.logger.info("艾特工具：隐式看图，跳过看图判断")
                 vision_reason = "implicit"
             else:
-                decision = self._judge(lambda *, timeout: turn.consider_vision(context=clarification_context, timeout=timeout),
+                decision = self._judge(lambda *, timeout: turn.consider_vision(context=context, timeout=timeout),
                                        deadline, "看图")
                 vision_reason = "jev" if decision is not None and decision.use else None
         vision_text = None
@@ -386,28 +370,29 @@ class MentionTools:
                 turn.record_vision(vision_text)
             search_reason = "explicit" if explicit_search else None
             if search_reason is None:
-                context = clarification_context or (
-                    f"此前搜索词：{previous_subject[:230]}\n上轮答复：{search_reference[:220]}"
-                    if previous_subject and search_reference else "")
                 decision = self._judge(lambda *, timeout: turn.consider_search(context=context, timeout=timeout),
                                        deadline, "搜索")
                 search_reason = "jev" if decision is not None and decision.use else None
             if search_reason:
                 query = _search_query(question, vision_text)
-                subject = clarified_question or (previous_subject if search_reference else "")
-                if subject:
-                    query = (f"本轮问题：{query[:500]}\n可能承接的公开搜索主题：{subject[:180]}\n"
-                             "以本轮为准，仅在相关时沿用此前主题。")
-                if search_date and (subject or search_reason == "jev"):
+                subject = focus.anchor or (previous_subject if focus.reference else "")
+                if context:
+                    query = f"本轮问题：{query[:500]}\n可能承接的公开搜索主题：{subject[:180]}\n"
+                    if focus.reference and not focus.clarifying:
+                        query += f"待核对的前文：{focus.reference[:220]}\n"
+                    query += "以本轮为准，前文只用于定位对象和待核对说法。"
+                if search_date and (context or search_reason == "jev"):
                     outcome.search_subject = subject or question
-                    query = (f"{query[:750]}\n核对日期：{search_date}。优先用一手来源；赛事赛程、赛果和队伍归属"
-                             "优先核对赛事官网的当届记录。区分俱乐部来源、当前赛区和队员国籍，只写查到的内容。")
+                    query = (f"{query[:750]}\n核对日期：{search_date}。优先用相应日期的一手来源，标明资料适用的时间、"
+                             "版本或场次。只查本轮问题；资料只支持一部分时说明哪些细节没核实。")
                 outcome.search_query = query[:1000]
                 yield
                 result = self._search(outcome.search_query, deadline)
                 outcome.results.append(result)
                 if result.ok:
                     turn.record_search(result.text)
+                else:
+                    outcome.ask = f"这条我还没核实，{result.note}。"
         return self._finish(outcome, started)
 
     def _finish(self, outcome, started):

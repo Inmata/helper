@@ -15,16 +15,17 @@ from .voice_reply import COMMAND as VOICE_COMMAND, VOICE_PROMPT, VoiceReply, voi
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue, resolve_reply_quote
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
 from wxbot_framework.conversation.mention_tools import (ASK_PUBLIC_SEARCH_TARGET, ASK_SEARCH_TARGET, IMAGE_WINDOW_SECONDS,
-                                                        SEARCH_RETRY_SECONDS, MentionTools, ToolOutcome,
-                                                        previous_question, public_search_topic, read_tool_options, recent_clarification,
+                                                        SEARCH_RETRY_SECONDS, UNVERIFIED_REPLY, MentionTools, ToolOutcome,
+                                                        previous_question, public_search_topic, read_tool_options,
                                                         strip_links)
 from wxbot_framework.conversation.repetition import too_similar
-from wxbot_framework.conversation.turns import COLLECT_SECONDS, judge_turn, likely_incomplete, turn_key
-from wxbot_framework.conversation.tool_router import JevToolRouter
+from wxbot_framework.conversation.turns import (COLLECT_SECONDS, TurnFocus, exchange_intent, judge_turn,
+                                                likely_incomplete, recent_exchange, turn_key)
+from wxbot_framework.conversation.tool_router import REJECTED, JevToolRouter
 from wxbot_framework.recent_images import RECENT_IMAGES
 from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.conversation.members import BEIJING, SnapshotExpired
-from wxbot_framework.messaging.mentions import at_source, bot_names, strip_at_labels, typed_at
+from wxbot_framework.messaging.mentions import addressed_elsewhere, at_source, bot_names, strip_at_labels, typed_at
 from wxbot_framework.conversation.personality import personality_text
 from wxbot_framework.conversation.utterance import (CHAT, DETAIL, QA, InterjectionGate, SpeakResult, classify_tier,
                                                     interjection_probe, speak)
@@ -230,18 +231,23 @@ class Plugin:
             last_search, last_subject = _tool_followup(self._last_searches, key, arrived, SEARCH_RETRY_SECONDS) or ("", "")
         raw_quote = message.data.get("quote") or {}
         bot_quote = self.members.account in (raw_quote.get("fromusr"), raw_quote.get("chatusr"))
-        reference = (resolved_quote or {}).get("text", "") if bot_quote else ""
-        if follow:
+        focus = TurnFocus(question or context_question)
+        if bot_quote and resolved_quote:
+            focus = replace(focus, reference=resolved_quote["text"][:220])
+        elif follow:
             previous = self.members.turns.continuation(message)
             if previous is not None:
-                reference = previous.text
-        clarification = (recent_clarification(snapshot.history, now)
-                         if snapshot is not None and not raw_quote and 0 < len(question) <= 16 else ("", ""))
+                focus = replace(focus, anchor=previous.question[:180], reference=previous.text[:220])
+        elif snapshot is not None and not raw_quote and question:
+            anchor, reference = recent_exchange(snapshot.history, now)
+            intent = exchange_intent(question, reference) if anchor else ""
+            if intent and self._turn_judge(ctx, intent, anchor, previous=reference, new=question):
+                focus = replace(focus, anchor=anchor, reference=reference, clarifying=intent == "clarify")
         outcome = yield from tools.steps(question=question, room=message.chat_id, sender=message.sender_id,
-                                         received_at=arrived, quote=message.data.get("quote"), context_question=context_question,
+                                         received_at=arrived, quote=message.data.get("quote"),
                                          image_choices=choices, previous_search=last_search, followup_topic=followup_topic,
-                                         previous_subject=last_subject, search_reference=reference,
-                                         search_date=now.astimezone(BEIJING).date().isoformat(), clarification=clarification)
+                                         previous_subject=last_subject, focus=focus,
+                                         search_date=now.astimezone(BEIJING).date().isoformat())
         with self._followup_lock:
             if outcome.image_choices:
                 _remember_tool_followup(self._image_choices, key, arrived, outcome.image_choices)
@@ -308,8 +314,7 @@ class Plugin:
         clean_query = self._clean_query(message, source)
         depth = 0
         if source is None:
-            if (turns is None or not clean_query or turns.active(message) or message.data.get("quote")
-                    or message.data.get("at_members") or message.text.startswith("@")):
+            if turns is None or not clean_query or turns.active(message) or addressed_elsewhere(message):
                 return
             previous = turns.continuation(message)
             if previous is None or not self._turn_judge(ctx, "follow", previous.question,
@@ -467,17 +472,23 @@ class Plugin:
                 return
             if outcome.used:
                 options["tool_results"] = outcome.payload()
+            if outcome.context:
+                options["turn_context"] = outcome.context
             can_voice = not detail and not outcome.used and "voice.send" in getattr(ctx, "capabilities", ())
             if can_voice:
                 options["system"] = SYSTEM + VOICE_PROMPT
 
-            def generate(avoid=None):
+            def generate(avoid=None, *, evidence_only=False):
                 self._ensure_running()
+                prompt_options = options if not evidence_only else {
+                    **options, "system": SYSTEM + "\n只回答本轮被问的那一点。删掉联网资料没有明确支持的细节；"
+                    "前一轮的说法待核对。无法核对的部分直接说没核实。",
+                }
                 text = personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(
                     snapshot, knowledge=context.knowledge, style=context.style,
                     speaker_profile=context.speaker_profile, people=context.people,
                     room_game=self.game_context(game) if game else None, quote=quote, avoid=avoid,
-                    question=clean_query, **options),
+                    question=clean_query, **prompt_options),
                     personality.name)
                 text, preference = voice_reply_format(text) if can_voice else (text, None)
                 if not text:
@@ -498,6 +509,26 @@ class Plugin:
                     reply, voice_preference = retried, retried_preference
                     if too_similar(reply, self._recent_bot_texts(message.chat_id)):
                         ctx.logger.info("艾特回复重说后仍相近，按原样发送：room=%s", message.chat_id)
+            search = next((item for item in outcome.results if item.tool == "search" and item.ok), None)
+            if search is not None:
+                try:
+                    verifier = JevToolRouter(ctx.jev)
+                except ValueError:
+                    verifier = JevToolRouter(None)
+                evidence = strip_links(search.text)
+                vision = "\n".join(item.text for item in outcome.results if item.tool == "vision" and item.ok)
+
+                def rejected(text):
+                    decision = verifier.verify_answer(question=clean_query, context=outcome.context,
+                                                      evidence=evidence, answer=text, vision=vision)
+                    ctx.logger.info("艾特回复证据核对：status=%s p=%s", decision.status, decision.probability)
+                    return decision.status == REJECTED
+                if rejected(reply):
+                    try:
+                        revised, _ = generate(evidence_only=True)
+                    except LLMError:
+                        revised = UNVERIFIED_REPLY
+                    reply = UNVERIFIED_REPLY if revised != UNVERIFIED_REPLY and rejected(revised) else revised
             # 用了工具的回复按问答单条发出；带网址的消息容易触发微信风控，模型照抄了网址也在这里去掉。
             if outcome.used:
                 reply = strip_links(reply) or reply

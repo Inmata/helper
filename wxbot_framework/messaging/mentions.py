@@ -218,3 +218,9 @@ def at_source(message, members, aliases=()):
     if "@" in text and typed_at(text, bot_names(members, message.chat_id, aliases)):
         return "typed"
     return None
+
+
+def addressed_elsewhere(message):
+    """调用方先排除叫机器人的消息；剩下的艾特与引用按对别人说处理。"""
+    return bool(message.data.get("at_members") or message.data.get("quote") or
+                _VISIBLE_AT.search(message.text) or message.text.lstrip().startswith("@"))

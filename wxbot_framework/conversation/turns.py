@@ -1,15 +1,21 @@
 """短时接话：已入库的消息、还没发出的回复、刚成功发出的上一轮。"""
 from collections import deque
 from dataclasses import dataclass, field
+import re
 from threading import Condition
 from time import monotonic
 
 from ..commands import is_control
 from ..integrations.jev import JevError
+from ..messaging.mentions import strip_at_labels
+from ..timeutil import parse_utc
 
 COLLECT_SECONDS = 5
 FOLLOW_SECONDS = 30
 FOLLOW_LIMIT = 2
+CLARIFICATION_SECONDS = 90
+_QUESTION = re.compile(r"[?？]|你(?:问|指|说)的是|哪个|哪(?:一)?[场款天年]")
+_REFERS_BACK = re.compile(r"不是|刚才|你(?:说|讲)|我说的是|到底|不对吧|(?:^|[，。])那|这(?:个|事|说法)|他们")
 
 
 def turn_key(message):
@@ -31,6 +37,10 @@ def judge_turn(jev, intent, question, *, previous="", new=""):
                   "只是感叹、催促、重复同一句、在和其他人说话，或提出独立的新问题。"),
         "follow": ("同一人明确在对机器人追问上一轮，指向机器人的答复或同一件事里的未解问题。",
                    "纯感叹或评价、和其他人说话、另起话题，或不清楚是不是在问机器人。"),
+        "clarify": ("新话正好补齐机器人刚问的条件，例如地区、年份、型号、哪场比赛。允许另一位群友补充。",
+                    "是道谢、单独的新问题、在和别人说话，或没有补充这轮缺的条件。"),
+        "refer": ("新话确实在追问或纠正机器人刚才对原问题的答复。",
+                  "只是用了相似的字眼，但在谈另一件事、跟别人说话，或只是道谢和感叹。"),
         "hook": ("这些原话在同一个尚未结束的话题里构成重复的梗，新话再次指向这个梗，有合适的接法。",
                  "只是词语巧合、例行重复、换了话题、严肃沟通，或接梗会打断别人。"),
     }
@@ -43,6 +53,48 @@ def judge_turn(jev, intent, question, *, previous="", new=""):
     except (JevError, OSError):
         return False
     return p >= 0.70
+
+
+@dataclass(frozen=True)
+class TurnFocus:
+    question: str
+    anchor: str = ""
+    reference: str = ""
+    clarifying: bool = False
+
+    def context(self, previous_search=""):
+        return "\n".join(text for text in (
+            f"所接的原问题：{self.anchor}" if self.anchor else "",
+            f"引用或前一轮答复（待核对）：{self.reference}" if self.reference else "",
+            f"此前的搜索对象（仅在相关时参考）：{previous_search[:220]}" if previous_search else "",
+        ) if text)
+
+
+def recent_exchange(history, now):
+    """找最近一次回复和它前面的原话，允许其后夹着几句其他群聊。"""
+    rows = history[-8:]
+    bot = lambda row: row.get("bot_generated") or row.get("is_self")
+    for i in range(len(rows) - 1, 0, -1):
+        if not bot(rows[i]):
+            continue
+        if not 0 <= (now - parse_utc(rows[i]["received_at"])).total_seconds() <= CLARIFICATION_SECONDS:
+            break
+        end = i + 1
+        while i > 0 and bot(rows[i - 1]):
+            i -= 1
+        if i == 0:
+            break
+        reply = " ".join(strip_at_labels(row["text"]).strip() for row in rows[i:end])[:220]
+        return strip_at_labels(rows[i - 1]["text"]).strip()[:180], reply
+    return "", ""
+
+
+def exchange_intent(question, reply):
+    if 0 < len(question) <= 24 and _QUESTION.search(reply):
+        return "clarify"
+    if _REFERS_BACK.search(question):
+        return "refer"
+    return ""
 
 
 @dataclass

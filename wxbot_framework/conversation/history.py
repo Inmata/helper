@@ -122,7 +122,7 @@ class ConversationHistory:
             return bool(state and (not members.daily_clear or state[0] == snapshot.day)
                         and state[1] == snapshot.generation)
 
-    def conversation_snapshot(self, message, *, group_limit=25):
+    def conversation_snapshot(self, message, *, group_limit=25, group_only=False):
         """以当前消息为锚点，读取跨天的本人 10 条与全群近期上下文。"""
         members = self.members
         if message.chat_id not in members.groups:
@@ -136,15 +136,18 @@ class ConversationHistory:
                                (members.account, message.chat_id)).fetchone()
             if anchor is None or anchor <= state[1]:
                 raise SnapshotExpired("当前消息已被重置")
+            group = self.recent_rows(message.chat_id, limit=group_limit, before_id=anchor, context=True)
+            member = members.find_by_wxid(message.sender_id, message.chat_id)
+            name = member.name if member else members.safe_wechat_name(message.sender_id, message.chat_id) or "群友"
+            if group_only:
+                return ConversationSnapshot(message.chat_id, day, state[0], name, (), message.text,
+                                            tuple(self.label_speakers(group, message.chat_id)), anchor)
             previous = self.recent_rows(message.chat_id, limit=10, sender_id=message.sender_id,
                                         before_id=anchor, context=True)
-            group = self.recent_rows(message.chat_id, limit=group_limit, before_id=anchor, context=True)
             # 真实收发顺序（含机器人自己的回复）用于多轮承接，30 分钟无新消息视为换话题。
             history = self.recent_rows(message.chat_id, limit=40, before_id=anchor, context=True,
                                        include_bot=True, continuity_seconds=1800)
             previous_ids = {row["id"] for row in previous}
-            member = members.find_by_wxid(message.sender_id, message.chat_id)
-            name = member.name if member else members.safe_wechat_name(message.sender_id, message.chat_id) or "群友"
             speakers = {message.sender_id: ("P1", name, member)}
             group = self.label_speakers([row for row in group if row["id"] not in previous_ids],
                                         message.chat_id, speakers=speakers)

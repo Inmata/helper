@@ -280,16 +280,15 @@ class NativeTextService(NativeFileHelperService):
         if data:
             data["native_message_id"] = str(getattr(message, "native_message_id", 0) or "")
             if message.type == 34:
-                return self._transcribe_voice(message, data)
-            if forwarded:
+                transcript = self._transcribe_voice(message, data)
+                if not transcript:
+                    return None
+                data.update(msg=transcript, content=transcript, context_kind="voice")
+            elif forwarded:
                 if not data["room_wxid"]:
                     return None
                 data.update(msg=forwarded, content=forwarded, context_kind="forwarded", dispatch_to_plugins=False)
-                name = self._sender_wechat_name(data["sender_id"])
-                if name:
-                    data["sender_wechat_name"] = name
-                return data
-            if quote is not None:
+            elif quote is not None:
                 # 回复正文在被引用卡片里，群友真正说的话是 title；被引用的原文单独带给模型。
                 data["quote"] = {key: quote[key] for key in ("name", "text", "chatusr", "fromusr", "ref_type",
                                                              "svrid", "image_md5")}
@@ -297,6 +296,8 @@ class NativeTextService(NativeFileHelperService):
             name = self._sender_wechat_name(data["sender_id"]) if data["sender_id"] else None
             if name:
                 data["sender_wechat_name"] = name
+            if data.get("context_kind"):
+                return data
             source = getattr(message, "mention_source", b"").decode("utf-8", errors="replace")
             data["at_members"] = parse_at_members(source)
             if data["at_members"]:
@@ -347,21 +348,20 @@ class NativeTextService(NativeFileHelperService):
 
     def _transcribe_voice(self, message, data):
         if (self.transcriber is None or data["chat_id"] not in self.voice_rooms or data["is_self"] or
-                not isinstance(message, ReceivedMediaMessageV5) or not 0 < message.payload_size <= len(message.payload)):
-            return None
+                not isinstance(message, ReceivedMediaMessageV5)):
+            return ""
+        if not 0 < message.payload_size <= len(message.payload):
+            logger.info("群语音未附带可读取音频，未转写")
+            return ""
         try:
             text = self.transcriber.transcribe(bytes(message.payload[:message.payload_size]), data["msg"])
         except Exception as error:
             logger.warning("语音转写失败：%s", type(error).__name__)
-            return None
+            return ""
         if not text or self._stop.is_set():
-            return None
-        data.update(msg=text, content=text, context_kind="voice")
-        name = self._sender_wechat_name(data["sender_id"])
-        if name:
-            data["sender_wechat_name"] = name
-        logger.info("群语音已转写并进入上下文")
-        return data
+            return ""
+        logger.info("群语音转写完成")
+        return text
 
     def _map_image(self, data, body):
         """图片事件进入异步队列；下载完成后才以 type=3 投递给插件。"""

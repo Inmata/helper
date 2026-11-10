@@ -10,7 +10,7 @@ from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .slow_replies import SlowReplies
 
-from wxbot_framework.conversation.dialogue import Dialogue
+from wxbot_framework.conversation.dialogue import Dialogue, resolve_reply_quote
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
 from wxbot_framework.conversation.mention_tools import (ASK_PUBLIC_SEARCH_TARGET, ASK_SEARCH_TARGET, IMAGE_WINDOW_SECONDS,
                                                         SEARCH_RETRY_SECONDS, MentionTools, ToolOutcome,
@@ -276,34 +276,32 @@ class Plugin:
             return  # 本轮排队期间设置了冷处理。
         personality = ctx.personality(message)
         guard = lambda: self._delivery_guard(message, ctx.personality_guard, personality)
-        quote = message.data.get("quote") or {}
-        # 引用非文本消息时没有正文，仍把引用人带给模型，别把整条引用丢掉；引用图片时标明是图片。
-        quote_text = quote.get("text") or ("[图片]" if quote.get("ref_type") == "3" else "")
-        ref_type = quote.get("ref_type")
-        if ref_type == "34":
-            transcript = self.members.context_text(message.chat_id, quote.get("svrid", ""))
-            quote_text = "[语音转写] " + transcript if transcript else "[语音未转写]"
-        if ref_type == "49":
-            quote_text = self.members.context_text(message.chat_id, quote.get("svrid", "")) or quote_text
-        quote = ({"name": quote.get("name") or "", "text": quote_text, "ref_type": ref_type}
-                 if quote.get("name") or quote_text else None)
         key = (message.session_id, message.chat_id, message.sender_id, clean_query)
         if not self._claim(key, message.received_at):
             ctx.logger.info("艾特对话跳过：相同提问仍在回复中 room=%s", message.chat_id)
             return
         result = SpeakResult()
         try:
-            snapshot = self.members.conversation_snapshot(message)
+            catch_up = CATCH_UP.search(clean_query)
+            snapshot = (self.members.conversation_snapshot(message, group_limit=100, group_only=True)
+                        if catch_up else self.members.conversation_snapshot(message))
             guard = lambda: self._delivery_guard(message, ctx.response_guard, snapshot, personality)
+            quote, missing_quote = resolve_reply_quote(
+                message.data.get("quote"), lambda message_id: self.members.context_text(message.chat_id, message_id))
             display = self.members.at_display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
             budget = 1023 - len(("@" + display + "\u2005\n").encode("utf-8"))
 
             def send_at(part, send_guard=guard):
                 return ctx.reply_at(message, part, display_name=display, delivery_guard=send_guard)
 
-            if CATCH_UP.search(clean_query):
-                rows = self.members.recent_snapshot(message.chat_id, limit=100, before_id=snapshot.anchor_id,
-                                                    context=True).messages
+            if missing_quote:
+                speak(missing_quote, tier=QA, byte_budget=budget, result=result, send_at=send_at)
+                if result.failed:
+                    raise RuntimeError("原生艾特发送未成功")
+                return
+
+            if catch_up:
+                rows = snapshot.group_messages
                 reply = Dialogue(ctx.llm_for(message, personality=personality),
                                  display_timezone=ctx.display_timezone).catch_up(rows, clean_query, quote=quote)
                 self._ensure_running()

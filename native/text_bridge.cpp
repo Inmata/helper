@@ -279,16 +279,21 @@ static void sample_all_text(const uintptr_t* batch) {
             if (type == 34) {
                 // 4.2.0.12 的 Sync AddMsg 可携带完整 SILK；没有载荷时不发起额外下载。
                 if (core_profile_id != 4) continue;
+                const char* audio = nullptr;
+                uint32_t audio_size = 0;
                 const auto buffer = *reinterpret_cast<const unsigned char* const*>(message + 0x30);
-                if (!buffer) continue;
-                const auto length = *reinterpret_cast<const uint32_t*>(buffer + 0x10);
-                const auto value = *reinterpret_cast<const SmallString* const*>(buffer + 8);
-                if (!value || !length || length > 262144 || value->length != length ||
-                    value->capacity < length) continue;
-                const char* audio = value->capacity > 15 ?
-                    *reinterpret_cast<const char* const*>(value->data) : value->data;
-                if (audio && read_pb_string(message, 0x20, text, sizeof(text)))
-                    enqueue_received(sender, receiver, text, source, 34, nullptr, message_id, audio, length);
+                if (buffer) {
+                    const auto length = *reinterpret_cast<const uint32_t*>(buffer + 0x10);
+                    const auto value = *reinterpret_cast<const SmallString* const*>(buffer + 8);
+                    if (value && length && length <= sizeof(ReceivedMediaMessageV5::payload) &&
+                        value->length == length && value->capacity >= length) {
+                        audio = value->capacity > 15 ?
+                            *reinterpret_cast<const char* const*>(value->data) : value->data;
+                        if (audio) audio_size = length;
+                    }
+                }
+                read_pb_string(message, 0x20, text, sizeof(text));
+                enqueue_received(sender, receiver, text, source, 34, nullptr, message_id, audio, audio_size);
                 continue;
             }
             if (type == 3) {

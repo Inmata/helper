@@ -121,6 +121,36 @@ def _speaker_label(tag, name):
     return f"[{tag}] {name}" if tag else name
 
 
+def resolve_reply_quote(raw, find_context_text):
+    """把微信引用转成模型输入；缺正文时给调用者一条可直接发送的说明。"""
+    raw = raw or {}
+    name, text = raw.get("name") or "", raw.get("text") or ""
+    ref_type, message_id = raw.get("ref_type"), raw.get("svrid", "")
+    context_id, kind = "", ""
+    if ref_type in ("34", "49"):
+        saved = find_context_text(message_id)
+        if saved:
+            context_id, text = message_id, saved
+        if ref_type == "34":
+            if not saved:
+                return None, "我没读到这条语音的转写。"
+            text = "[语音转写] " + saved
+            kind = "voice"
+        elif not text:
+            return None, "我没读到这张卡片的正文。可以把原卡片再发一次。"
+        else:
+            kind = "forwarded"
+    elif ref_type == "3" and not text:
+        text = "[图片]"
+    quote = {"name": name, "text": text, "kind": kind, "context_id": context_id} if name or text else None
+    return quote, ""
+
+
+def _without_quoted_context(rows, quote):
+    context_id = quote.get("context_id") if quote else None
+    return (row for row in rows if not context_id or row.get("context_message_id") != context_id)
+
+
 def _render(payload):
     """把上下文渲染成分节文本：不使用 JSON，避免模型把输入误当成协议或群友发来的内容。"""
     lines = [f"【当前发言者】{payload['name']}", f"【日期】{payload['date']}"]
@@ -189,12 +219,12 @@ class Dialogue:
             return "我没看到这段群聊。"
         lines = [f"【当前时间】{describe_local(self.clock() if self.clock else None, self.display_timezone)}",
                  "【群聊原文】（从旧到新）"]
-        for row in rows:
+        for row in _without_quoted_context(rows, quote):
             stamp = _short_time(row["received_at"], self.display_timezone)
             text = row["text"] if row.get("context_kind") == "forwarded" else " ".join(row["text"].splitlines())[:400]
             lines.append(f"{stamp} {row['speaker_name']}：{text}")
         if quote:
-            text = quote["text"] if quote.get("ref_type") == "49" else quote["text"][:300]
+            text = quote["text"] if quote.get("kind") in ("forwarded", "voice") else quote["text"][:300]
             lines.append(f"【引用】{quote['name']}：{text}")
         lines.append(f"【当前提问】{question}")
         return self.client.complete_text(CATCH_UP_SYSTEM, "\n".join(lines)).strip()
@@ -207,11 +237,11 @@ class Dialogue:
         ``tool_results`` 是本轮看图 / 搜索的结果 ``[{"tool", "ok", "text", "note"}]``，渲染成对应小节。
         """
         previous = [{"time": _short_time(row["received_at"], self.display_timezone),
-                     "text": strip_at_labels(row["text"])} for row in snapshot.messages]
+                     "text": strip_at_labels(row["text"])} for row in _without_quoted_context(snapshot.messages, quote)]
         speaker_tag = getattr(snapshot, "speaker_tag", "")
         group = [{"time": _short_time(row["received_at"], self.display_timezone),
                   "name": _speaker_label(row["speaker"] if speaker_tag else "", row["speaker_name"]),
-                  "text": row["text"]} for row in snapshot.group_messages]
+                  "text": row["text"]} for row in _without_quoted_context(snapshot.group_messages, quote)]
         memories = [{"name": item["name"], "kind": item["kind"], "scope": item.get("scope", "person"),
                      "content": item["content"], "date": _record_date(item, self.display_timezone)}
                     for item in knowledge]
@@ -232,7 +262,7 @@ class Dialogue:
             payload["examples"] = [str(text) for text in examples]
         if tool_results:
             payload["tools"] = [dict(item) for item in tool_results]
-        options = {"history": self._history(snapshot)}
+        options = {"history": self._history(snapshot, quote)}
         if detail:  # 只在详细请求时传，保持对不认识该参数的客户端的兼容。
             options["detail"] = True
         prompt = system or SYSTEM
@@ -267,11 +297,11 @@ class Dialogue:
         return value.get("reply") if isinstance(value, dict) and isinstance(value.get("reply"), str) else reply
 
     @staticmethod
-    def _history(snapshot):
+    def _history(snapshot, quote=None):
         """把真实收发顺序还原成 user/assistant 消息，让模型能引用自己刚才的回复。"""
         result = []
         labeled = bool(getattr(snapshot, "speaker_tag", ""))
-        for row in getattr(snapshot, "history", ()) or ():
+        for row in _without_quoted_context(getattr(snapshot, "history", ()) or (), quote):
             if row.get("bot_generated"):
                 text = ("[机器人发言] " if labeled else "") + row["text"]
                 result.append({"role": "assistant", "content": text})

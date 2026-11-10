@@ -295,8 +295,8 @@ class MemberStore:
     def snapshot_is_current(self, snapshot):
         return self.transcript.snapshot_is_current(snapshot)
 
-    def conversation_snapshot(self, message, *, group_limit=25):
-        return self.transcript.conversation_snapshot(message, group_limit=group_limit)
+    def conversation_snapshot(self, message, *, group_limit=25, group_only=False):
+        return self.transcript.conversation_snapshot(message, group_limit=group_limit, group_only=group_only)
 
     def delivery_guard(self, snapshot):
         return self.transcript.delivery_guard(snapshot)

@@ -398,6 +398,9 @@ class FakeMembers:
     def at_display_name(self, sender_id, chat_id):
         return "小明"
 
+    def context_text(self, room, message_id):
+        return ""
+
     def latest_id(self, room):
         return 10
 
@@ -559,6 +562,19 @@ class MentionDeliveryTests(unittest.TestCase):
         plugin.on_message(message, ctx)
         self.assertIn("【引用】", ctx.last_user)
         self.assertIn("机器人", ctx.last_user)
+
+    def test_missing_voice_and_app_card_are_reported_without_asking_model(self):
+        for ref_type, expected in (
+            ("34", "我没读到这条语音的转写。"),
+            ("49", "我没读到这张卡片的正文。可以把原卡片再发一次。"),
+        ):
+            with self.subTest(ref_type=ref_type):
+                plugin, ctx = self.build("模型不应被调用")
+                message = mention("说了什么")
+                message.data["quote"] = {"name": "小明", "ref_type": ref_type, "svrid": "123"}
+                plugin.on_message(message, ctx)
+                self.assertEqual(ctx.sent, [("reply_at", expected)])
+                self.assertEqual(ctx.completions, 0)
 
     def test_typed_at_label_is_not_left_in_the_question(self):
         plugin, ctx = self.build("在的")

@@ -64,12 +64,17 @@ def _short_samples(model, text):
     import torch
 
     max_seconds = 2 + len(text) / 4
+    decode_seconds = max_seconds + 3  # 已测到星瞳在起音前生成约 2.6 秒静音。
+    rate = model.sampling_rate
     # 这些模型每秒解码 25 个 token；parrots 将 t2s_max_sec 乘 50 作为 token 上限。
-    model.t2s_max_sec = max_seconds / 2
+    model.t2s_max_sec = decode_seconds / 2
     for seed in (7, 11):
         torch.manual_seed(seed)
         samples = model.predict(text, text_language="zh", top_k=5)
-        if len(samples) <= max_seconds * model.sampling_rate:
+        if len(samples) > decode_seconds * rate:
+            continue  # 达到解码上限的语音可能没念完。
+        samples = _trim_leading_silence(samples, rate)
+        if len(samples) <= max_seconds * rate:
             return samples
 
 
@@ -128,7 +133,6 @@ def _worker():
             continue
         wav = BytesIO()
         samples = resample_poly(samples, 16000, model.sampling_rate)
-        samples = _trim_leading_silence(samples, 16000)
         soundfile.write(wav, samples, 16000, format="WAV", subtype="PCM_16")
         data = wav.getbuffer()
         wire.write(_LENGTH.pack(len(data)))

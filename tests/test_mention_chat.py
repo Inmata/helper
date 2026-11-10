@@ -2,14 +2,19 @@
 import json
 import logging
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
+from support.recyclable_tempdir import RecyclableTemporaryDirectory
 from plugins.mention_chat import Plugin
+from wxbot_framework.commands import help_text
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
-from wxbot_framework.conversation.members import ConversationSnapshot, SnapshotExpired
+from wxbot_framework.conversation.members import ConversationSnapshot, MemberStore, SnapshotExpired
 from wxbot_framework.conversation.personality import PersonalityState
+from wxbot_framework.conversation.room_state import RoomStateStore
 from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.sdk import Message
 
@@ -452,13 +457,14 @@ class FakeCtx:
     def _send(self, method, text, delivery_guard):
         if self.before_guard is not None:
             self.before_guard(len(self.sent))
-        with delivery_guard():
+        with delivery_guard() if delivery_guard else nullcontext():
             if self.fail_at_send is not None and len(self.sent) + 1 >= self.fail_at_send:
                 return False
             self.sent.append((method, text))
             return True
 
     def reply_at(self, message, text, *, display_name=None, delivery_guard=None):
+        self.at_target = message.sender_id
         return self._send("reply_at", text, delivery_guard)
 
     def reply(self, message, text, *, delivery_guard=None):
@@ -618,6 +624,123 @@ class MentionDeliveryTests(unittest.TestCase):
         plugin.on_message(message, ctx)
         self.assertEqual(ctx.completions, 2)
         self.assertEqual(ctx.sent[0], ("reply_at", "行吧"))
+
+
+class ColdReplyTests(unittest.TestCase):
+    OWNER = "wxid_owner"
+    PLAYER = "wxid_player"
+    OTHER_ROOM = "87654321@chatroom"
+
+    def setUp(self):
+        scratch = Path(__file__).resolve().parent.parent / ".runtime/tests"
+        scratch.mkdir(parents=True, exist_ok=True)
+        temp = RecyclableTemporaryDirectory(dir=scratch)
+        self.addCleanup(temp.cleanup)
+        self.config = Path(temp.name) / "members.json"
+        self.config.write_text(json.dumps({
+            "database_file": "chat.sqlite3", "history_enabled": True, "owner_wxid": self.OWNER,
+            "groups": {ROOM: [], self.OTHER_ROOM: []},
+        }), encoding="utf-8")
+        self.members = MemberStore(self.config, "wxid_robot")
+        self.addCleanup(self.members.close)
+        self.members.initialize()
+        self.sequence = 1
+        self.members.record(replace(mention("初次发言"), session_id="test-session", sequence=self.sequence))
+        self.now = 2000.5
+        clock = patch("plugins.mention_chat.cold_reply.time", side_effect=lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+        self.plugin, self.ctx = self.build(self.members)
+
+    def build(self, members):
+        plugin = Plugin()
+        ctx = FakeCtx(members, "正常回复")
+        ctx.config = {"tools": {"enabled": False}}
+        ctx.room_state = RoomStateStore(members)
+        ctx.llm = ctx.client
+        plugin.on_load(ctx)
+        self.addCleanup(plugin.on_unload, ctx)
+        return plugin, ctx
+
+    def command(self, args, *, sender=None, targets=(), room=ROOM):
+        self.plugin.on_message(Message("/冷处理 " + args, room, sender_id=sender or self.OWNER, is_group=True,
+                                       data={"at_members": targets}), self.ctx)
+
+    def ask(self, text, **changes):
+        self.sequence += 1
+        message = replace(mention(text), session_id="test-session", sequence=self.sequence, **changes)
+        self.ctx.members.record(message)
+        self.plugin.on_message(message, self.ctx)
+
+    def test_command_permissions_and_target_validation(self):
+        self.assertNotIn("/冷处理", help_text())
+        self.assertIn("/冷处理", help_text(True))
+        self.command("M1 30m", sender=self.PLAYER)
+        self.command("@小 明 30m")
+        self.command("@小 明  @别人  30m", targets=(self.PLAYER, self.OWNER))
+        self.command("M1 -2h")
+        self.ask("有空吗")
+        self.assertEqual(self.ctx.completions, 1)
+        self.assertIn("仅维护者", self.ctx.sent[0][1])
+        self.assertIn("从微信成员列表", self.ctx.sent[1][1])
+        self.assertTrue(all(body.startswith("用法") for _, body in self.ctx.sent[2:4]))
+        self.assertEqual(self.ctx.sent[-1], ("reply_at", "正常回复"))
+
+    def test_real_mention_target_cooldown_and_room_scope(self):
+        self.command("@小 明  30m", targets=(self.PLAYER,))
+        self.ask("搜一下")
+        first = self.ctx.sent[-1]
+        self.assertEqual(self.ctx.at_target, self.PLAYER)
+        self.assertEqual(first, ("reply_at", "收到，今天的演出我就看到这儿。"))
+        self.now += 599
+        self.ask("还在吗")
+        self.assertEqual(len(self.ctx.sent), 2)
+        self.assertEqual(self.ctx.completions, 0)
+        self.ask("另一个群", chat_id=self.OTHER_ROOM)
+        self.ask("另一个人", sender_id=self.OWNER)
+        self.assertEqual(self.ctx.completions, 2)
+        self.now += 1
+        self.ask("还在吗")
+        self.assertEqual(self.ctx.sent[-1], ("reply_at", "你这段循环播放，我这边就不续费了。"))
+        self.assertEqual(self.ctx.completions, 2)
+
+    def test_number_lookup_restart_expiry_and_early_release(self):
+        self.command("M1 1h")
+        self.ask("第一次")
+        self.assertEqual(self.ctx.completions, 0)
+        self.members.close()
+        reopened = MemberStore(self.config, "wxid_robot")
+        self.addCleanup(reopened.close)
+        self.plugin, self.ctx = self.build(reopened)
+        self.now += 60
+        self.ask("重启后")
+        self.assertEqual(self.ctx.sent, [])
+        self.now += 3540
+        self.ask("到期了")
+        self.assertEqual(self.ctx.completions, 1)
+        self.command("wxid_player 2h")
+        self.command("M1 0m")
+        self.ask("提前结束了")
+        self.assertEqual(self.ctx.completions, 2)
+
+    def test_existing_reply_is_canceled_at_send_guard(self):
+        def set_cold_before_send(_):
+            self.ctx.before_guard = None
+            self.command("M1 30m")
+
+        self.ctx.before_guard = set_cold_before_send
+        self.ask("有空吗")
+        self.assertEqual(self.ctx.completions, 1)
+        self.assertEqual(self.ctx.sent, [("reply", "本群冷处理已设置，持续 30m。")])
+
+    def test_cold_reply_yields_to_idiom_answer(self):
+        self.command("M1 30m")
+        data = {**mention("").data, "room_states": {"idiom_chain": active_game()}}
+        self.ask("意气风发", data=data)
+        self.assertEqual(len(self.ctx.sent), 1)
+        self.ask("有空吗", data=data)
+        self.assertEqual(self.ctx.sent[-1][0], "reply_at")
+        self.assertEqual(self.ctx.completions, 0)
 
 
 if __name__ == "__main__":

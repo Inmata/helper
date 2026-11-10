@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from .._shared import idiom_state
+from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .slow_replies import SlowReplies
 
 from wxbot_framework.conversation.dialogue import Dialogue
@@ -23,7 +24,7 @@ from wxbot_framework.messaging.mentions import at_source, bot_names, strip_at_la
 from wxbot_framework.conversation.personality import personality_text
 from wxbot_framework.conversation.utterance import (CHAT, DETAIL, QA, InterjectionGate, SpeakResult, classify_tier,
                                                     interjection_probe, speak)
-from wxbot_framework.commands import is_control
+from wxbot_framework.commands import command_text, is_control
 
 GAME_FEATURE = "idiom_chain"
 USED_SAMPLE = 10
@@ -72,6 +73,7 @@ class Plugin:
         self._last_searches = OrderedDict()
         self._followup_lock = threading.Lock()
         self._slow = None
+        self.cold = None
 
     def _claim(self, key, arrived_at):
         """认领本次生成；仍在生成中，或本次到达时首次回复尚未结束，返回 False。
@@ -103,6 +105,8 @@ class Plugin:
     def on_load(self, ctx):
         self.members = ctx.members
         self.room_state = getattr(ctx, "room_state", None)
+        if self.room_state is not None:
+            self.cold = ColdReply(self.members, self.room_state)
         self.aliases = read_aliases(ctx.config)
         self.tools = read_tool_options(ctx.config)
         if not self.members.history_enabled:
@@ -122,9 +126,11 @@ class Plugin:
             raise SnapshotExpired("艾特插件已停止")
 
     @contextmanager
-    def _delivery_guard(self, guard, *args):
+    def _delivery_guard(self, message, guard, *args):
         with guard(*args):
             self._ensure_running()
+            if self.cold is not None and self.cold.active(message):
+                raise SnapshotExpired("发言者已被冷处理")
             yield
 
     def room_game(self, room, ctx, *, message=None):
@@ -221,13 +227,31 @@ class Plugin:
         # 图片事件（type 3）由原生服务记入 RECENT_IMAGES，这里只回复文本里的艾特。
         if (message.type != 1 or not message.is_group or message.chat_id not in self.members.groups or
                 "WXBOT_AT_CHAT_PROBE" in message.text or
-                message.data.get("bot_generated") or is_control(message.text)):
+                message.data.get("bot_generated")):
+            return
+        if is_control(message.text):
+            if self.cold is not None and not message.is_self:
+                parts = command_text(message.text).split(maxsplit=1)
+                if parts[0] == COLD_COMMAND:
+                    self.cold.command(message, ctx, parts[1] if len(parts) == 2 else "")
             return
         source = at_source(message, self.members, self.aliases)
         if source is None:
             return
+        clean_query = strip_at_labels(message.text)
+        if source == "typed":
+            # 手打的 @ 没有微信的 U+2005 分隔符，单独去掉命中的名字。
+            label = typed_at(clean_query, self._bot_names(message.chat_id))
+            if label:
+                clean_query = clean_query.replace("@" + label, "")
+        clean_query = clean_query.strip()
+        game = self.room_game(message.chat_id, ctx, message=message)
+        if game and self.is_move(clean_query, game):
+            return  # 答案由接龙插件判定。
+        if self.cold is not None and self.cold.handle_mention(message, ctx):
+            return
         key = (message.session_id, message.chat_id, message.sender_id)
-        resume = lambda: self._reply_turn(message, ctx, source)
+        resume = lambda: self._reply_turn(message, ctx, clean_query, game)
         slow = self._slow
         if slow is not None and slow.queue_if_active(key, resume):
             return
@@ -243,26 +267,18 @@ class Plugin:
         if not slow.handoff(key, turn):
             turn.close()
 
-    def _reply_turn(self, message, ctx, source):
+    def _reply_turn(self, message, ctx, clean_query, game):
         if self._slow is not None and self._slow.stopped.is_set():
             return
+        if self.cold is not None and self.cold.active(message):
+            return  # 本轮排队期间设置了冷处理。
         personality = ctx.personality(message)
-        guard = lambda: self._delivery_guard(ctx.personality_guard, personality)
-        clean_query = strip_at_labels(message.text)
-        if source == "typed":
-            # 手打的 @ 没有微信的 U+2005 分隔符，strip_at_labels 去不掉，单独去掉命中的那个名字。
-            label = typed_at(clean_query, self._bot_names(message.chat_id))
-            if label:
-                clean_query = clean_query.replace("@" + label, "")
-        clean_query = clean_query.strip()
+        guard = lambda: self._delivery_guard(message, ctx.personality_guard, personality)
         quote = message.data.get("quote") or {}
         # 引用非文本消息时没有正文，仍把引用人带给模型，别把整条引用丢掉；引用图片时标明是图片。
         quote_text = quote.get("text") or ("[图片]" if quote.get("ref_type") == "3" else "")
         quote = ({"name": quote.get("name") or "", "text": quote_text}
                  if quote.get("name") or quote_text else None)
-        game = self.room_game(message.chat_id, ctx, message=message)
-        if game and self.is_move(clean_query, game):
-            return  # 答案由接龙插件判定并出题，人格不重复回复也不编造进度。
         key = (message.session_id, message.chat_id, message.sender_id, clean_query)
         if not self._claim(key, message.received_at):
             ctx.logger.info("艾特对话跳过：相同提问仍在回复中 room=%s", message.chat_id)
@@ -270,7 +286,7 @@ class Plugin:
         result = SpeakResult()
         try:
             snapshot = self.members.conversation_snapshot(message)
-            guard = lambda: self._delivery_guard(ctx.response_guard, snapshot, personality)
+            guard = lambda: self._delivery_guard(message, ctx.response_guard, snapshot, personality)
             detail = wants_detail(clean_query)
             tools = build_default_tools(ctx.knowledge, self.members)
             context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
@@ -337,8 +353,8 @@ class Plugin:
                 ctx.logger.info("闲聊拆分发送中有人插话，丢弃剩余 %d 条：room=%s", result.dropped, message.chat_id)
             ctx.logger.info("艾特对话完成：room=%s persona=%s context=%d", message.chat_id,
                             personality.name, len(snapshot.messages))
-        except SnapshotExpired:
-            ctx.logger.info("艾特对话已取消：记录、人格或插件状态已变更")
+        except SnapshotExpired as error:
+            ctx.logger.info("艾特对话已取消：%s", error)
         except LLMError as error:
             ctx.logger.warning("艾特对话失败：%s", error)
             try:

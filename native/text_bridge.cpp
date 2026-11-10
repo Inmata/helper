@@ -206,6 +206,7 @@ struct TextTaskLease {
 };
 
 #include "image_send.h"
+#include "voice_send.h"
 
 extern "C" __declspec(dllexport) DWORD WINAPI WxSendText(void* parameter) {
     if (!parameter || live_completions != 0 || live_tasks != 0) return ERROR_BUSY;

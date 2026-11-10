@@ -60,8 +60,14 @@ class ImageDownloadConfig(Config):
                 ("image_type", c.c_uint32)]
 
 
+class VoiceSendConfig(TextConfig):
+    _fields_ = [("account", c.c_char * 128), ("audio", PTR),
+                ("audio_size", c.c_uint32), ("duration_ms", c.c_uint32)]
+
+
 assert c.sizeof(Config) == 1560 and c.sizeof(TextConfig) == 1688 and c.sizeof(AtTextConfig) == 2712
 assert c.sizeof(ImageDownloadConfig) == 2656
+assert c.sizeof(VoiceSendConfig) == 1832
 
 
 class ProcessEntry(c.Structure):
@@ -201,7 +207,7 @@ def _validate_download_image(download_image):
 
 
 def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_report=True,
-        bridge_path=None, target="filehelper", mentions=None, download_image=None, image_path=None):
+        bridge_path=None, target="filehelper", mentions=None, download_image=None, image_path=None, voice=None):
     dll = Path(bridge_path or DLL).resolve()
     if dll not in (DLL.resolve(), TEXT_DLL.resolve()):
         raise ValueError("不支持的桥接 DLL 路径")
@@ -227,6 +233,13 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
         if not image.is_file():
             raise ValueError("图片路径须指向文件")
         text = str(image)
+    if voice is not None:
+        if not generic or mode != "--dispatch" or mentions is not None or image_path is not None:
+            raise ValueError("语音仅用于通用桥接单独发送")
+        from wxbot_framework.account import validate_account
+        audio, duration_ms, account = voice
+        validate_account(account)
+        text = "voice"
     if mode not in ("--arm", "--dispatch", "--receive", "--listen", "--remove", "--probe-at", "--download-image"):
         raise RuntimeError("不支持的原生桥接操作")
     if mode == "--probe-at" and not generic:
@@ -283,6 +296,8 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
                 name = b"WxSendAtText"
             if image_path is not None:
                 name = b"WxSendImage"
+            if voice is not None:
+                name = b"WxSendVoice"
         else:
             name = b"WxArmMentionProbe" if mode == "--probe-at" else {
                 "--arm":b"WxArmSelfTest", "--dispatch":b"WxDispatchSelfTest", "--receive":b"WxArmReceiveTest",
@@ -313,7 +328,7 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
         if len(str(report_path)) >= 260: raise RuntimeError("报告路径超过原生接口长度")
         config = AtTextConfig() if mentions is not None else (
             ImageDownloadConfig() if download_image is not None else
-            (TextConfig() if generic else Config()))
+            (VoiceSendConfig() if voice is not None else TextConfig() if generic else Config()))
         config.size, config.pid, config.manager = c.sizeof(config), pid, 0
         config.log_path = str(report_path)
         if download_image is not None:
@@ -327,6 +342,10 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
             config.target = target.encode("ascii")
         if mentions is not None:
             config.members = ",".join(mentions).encode("ascii")
+        if voice is not None:
+            config.account = account.encode("ascii")
+            config.audio = allocate(audio)
+            config.audio_size, config.duration_ms = len(audio), duration_ms
         config_parameter = allocate(bytes(config))
         exit_code = remote_call(process, loaded[0] + export, config_parameter)
         if mode == "--remove" and exit_code == 0:
@@ -373,6 +392,11 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
                                      and (keep_loaded or result.get("dll_unloaded") is True))
             if mentions is not None:
                 result["success"] = result["success"] and result["report"].get("at_members") == ",".join(mentions)
+            if voice is not None:
+                result["success"] = (result["success"] and report.get("operation") == "voice_send"
+                                     and report.get("message_type") == 34
+                                     and report.get("duration_ms") == duration_ms
+                                     and report.get("bytes") == len(audio))
             if not preserve_report and result["success"]:
                 # 长期运行只保留内存中的完成结果；已结束的临时报告归档而不是删除。
                 try:

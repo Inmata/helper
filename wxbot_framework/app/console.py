@@ -38,7 +38,7 @@ class ConsoleCommands:
         elif action in ("quit", "exit", "stop") and len(words) == 1:
             app.stop_event.set()
         elif action == "help" and len(words) == 1:
-            logger.info("命令：manage [--room 群ID] 帮助 / status / chats / members [群ID] / history 称呼 [条数] / persona [history|rollback|base|derive] [群ID] / plugins / enable 名称 / disable 名称 / reload [名称] / quit")
+            logger.info('命令：manage [--room 群ID] 帮助 / status / chats / send-voice 会话ID "语音路径" / members [群ID] / history 称呼 [条数] / persona [history|rollback|base|derive] [群ID] / plugins / enable 名称 / disable 名称 / reload [名称] / quit')
         elif action == "status" and len(words) == 1:
             logger.info("状态：%s", json.dumps({"connected": app._connection_ready,
                                                "pid": app.backend.pid if app.backend else None,
@@ -48,6 +48,11 @@ class ConsoleCommands:
         elif action == "chats" and len(words) == 1:
             rows = app.backend.chats() if app.backend and hasattr(app.backend, "chats") else []
             logger.info("本次连接已接收的会话：%s", json.dumps(rows, ensure_ascii=False))
+        elif action == "send-voice":
+            if len(words) != 3:
+                raise ValueError('用法：send-voice 会话ID "语音路径"')
+            sent = app.service.send_voice(words[1], words[2])
+            logger.info("语音条发送：%s", "微信已接受提交" if sent else "未确认发送，不重试")
         elif action == "members" and len(words) in (1, 2):
             if app.members is None:
                 raise ValueError("尚未配置成员目录")

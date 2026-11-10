@@ -440,6 +440,23 @@ class NativeTextService(NativeFileHelperService):
                                         keep_loaded=True, preserve_report=self.preserve_reports)
             return self.last_result["success"]
 
+    def send_voice(self, to_wxid, path):
+        from wxbot_framework.integrations.voice_encode import prepare_voice
+        validate_target(to_wxid)
+        audio, duration_ms = prepare_voice(path)
+        with self._calls:
+            if not self._owns_bridge or self._stop.is_set():
+                raise RuntimeError("原生语音服务没有运行")
+            self._check_account(force=True)
+            self.last_result = self._run("--dispatch", pid=self.pid, target=to_wxid, keep_loaded=True,
+                                         preserve_report=self.preserve_reports,
+                                         voice=(audio, duration_ms, self.self_wxid))
+            if not self.last_result["success"]:
+                report = self.last_result.get("report", {})
+                logger.warning("语音发送未确认：入口=%s 阶段=%s 状态=%s",
+                               self.last_result.get("code"), report.get("stage"), report.get("native_status"))
+            return self.last_result["success"]
+
     def _send_text(self, to_wxid, content, *, mentions=None):
         validate_target(to_wxid)
         with self._calls:

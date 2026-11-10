@@ -16,6 +16,8 @@
 
 语音接收参考 [Prometheus-first/helper 的 b6d35f4](https://github.com/Prometheus-first/helper/commit/b6d35f41c58c9144a06bf39bfa42cab6193cc5c2) 的内联 SILK 布局。解码依赖 silk-python，转写依赖 sherpa-onnx 和独立安装的 SenseVoice 模型，均未随仓库分发。
 
+语音发送适配自 [Prometheus-first/helper 的原生语音发送](https://github.com/Prometheus-first/helper/blob/be370c10b3ebe0f725fe173517e2c947d9d2f364/native/voice_send.h)及其 [WAV/SILK 准备实现](https://github.com/Prometheus-first/helper/blob/be370c10b3ebe0f725fe173517e2c947d9d2f364/wxbot_framework/voices.py)。本项目改为在内存中编码并交给现有发送队列；WAV 编码沿用 silk-python。上游许可同上。
+
 合并转发的内嵌记录格式参考 [Prometheus-first/helper 的 028b86a](https://github.com/Prometheus-first/helper/commit/028b86af59b17aaa7c0c3f15a9c72716391ff517)，本项目读取文字、原署名和时间。上游许可同上。
 
 成语接龙的扩展词表来自 [pwxcoo/chinese-xinhua](https://github.com/pwxcoo/chinese-xinhua)，Copyright (c) 2018 PWXCOO，MIT License。仅提取四字词条；固定版本、筛选规则与校验值见 `plugins/idiom_chain/data/README.md`，完整许可证见 `plugins/idiom_chain/data/LICENSE.chinese-xinhua.txt`。

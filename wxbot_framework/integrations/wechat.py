@@ -19,6 +19,7 @@ IMAGE_CAPABILITIES = frozenset({"image.receive", "friend.image.receive", "group.
 IMAGE_RECEIVE_EXPORT = b"WxPollMediaMessageV4"
 IMAGE_DOWNLOAD_EXPORT = b"WxDownloadImage"
 GROUP_IMAGE_SEND = "group.image.send"
+VOICE_SEND = "voice.send"
 TEXT_DLL = Path(__file__).resolve().parents[2] / "native/build_text/text_bridge.dll"
 
 
@@ -44,6 +45,8 @@ def text_capabilities(exports=None):
         capabilities |= IMAGE_CAPABILITIES
     if b"WxSendImage" in exports:
         capabilities |= {GROUP_IMAGE_SEND}
+    if b"WxSendVoice" in exports:
+        capabilities |= {VOICE_SEND}
     return capabilities
 
 
@@ -53,6 +56,8 @@ def text_scope(capabilities=None):
     scope = "文件传输助手、好友和群聊文本"
     if IMAGE_CAPABILITIES <= capabilities:
         scope += "及群图片"
+    if VOICE_SEND in capabilities:
+        scope += "、语音条发送"
     return scope
 
 
@@ -144,6 +149,9 @@ class NativeTextBackend(NativeFileHelperBackend):
 
     def send_image(self, room_wxid, path):
         return self.raw.send_image(room_wxid, path)
+
+    def send_voice(self, chat_id, path):
+        return self.raw.send_voice(chat_id, path)
 
     def read_room_directory(self, room_wxid):
         return self.raw.read_room_directory(room_wxid)

@@ -94,6 +94,19 @@ class ServiceFacade:
             with delivery_guard() if delivery_guard is not None else nullcontext():
                 return self._backend.send_image(room_wxid, path)
 
+    def send_voice(self, chat_id, path, *, expected_session=None, delivery_guard=None):
+        validate_target(chat_id)
+        with self._send_lock, self._lock:
+            if not self._available:
+                raise RuntimeError("微信尚未连接")
+            if expected_session is not None and self._backend.session_id != expected_session:
+                raise RuntimeError("消息所属的微信连接已结束，跳过旧会话回复")
+            send = getattr(self._backend, "send_voice", None)
+            if not callable(send):
+                raise CapabilityError("当前后端尚未开放语音条发送")
+            with delivery_guard() if delivery_guard is not None else nullcontext():
+                return send(chat_id, path)
+
     def _check_pending(self, backend, cancel):
         if cancel.is_set() or not self._available or self._backend is not backend or self._cancel is not cancel:
             raise RuntimeError("微信连接已结束，取消待发送文本")

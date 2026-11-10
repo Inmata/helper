@@ -31,6 +31,11 @@ related:
 - 桥接导出 `WxSendImage` 时，后端声明 `group.image.send`。插件经 `ctx.reply_image(message, path)` 回复本地图片，复用发送锁、消息所属连接与发送守卫，不走文本节奏。
 - `/表情` 在群内发送随机内置图片；`/表情 吃瓜` 可指定图片。内置表情通过普通图片消息发送。
 
+## 语音条发送
+
+- 通用桥接导出 `WxSendVoice` 时，后端声明 `voice.send`。本地控制台使用 `send-voice 会话ID "音频路径"`；插件可经 `ctx.reply_voice(message, path)` 回复。两者复用现有发送锁及连接校验，不走文本节奏。
+- 本地单声道 16 位 PCM WAV 在内存中转成微信 SILK，也可直接发送支持的 SILK 文件。最多 60 秒、输入最多 20 MiB，发送为可播放的原生语音条（类型 34）。发送结果表示微信接受提交。
+
 ## 验收
 
 - `tests/test_text_pacing.py`：按长度随机等待与关闭等待。

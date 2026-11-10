@@ -367,8 +367,11 @@ class Plugin:
             if outcome.used:
                 reply = strip_links(reply) or reply
             tier = (DETAIL if detail else QA) if outcome.used else classify_tier(clean_query, detail=detail)
-            if not outcome.used and tier != DETAIL:
-                voice_sent = self.voice_reply.send(message, ctx, clean_query, reply, automatic=tier == CHAT, guard=guard)
+            if not outcome.used and tier != DETAIL and self.voice_reply.reserve(
+                    message, ctx, clean_query, reply, automatic=tier == CHAT):
+                yield  # 语音合成由慢队列等待，其他成员的文字回复继续处理。
+                self._ensure_running()
+                voice_sent = self.voice_reply.send(message, ctx, reply, guard=guard)
                 if voice_sent is not None:
                     if voice_sent:
                         result.sent.append(reply)

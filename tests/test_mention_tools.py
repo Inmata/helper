@@ -751,6 +751,52 @@ class MentionChatToolTests(unittest.TestCase):
                 record.deactivate(force=True)
                 record.join()
 
+    def test_voice_synthesis_does_not_block_another_members_text(self):
+        started, release, fast, followed = (threading.Event() for _ in range(4))
+        plugin, ctx = self.build("这句用来测试。")
+        ctx.config, ctx.llm = {}, ctx.client
+        plugin.on_load(ctx)
+        ctx.capabilities |= {"voice.send"}
+        sent = []
+
+        def synthesize(_text):
+            started.set()
+            release.wait(5)
+            return b"voice"
+
+        def send_voice(message, *_args, **_options):
+            sent.append("语音")
+            return True
+
+        def send_text(message, *_args, **_options):
+            if message.sender_id == OTHER:
+                sent.append("群友的文字")
+                fast.set()
+            else:
+                sent.append("同一人的追问")
+                followed.set()
+            return True
+
+        ctx.reply_voice, ctx.reply_at = send_voice, send_text
+        record = PluginRecord(SimpleNamespace(api="v1", name="mention_chat"), plugin, ctx,
+                              "_mention_voice_async_test", 8)
+        with patch("plugins.mention_chat.voice_reply.synthesize_voice", side_effect=synthesize):
+            record.thread.start()
+            try:
+                record.enqueue(mention("用语音回：说句晚安"))
+                self.assertTrue(started.wait(2), "语音合成没有开始")
+                record.enqueue(mention("详细说说前一句"))
+                record.enqueue(replace(mention("详细说说另一件事"), sender_id=OTHER))
+                self.assertTrue(fast.wait(1), "另一位群友仍在等语音合成")
+                self.assertEqual(sent, ["群友的文字"])
+                release.set()
+                self.assertTrue(followed.wait(2), "同一人的追问没有恢复")
+                self.assertEqual(sent, ["群友的文字", "语音", "同一人的追问"])
+            finally:
+                release.set()
+                record.deactivate(force=True)
+                record.join()
+
     def test_links_the_model_copies_are_removed_from_the_sent_reply(self):
         plugin, ctx = self.build("3.14 发了（[官网](https://www.python.org/downloads/)）。见 https://docs.python.org/3/",
                                  jev=FakeJev(search=0.9))

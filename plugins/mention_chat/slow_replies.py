@@ -1,4 +1,4 @@
-"""艾特的慢工具队列；同一会话内，同一发言者的后续回复排在其前一轮之后。"""
+"""艾特的慢回复队列；同一会话内，同一发言者的后续回复排在其前一轮之后。"""
 from collections import deque
 import queue
 import threading
@@ -32,7 +32,7 @@ class SlowReplies:
             return True
 
     def handoff(self, key, turn):
-        """接手已经走到首个慢工具、仍需继续的回复。"""
+        """接手走到需要等待的位置、仍需继续的回复。"""
         with self._lock:
             if not self.stopped.is_set() and self._reserve():
                 self._following[key] = deque()

@@ -57,18 +57,23 @@ class VoiceReply:
             ctx.room_state.put(room, _FEATURE, {"voice": choice})
             ctx.reply(message, f"本群语音已切换为{choice}。")
 
-    def send(self, message, ctx, question, reply, *, automatic, guard):
-        """不选语音或合成失败返回 None；已提交则返回微信发送结果。"""
+    def reserve(self, message, ctx, question, reply, *, automatic):
+        """只选择本轮发送形式并记下冷却时间；不等待合成。"""
         if ("voice.send" not in getattr(ctx, "capabilities", ()) or not reply or
                 len(reply) > _MAX_CHARS or "\n" in reply):
-            return None
+            return False
         room = message.chat_id
         now = monotonic()
         if not requests_voice(question) and (
                 not automatic or now < self._next.get(room, 0) or random() >= _AUTO_CHANCE):
-            return None
+            return False
         self._next[room] = now + _INTERVAL_SECONDS
-        voice = self.current_voice(room, ctx)
+        return True
+
+    def send(self, message, ctx, reply, *, guard):
+        """合成失败返回 None；已提交则返回微信发送结果。"""
+        now = monotonic()
+        voice = self.current_voice(message.chat_id, ctx)
         if self._voices:
             if self._local is None:
                 return None

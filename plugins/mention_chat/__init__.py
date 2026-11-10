@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .slow_replies import SlowReplies
-from .voice_reply import VoiceReply, requests_voice
+from .voice_reply import COMMAND as VOICE_COMMAND, VoiceReply, requests_voice
 
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue, resolve_reply_quote
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
@@ -237,10 +237,12 @@ class Plugin:
                 message.data.get("bot_generated")):
             return
         if is_control(message.text):
-            if self.cold is not None and not message.is_self:
-                parts = command_text(message.text).split(maxsplit=1)
-                if parts[0] == COLD_COMMAND:
-                    self.cold.command(message, ctx, parts[1] if len(parts) == 2 else "")
+            parts = command_text(message.text).split(maxsplit=1)
+            args = parts[1] if len(parts) == 2 else ""
+            if parts[0] == VOICE_COMMAND:
+                self.voice_reply.command(message, ctx, args)
+            elif parts[0] == COLD_COMMAND and self.cold is not None and not message.is_self:
+                self.cold.command(message, ctx, args)
             return
         source = at_source(message, self.members, self.aliases)
         if source is None:

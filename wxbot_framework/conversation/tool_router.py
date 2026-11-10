@@ -33,17 +33,16 @@ VISION_QUESTION = {
     "true": "提问针对图片本身（截图、照片、图表、界面、图中的文字），不看图就无法可靠回答。",
     "false": "看图对回答没有帮助，或提问与图片无关；只是提到图片、发表情或闲聊也算 false。",
 }
-# 首版问法把顺带提到股票、新闻的闲聊也判成要搜（dev 阈值 0.5 误搜 13.9%），
-# 这一版明确排除闲聊调侃和群内人事。
 SEARCH_QUESTION = {
-    "instructions": "判断这条群聊提问是否需要联网搜索才能可靠回答。群友常在闲聊、吐槽、玩梗或发表看法时顺带提到股票、"
-                    "公司、新闻和人物，这类陈述和调侃不需要搜索；群友的绰号、群里的人和事网上查不到，也不需要搜索。"
-                    "只有对方在问一个依赖最新数据或可查证具体事实的问题，或明确要求联网、搜索时才需要。"
-                    "已有看图结果时，只用它判断是否还需要补充最新信息。",
-    "true": "对方在问一个具体事实，答案依赖近期信息或实时数据（行情、价格、版本、新闻、赛果、天气）或特定网页内容，"
-            "不联网很可能答错或过时；问网上流行梗、网络人物或作品的含义来历（不是群友）；或明确要求联网、搜索、上网查。",
-    "false": "闲聊、吐槽、玩梗、陈述观点或调侃（即使提到股票、公司、新闻）；问群里的人和事、群友绰号；"
-             "常识、观点、建议、创作、算术；不联网也能答好。",
+    "instructions": "判断回复的核心结论是否依赖需要核对的公开事实。结合补充语境理解短句，但语境只帮助理解本轮，"
+                    "以前搜过或提到过时效话题本身不算本轮要查。看到前一轮答复也不要默认它说得对。",
+    "true": "要回答当前价格或值不值、优惠、库存、版本、是否上线或已发布、最近事件、赛果、天气或特定网页内容，"
+            "即使没说‘现在’‘最新’也算；追问新增平台、活动日期、地区或版本，足以改变此前结论时也要查，"
+            "比如问过商品好价后补一句‘双11’。问公开网络梗、人物或作品的具体来历，或明确要求上网搜也算。",
+    "false": "只是在闲聊、吐槽、玩梗、表达观点，或问群内人事、常识、稳定的原理、算术、创作。"
+             "泛问购物策略（分开买还是一起买、要不要蹲好价）或按已知报价做取舍不用搜；要查的是具体优惠或当前报价。"
+             "‘现在去健身是不是自律’不查。"
+             "只说谢谢、感叹、让你重述或问上轮结论的理由时不因上轮搜过而再搜。",
 }
 
 
@@ -116,11 +115,13 @@ class JevToolRouter:
             return ToolDecision(VISION, False, NOT_APPLICABLE)
         return self._decide(VISION, {"提问": question}, VISION_QUESTION, self.vision_threshold, timeout)
 
-    def decide_search(self, *, question, vision_text=None, timeout=None):
+    def decide_search(self, *, question, vision_text=None, context="", timeout=None):
         question = _question(question)
         state = {"提问": question}
         if vision_text is not None:
             state["看图结果"] = _summary(vision_text)
+        if context:
+            state["补充语境"] = _summary(context)
         return self._decide(SEARCH, state, SEARCH_QUESTION, self.search_threshold, timeout)
 
     def _decide(self, tool, state, question, threshold, timeout=None):
@@ -189,11 +190,11 @@ class ToolTurn:
             raise ValueError("本轮已记录过识图结果")
         self._vision_summary = _summary(text)
 
-    def consider_search(self, *, timeout=None):
+    def consider_search(self, *, context="", timeout=None):
         if self._search_decision is not None:
             return ToolDecision(SEARCH, False, BUDGET_EXHAUSTED, threshold=self.router.search_threshold)
-        self._search_decision = self.router.decide_search(question=self.question,
-                                                          vision_text=self._vision_summary, timeout=timeout)
+        self._search_decision = self.router.decide_search(question=self.question, vision_text=self._vision_summary,
+                                                          context=context, timeout=timeout)
         return self._search_decision
 
     def record_search(self, text):

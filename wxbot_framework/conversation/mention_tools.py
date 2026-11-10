@@ -103,6 +103,7 @@ class ToolOutcome:
     ask: str | None = None  # 非空时不生成回复，直接用这句请对方说明
     image_choices: tuple = ()
     search_query: str = ""
+    search_subject: str = ""
 
     @property
     def used(self):
@@ -264,7 +265,7 @@ class MentionTools:
                 return result.value
 
     def steps(self, *, question, room, sender, received_at, quote=None, context_question="", image_choices=(),
-              previous_search="", followup_topic=None):
+              previous_search="", followup_topic=None, previous_subject="", search_reference="", search_date=""):
         """``context_question``：艾特没有正文时提问人上一条发言（见 ``previous_question``），只用来判断和调用工具。"""
         started = self.clock()
         deadline = started + self.budget
@@ -279,6 +280,7 @@ class MentionTools:
                 outcome.ask = ASK_SEARCH_TARGET
                 return outcome
             outcome.search_query = previous_search
+            outcome.search_subject = previous_subject
             yield
             result = self._search(previous_search, deadline)
             outcome.results.append(replace(result, search_target=previous_search))
@@ -359,10 +361,18 @@ class MentionTools:
                 turn.record_vision(vision_text)
             search_reason = "explicit" if explicit_search else None
             if search_reason is None:
-                decision = self._judge(turn.consider_search, deadline, "搜索")
+                context = (f"此前搜索词：{previous_subject[:230]}\n上轮答复：{search_reference[:220]}"
+                           if previous_subject and search_reference else "")
+                decision = self._judge(lambda *, timeout: turn.consider_search(context=context, timeout=timeout),
+                                       deadline, "搜索")
                 search_reason = "jev" if decision is not None and decision.use else None
             if search_reason:
-                outcome.search_query = _search_query(question, vision_text)[:1000]
+                query = _search_query(question, vision_text)
+                if previous_subject and search_reference:
+                    outcome.search_subject = previous_subject
+                    query = (f"本轮问题：{query[:500]}\n可能承接的公开搜索主题：{previous_subject[:230]}\n"
+                             f"日期：{search_date}。以本轮为准，仅在相关时沿用此前主题，优先核对相应日期的来源。")
+                outcome.search_query = query[:1000]
                 yield
                 result = self._search(outcome.search_query, deadline)
                 outcome.results.append(result)

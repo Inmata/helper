@@ -23,7 +23,7 @@ from wxbot_framework.conversation.turns import COLLECT_SECONDS, judge_turn, like
 from wxbot_framework.conversation.tool_router import JevToolRouter
 from wxbot_framework.recent_images import RECENT_IMAGES
 from wxbot_framework.integrations.llm import LLMError
-from wxbot_framework.conversation.members import SnapshotExpired
+from wxbot_framework.conversation.members import BEIJING, SnapshotExpired
 from wxbot_framework.messaging.mentions import at_source, bot_names, strip_at_labels, typed_at
 from wxbot_framework.conversation.personality import personality_text
 from wxbot_framework.conversation.utterance import (CHAT, DETAIL, QA, InterjectionGate, SpeakResult, classify_tier,
@@ -197,7 +197,7 @@ class Plugin:
         return tuple(row.get("text") or "" for row in rows
                      if isinstance(row, dict) and (row.get("bot_generated") or row.get("is_self")))
 
-    def _run_tools(self, message, ctx, question, snapshot=None):
+    def _run_tools(self, message, ctx, question, snapshot=None, *, resolved_quote=None, follow=False):
         """本轮艾特的看图 / 联网；没开启时返回空结果。Jev 读不出来时只按明确说法执行。"""
         if self.tools is None:
             return ToolOutcome()
@@ -227,17 +227,27 @@ class Plugin:
         arrived = message.received_at
         with self._followup_lock:
             choices = _tool_followup(self._image_choices, key, arrived, IMAGE_WINDOW_SECONDS) or ()
-            last_search = _tool_followup(self._last_searches, key, arrived, SEARCH_RETRY_SECONDS) or ""
+            last_search, last_subject = _tool_followup(self._last_searches, key, arrived, SEARCH_RETRY_SECONDS) or ("", "")
+        raw_quote = message.data.get("quote") or {}
+        bot_quote = self.members.account in (raw_quote.get("fromusr"), raw_quote.get("chatusr"))
+        reference = (resolved_quote or {}).get("text", "") if bot_quote else ""
+        if follow:
+            previous = self.members.turns.continuation(message)
+            if previous is not None:
+                reference = previous.text
         outcome = yield from tools.steps(question=question, room=message.chat_id, sender=message.sender_id,
                                          received_at=arrived, quote=message.data.get("quote"), context_question=context_question,
-                                         image_choices=choices, previous_search=last_search, followup_topic=followup_topic)
+                                         image_choices=choices, previous_search=last_search, followup_topic=followup_topic,
+                                         previous_subject=last_subject, search_reference=reference,
+                                         search_date=now.astimezone(BEIJING).date().isoformat())
         with self._followup_lock:
             if outcome.image_choices:
                 _remember_tool_followup(self._image_choices, key, arrived, outcome.image_choices)
             elif choices and any(result.image_number for result in outcome.results):
                 self._image_choices.pop(key, None)
             if outcome.search_query:
-                _remember_tool_followup(self._last_searches, key, arrived, outcome.search_query)
+                _remember_tool_followup(self._last_searches, key, arrived,
+                                        (outcome.search_query, outcome.search_subject or outcome.search_query))
         return outcome
 
     def _clean_query(self, message, source):
@@ -438,7 +448,7 @@ class Plugin:
             tools = build_default_tools(ctx.knowledge, self.members)
             context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
             options = {"detail": True} if detail else {"examples": context.examples}
-            outcome = yield from self._run_tools(message, ctx, clean_query, snapshot)
+            outcome = yield from self._run_tools(message, ctx, clean_query, snapshot, resolved_quote=quote, follow=plain)
             self._ensure_running()
             if before_send is not None:
                 before_send()

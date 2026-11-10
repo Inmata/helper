@@ -671,6 +671,25 @@ class MentionChatToolTests(unittest.TestCase):
         self.assertIn("【联网搜索结果】", ctx.last_user)
         self.assertEqual(ctx.sent, [("reply_at", "3.14 已经发了。没错。")])
 
+    def test_quoted_price_update_searches_with_prior_product_but_thanks_does_not(self):
+        class FollowupJev(FakeJev):
+            def noul(self, state, questions, *, timeout=None):
+                self.calls.append(state)
+                context = state.get("补充语境", "")
+                return [0.96 if state["提问"] == "双11" and "9800X3D" in context else 0.02]
+
+        jev = FollowupJev()
+        plugin, ctx = self.build("要看活动当天的具体报价。", jev=jev)
+        plugin.on_message(mention("搜一下9800X3D 2200是不是好价"), ctx)
+        data = {"quote": {"fromusr": ROBOT, "ref_type": "1", "text": "散片算正常公道价"}}
+        quoted = replace(mention(""), text="双11", data=data)
+        plugin.on_message(quoted, ctx)
+        plugin.on_message(replace(quoted, text="谢了"), ctx)
+        self.assertEqual(len(ctx.magpie.queries), 2)
+        self.assertIn("9800X3D", ctx.magpie.queries[-1])
+        self.assertIn("双11", ctx.magpie.queries[-1])
+        self.assertIn("散片算正常公道价", jev.calls[0]["补充语境"])
+
     def test_two_slow_turns_do_not_hold_a_fast_reply_and_same_sender_keeps_order(self):
         started, release, dispatched, followed = (threading.Event() for _ in range(4))
 

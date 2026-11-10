@@ -54,6 +54,7 @@
     },
     "mention_chat": {
       "enabled": false,
+      "mention_aliases": [],
       "tools": {
         "enabled": true,
         "vision_threshold": 0.6,

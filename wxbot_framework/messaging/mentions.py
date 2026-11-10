@@ -185,7 +185,7 @@ def reset_learned_aliases():
 
 def bot_names(members, room, aliases=()):
     """机器人可能被叫到的名字：微信昵称、群昵称、配置别名、本次运行学到的标签。"""
-    names = list(aliases or ())
+    names = [*(aliases or ()), "A姐", "A哥"]
     for getter, args in (("wechat_name", (members.account,)), ("display_name", (members.account, room))):
         try:
             name = getattr(members, getter)(*args)
@@ -214,6 +214,8 @@ def at_source(message, members, aliases=()):
     quote = data.get("quote") or {}
     if account in (quote.get("chatusr"), quote.get("fromusr")):
         return "quote"
+    if data.get("at_members") and account not in data["at_members"]:
+        return None
     text = message.text or ""
     if "@" in text and typed_at(text, bot_names(members, message.chat_id, aliases)):
         return "typed"

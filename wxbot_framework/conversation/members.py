@@ -203,8 +203,10 @@ class MemberStore:
         self._prepared = False
         # 聊天原文拆到独立模块；成员库仍持有同一连接与锁。
         from .history import ConversationHistory
+        from .room_state import RoomStateStore
         from .turns import ConversationTurns
         self.transcript = ConversationHistory(self)
+        self.room_state = RoomStateStore(self)
         self.turns = ConversationTurns()
 
     @classmethod
@@ -359,20 +361,21 @@ class MemberStore:
 
     def personality(self, room):
         """当前群人格：基准语气加生效的人格补充版本（0 表示只用基准）。"""
-        from .personality import PersonalityState
+        from .personality import PersonalityState, room_voice
         with self.database.lock:
             db = self.connection()
+            voice = room_voice(self.room_state, room)
             row = db.execute("SELECT generation, revision FROM room_personalities WHERE account=? AND room=?",
                              (self.account, room)).fetchone()
             version, revision = (row[0], row[1]) if row else (0, 0)
             if not version:
-                return PersonalityState(room, revision=revision)
+                return PersonalityState(room, revision=revision, voice=voice)
             stored = db.execute("SELECT supplement FROM persona_versions WHERE account=? AND room=? AND version=?",
                                 (self.account, room, version)).fetchone()
         text = _persona_text(stored[0]) if stored else ""
         if not text:
-            return PersonalityState(room, revision=revision)
-        return PersonalityState(room, generation=version, supplement=text, revision=revision)
+            return PersonalityState(room, revision=revision, voice=voice)
+        return PersonalityState(room, generation=version, supplement=text, revision=revision, voice=voice)
 
     def persona_revision(self, room):
         """本群人格切换计数；归纳开始时取一次，存版时比对，期间有切换就作废结果。"""

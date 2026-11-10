@@ -12,7 +12,6 @@ from ..plugin_engine.manager import PluginManager
 from ..sdk import ServiceFacade
 from ..conversation.members import MemberStore
 from ..memory.knowledge import KnowledgeStore
-from ..conversation.room_state import RoomStateStore
 from ..feature_config import feature_options
 from ..feature_config import maintenance_options
 from .announcements import send_startup_messages
@@ -34,7 +33,7 @@ class BotApplication:
         self.members = MemberStore.from_config(self.config, self.store.path.parent)
         self.knowledge = (KnowledgeStore(self.members, display_timezone=self.display_timezone)
                           if self.members is not None else None)
-        self.room_state = RoomStateStore(self.members) if self.members is not None else None
+        self.room_state = self.members.room_state if self.members is not None else None
         self.memory_options, self.hourly_options = feature_options(self.config)
         self.memory_worker = self.hourly_scheduler = None
         self.maintenance_options = maintenance_options(self.config)

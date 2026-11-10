@@ -3,11 +3,11 @@ from random import random
 from subprocess import SubprocessError
 from time import monotonic
 
+from wxbot_framework.conversation.personality import DEFAULT_VOICE, VOICE_FEATURE, room_voice, voice_self_name
 from wxbot_framework.integrations.voice_synth import synthesize_voice
 from wxbot_framework.integrations.voice_local import LocalVoice
 
 COMMAND = "/音色"
-_FEATURE = "voice_tone"
 _AUTO_CHANCE = 0.05
 _INTERVAL_SECONDS = 30 * 60
 _MAX_AUTO_CHARS = 40
@@ -39,7 +39,7 @@ class VoiceReply:
         self._voices = LocalVoice.available_voices()
         if self._voices:
             try:
-                self._local = LocalVoice(self._voices[0])
+                self._local = LocalVoice(DEFAULT_VOICE if DEFAULT_VOICE in self._voices else self._voices[0])
             except OSError as error:
                 logger.warning("本地音色未启动：%s", type(error).__name__)
 
@@ -49,23 +49,21 @@ class VoiceReply:
             self._local = None
 
     def current_voice(self, room, ctx):
-        if not self._voices:
-            return "Windows"
-        store = getattr(ctx, "room_state", None)
-        state = store.get(room, _FEATURE) if store is not None else None
-        choice = (state or {}).get("voice")
-        return choice if choice in self._voices else self._voices[0]
+        return room_voice(ctx.room_state, room)
 
     def command(self, message, ctx, choice):
         room = message.chat_id
         if not choice:
             available = "、".join(self._voices) or "未安装角色音色"
-            ctx.reply(message, f"当前音色：{self.current_voice(room, ctx)}。可选：{available}。")
+            voice = self.current_voice(room, ctx)
+            ctx.reply(message, f"当前音色：{voice}，自称{voice_self_name(voice)}。可选：{available}。")
+        elif not ctx.members.is_admin(message.sender_id):
+            ctx.reply(message, "只有管理员能改音色，发 /音色 可以查看。")
         elif choice not in self._voices:
             ctx.reply(message, f"当前可用音色：{'、'.join(self._voices) or '无'}。用法：/音色 名称。")
         else:
-            ctx.room_state.put(room, _FEATURE, {"voice": choice})
-            ctx.reply(message, f"本群语音已切换为{choice}。")
+            ctx.room_state.put(room, VOICE_FEATURE, {"voice": choice})
+            ctx.reply(message, f"本群音色已切换为{choice}，现在自称{voice_self_name(choice)}。")
 
     def reserve(self, message, reply, preference, *, automatic):
         """只选择本轮发送形式并记下冷却时间；不等待合成。"""
@@ -80,12 +78,11 @@ class VoiceReply:
         self._next[room] = now + _INTERVAL_SECONDS
         return True
 
-    def send(self, message, ctx, reply, *, guard, dispatch=None):
+    def send(self, message, ctx, reply, *, voice, guard, dispatch=None):
         """合成失败返回 None；已提交则返回微信发送结果。"""
         now = monotonic()
-        voice = self.current_voice(message.chat_id, ctx)
         if self._voices:
-            if self._local is None:
+            if self._local is None or voice not in self._voices:
                 return None
             try:
                 wav = self._local.synthesize(voice, reply)
@@ -97,11 +94,14 @@ class VoiceReply:
                 ctx.logger.info("%s语音重试后仍超长，改发文字", voice)
                 return None
         else:
+            if voice != DEFAULT_VOICE:
+                return None
             try:
                 wav = synthesize_voice(reply)
             except (OSError, SubprocessError, ValueError) as error:
                 ctx.logger.warning("本机语音合成失败，改发文字：%s", type(error).__name__)
                 return None
+            voice = "Windows"
         submit = lambda: ctx.reply_voice(message, wav, transcript=reply, delivery_guard=guard)
         sent = dispatch(submit) if dispatch is not None else submit()
         ctx.logger.info("艾特语音回复：%s，音色=%s，合成到回执 %.2f 秒",

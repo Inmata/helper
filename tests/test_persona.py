@@ -130,7 +130,7 @@ class StorageTests(PersonaTestCase):
 
 class InjectionTests(PersonaTestCase):
     def test_base_output_is_unchanged(self):
-        self.assertEqual(system_with_personality("规则", PersonalityState(ROOM)),
+        self.assertEqual(system_with_personality("规则", PersonalityState("")),
                          FIXED_PROMPT + "\n功能要求：\n规则")
 
     def test_supplement_sits_between_fixed_prompt_and_requirements(self):

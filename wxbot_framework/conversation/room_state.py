@@ -27,7 +27,7 @@ class RoomStateStore:
         self._ready = False
 
     def initialize(self):
-        with self.members.database.lock, self.members.connection() as db:
+        with self.members.transaction() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS room_states (
                 account TEXT NOT NULL, room TEXT NOT NULL, feature TEXT NOT NULL,
                 payload TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -49,8 +49,8 @@ class RoomStateStore:
     def get(self, room, feature):
         """读回状态；没有、被清空或内容已损坏时返回 None。"""
         self._prepare(room, feature)
-        with self.members.database.lock, self._connection() as db:
-            row = db.execute("""SELECT payload FROM room_states
+        with self.members.database.lock:
+            row = self._connection().execute("""SELECT payload FROM room_states
                 WHERE account=? AND room=? AND feature=?""",
                 (self.members.account, room, feature)).fetchone()
         if row is None:

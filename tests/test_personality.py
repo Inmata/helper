@@ -61,6 +61,23 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertIn("必须遵守JSON字段", system)
         self.assertNotIn("每次回复控制在 20", system)
 
+    def test_voice_command_updates_self_name_only_for_admin(self):
+        provider = Mock(return_value="我在呢。")
+        plugin = self.setup_chat(provider)
+        self.ctx._room_state = self.store.room_state
+        self.store.owner_wxid = CAT
+        plugin.voice_reply._voices = ("星瞳", "炫神")
+        plugin.on_message(self.message("/音色 炫神", sender=OTHER), self.ctx)
+        self.assertIn("只有管理员", self.backend.sent[-1][1])
+        plugin.on_message(self.message("/音色", sender=OTHER), self.ctx)
+        self.assertIn("星瞳，自称A姐", self.backend.sent[-1][1])
+        plugin.on_message(self.chat("你叫什么？", sequence=100), self.ctx)
+        self.assertIn("自称「A姐」", provider.call_args.args[0])
+        plugin.on_message(self.message("/音色 炫神", sender=CAT), self.ctx)
+        plugin.on_message(self.chat("那你现在叫什么？", sequence=101), self.ctx)
+        self.assertIn("自称「A哥」", provider.call_args.args[0])
+        self.assertEqual(self.store.personality(ROOM).voice, "炫神")
+
     def test_length_guidance_is_defined_once_and_deferred_by_personality(self):
         for old in ("120—220", "50—120"):
             self.assertNotIn(old, CHAT_SYSTEM)
@@ -388,6 +405,9 @@ class AddressingTests(unittest.TestCase):
 
     def test_typed_at_is_recognised_without_structural_mention(self):
         self.assertEqual(at_source(self.message("@机器人 在吗"), self.members), "typed")
+        for alias in ("A姐", "A哥"):
+            self.assertEqual(at_source(self.message(f"@{alias} 在吗"), self.members), "typed")
+        self.assertIsNone(at_source(self.message("@A姐 在吗", at_members=(OTHER,)), self.members))
 
     def test_structural_at_teaches_the_visible_label(self):
         message = self.message("@有个ai 你看", is_at_self=True, at_members=(ROBOT,))

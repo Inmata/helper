@@ -536,7 +536,8 @@ class Plugin:
             if can_voice and self.voice_reply.reserve(message, reply, voice_preference, automatic=tier == CHAT):
                 yield  # 语音合成由慢队列等待，其他成员的文字回复继续处理。
                 self._ensure_running()
-                voice_sent = self.voice_reply.send(message, ctx, reply, guard=guard, dispatch=dispatch)
+                voice_sent = self.voice_reply.send(message, ctx, reply, voice=personality.voice,
+                                                   guard=guard, dispatch=dispatch)
                 if voice_sent is not None:
                     if voice_sent:
                         result.sent.append(reply)

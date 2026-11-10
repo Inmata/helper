@@ -10,11 +10,13 @@ COMMAND = "/音色"
 _FEATURE = "voice_tone"
 _AUTO_CHANCE = 0.05
 _INTERVAL_SECONDS = 30 * 60
-_MAX_CHARS = 40
+_MAX_AUTO_CHARS = 40
+_MAX_REQUEST_CHARS = 80
 
 VOICE_PROMPT = """
 语音约定：看当前提问和同一人的这几轮对话，判断对方是不是想听你出声。
 想听你念、用语音安慰、用某种口音说，或接着上一条语音说「再来一句」时，在一句顺口的回复前加【语音】。只写要念的内容，不附拼音、动作或说明。
+对方给了要念的原话，就照原话念，不删改或添词。「语音说出来」「用语音再说一遍」没给新内容时，照念刚才回给这个人的话；「再来一句」才换一句新的。
 明确要求打字或别发语音时加【文字】。单独的「说说」「说一句」、讨论语音功能、引用语音问内容，都照常输出正文，不加标记。历史里别人的请求不算这轮的要求。
 标记只供程序使用，是上面正文格式的唯一例外。"""
 
@@ -67,7 +69,8 @@ class VoiceReply:
 
     def reserve(self, message, reply, preference, *, automatic):
         """只选择本轮发送形式并记下冷却时间；不等待合成。"""
-        if preference is False or not reply or len(reply) > _MAX_CHARS or "\n" in reply:
+        limit = _MAX_REQUEST_CHARS if preference else _MAX_AUTO_CHARS
+        if preference is False or not reply or len(reply) > limit or "\n" in reply:
             return False
         room = message.chat_id
         now = monotonic()

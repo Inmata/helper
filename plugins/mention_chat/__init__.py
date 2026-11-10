@@ -356,7 +356,7 @@ class Plugin:
 
             reply, voice_preference = generate()
             self._ensure_running()
-            repeated = too_similar(reply, self._recent_bot_texts(message.chat_id))
+            repeated = voice_preference is not True and too_similar(reply, self._recent_bot_texts(message.chat_id))
             if repeated:
                 ctx.logger.info("艾特回复与最近发言相近，换角度重说一次：room=%s", message.chat_id)
                 try:

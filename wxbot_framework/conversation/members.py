@@ -77,6 +77,8 @@ class ConversationSnapshot:
     group_messages: tuple = ()
     anchor_id: int = 0
     history: tuple = ()
+    speaker_tag: str = ""
+    participants: tuple = ()
 
 
 @dataclass(frozen=True)

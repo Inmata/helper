@@ -11,7 +11,7 @@ from pathlib import Path
 from filehelper_service import (NativeFileHelperService, ReceivedTextMessage, ReceivedTextMessageV2,
                                 ReceivedMediaMessageV4)
 from wxbot_framework.image_receiver import ImageDownloadSkipped
-from wxbot_framework.image_metadata import parse_image_metadata
+from wxbot_framework.image_metadata import image_download_reference, parse_image_metadata
 from wxbot_framework.recent_images import RECENT_IMAGES
 from wxbot_framework.messaging.mentions import parse_at_members, parse_quote
 from run_selftest import (TEXT_DLL, K, check, compatible_core_version, download_aeskey_supported,
@@ -138,7 +138,7 @@ class NativeTextService(NativeFileHelperService):
         16 位 ``cdnthumbaeskey``；上游同样没有可用的转换依据，因此不做猜测性转换，
         统一以 skipped 事件说明原因，避免含糊的 failed。
         """
-        filekey = metadata.cdnmidimgurl or metadata.filekey or metadata.cdnbigimgurl
+        filekey, image_type, _ = image_download_reference(metadata)
         if not filekey:
             raise ImageDownloadSkipped("仅提供缩略图引用，缩略图密钥不受原生下载接口支持"
                                        if metadata.cdnthumburl else "图片元数据没有可下载地址")
@@ -146,7 +146,6 @@ class NativeTextService(NativeFileHelperService):
             raise ImageDownloadSkipped("图片元数据没有可下载密钥")
         if not download_aeskey_supported(metadata.aeskey):
             raise ImageDownloadSkipped("图片密钥格式不受原生下载接口支持")
-        image_type = 2 if (metadata.cdnmidimgurl or metadata.filekey) else 1
         with self._calls:
             if not self._owns_bridge or self._stop.is_set():
                 return False
@@ -161,8 +160,9 @@ class NativeTextService(NativeFileHelperService):
     def _deliver_image(self, data):
         if self._stop.is_set():
             return
-        # 只记录会话和状态；本机路径、XML、URL 与密钥不写日志。
-        logger.info("图片接收 | 会话=%s | 状态=%s", data.get("chat_id"), data.get("image_status"))
+        # 本机路径、XML、URL 与密钥不写日志。
+        logger.info("图片接收 | 会话=%s | 状态=%s | 画质=%s", data.get("chat_id"),
+                    data.get("image_status"), data.get("image_quality"))
         RECENT_IMAGES.note(data)
         for handler in list(self.msg_handlers):
             try:

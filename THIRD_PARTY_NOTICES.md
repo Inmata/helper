@@ -10,4 +10,6 @@
 
 微信 4.2.0.12 的构建资料和原生地址配置取自 [Prometheus-first/helper 的 b6d35f4](https://github.com/Prometheus-first/helper/commit/b6d35f41c58c9144a06bf39bfa42cab6193cc5c2)，本项目按现有消息桥接接口作了修改。上游许可随附于 [native/UPSTREAM-LICENSE.txt](native/UPSTREAM-LICENSE.txt)。
 
+图片接收的原图优先策略参考 [Prometheus-first/helper 的 5fc55e1](https://github.com/Prometheus-first/helper/commit/5fc55e1c58c69684ae1aee11d03886fe280ff44c)，本项目在原图失败时回退到普通图，继续跳过仅有缩略图引用的消息。上游许可同上。
+
 成语接龙的扩展词表来自 [pwxcoo/chinese-xinhua](https://github.com/pwxcoo/chinese-xinhua)，Copyright (c) 2018 PWXCOO，MIT License。仅提取四字词条；固定版本、筛选规则与校验值见 `plugins/idiom_chain/data/README.md`，完整许可证见 `plugins/idiom_chain/data/LICENSE.chinese-xinhua.txt`。

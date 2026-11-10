@@ -143,12 +143,16 @@ class ConversationHistory:
             history = self.recent_rows(message.chat_id, limit=40, before_id=anchor, context=True,
                                        include_bot=True, continuity_seconds=1800)
             previous_ids = {row["id"] for row in previous}
-            group = self.label_speakers([row for row in group if row["id"] not in previous_ids], message.chat_id)
-            history = self.label_speakers(history, message.chat_id)
             member = members.find_by_wxid(message.sender_id, message.chat_id)
-            return ConversationSnapshot(message.chat_id, day, state[0], member.name if member else
-                                        members.safe_wechat_name(message.sender_id, message.chat_id) or "群友",
-                                        tuple(previous), message.text, tuple(group), anchor, tuple(history))
+            name = member.name if member else members.safe_wechat_name(message.sender_id, message.chat_id) or "群友"
+            speakers = {message.sender_id: ("P1", name, member)}
+            group = self.label_speakers([row for row in group if row["id"] not in previous_ids],
+                                        message.chat_id, speakers=speakers)
+            history = self.label_speakers(history, message.chat_id, speakers=speakers)
+            participants = tuple((tag, person.name, person.aliases)
+                                 for tag, _, person in speakers.values() if person is not None)
+            return ConversationSnapshot(message.chat_id, day, state[0], name, tuple(previous), message.text,
+                                        tuple(group), anchor, tuple(history), "P1", participants)
 
     @contextmanager
     def delivery_guard(self, snapshot):
@@ -303,14 +307,24 @@ class ConversationHistory:
                         break
             return list(reversed(rows))
 
-    def label_speakers(self, rows, room):
+    def label_speakers(self, rows, room, *, speakers=None):
         members = self.members
-        speakers, result = {}, []
+        if speakers is None:
+            speakers = {}
+        result = []
         for row in rows:
             item = dict(row)
-            number = speakers.setdefault(item["sender_id"], len(speakers) + 1)
-            item.update(speaker=f"P{number}", speaker_name=members.display_name(item["sender_id"], room)
-                        or f"未绑定成员{number}")
+            wxid = item["sender_id"]
+            if item["bot_generated"]:
+                item.update(speaker="机器人", speaker_name="机器人")
+            else:
+                if wxid not in speakers:
+                    number = len(speakers) + 1
+                    person = members.find_by_wxid(wxid, room)
+                    name = person.display_name if person else members.safe_wechat_name(wxid, room)
+                    speakers[wxid] = (f"P{number}", name or f"未绑定成员{number}", person)
+                tag, name, _ = speakers[wxid]
+                item.update(speaker=tag, speaker_name=name)
             result.append(item)
         return result
 

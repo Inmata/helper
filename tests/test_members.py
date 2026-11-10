@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from support.recyclable_tempdir import RecyclableTemporaryDirectory
 
 from plugins.member_identity import Plugin
+from wxbot_framework.conversation.dialogue import Dialogue
 from wxbot_framework.memory.knowledge import KnowledgeStore
 from wxbot_framework.conversation.members import MemberError, MemberStore, name_key
 from wxbot_framework.sdk import Message, PluginContext, ServiceFacade
@@ -117,6 +118,42 @@ class MemberTests(unittest.TestCase):
         self.assertTrue(self.store.record(Message("重连消息", ROOM, JING, is_group=True, sequence=1, session_id="second")))
         self.store.bind("成员乙", ROOM, JING)
         self.assertEqual(len(self.store.history("成员乙")), 2)
+
+    def test_mention_correction_keeps_two_people_and_their_aliases_separate(self):
+        self.store.bind("成员乙", ROOM, JING)
+        self.store.record(self.message("报名名单是我发的", sender=SMALL, sequence=1))
+        self.store.record(self.message("我只是提醒看名单", sequence=2))
+        self.store.record_bot_reply(ROOM, "小号和成员乙别名是同一个人，是他发的。")
+        correction = self.message("不是小号发的吗？", sequence=3)
+        self.store.record(correction)
+
+        client = Mock()
+        client.complete_text.return_value = "收到"
+        Dialogue(client).reply(self.store.conversation_snapshot(correction))
+        _, prompt = client.complete_text.call_args.args
+        history = client.complete_text.call_args.kwargs["history"]
+        self.assertIn("【当前发言者】[P1] 成员乙", prompt)
+        self.assertIn("[P1] 成员乙；别名：成员乙别名", prompt)
+        self.assertIn("[P2] 成员甲；别名：小号", prompt)
+        self.assertIn("[P2] 成员甲昵称：报名名单是我发的", prompt)
+        self.assertEqual(history[0], {"role": "user", "content": "[P2] 成员甲昵称：报名名单是我发的"})
+        self.assertEqual(history[1], {"role": "user", "content": "[P1] 成员乙：我只是提醒看名单"})
+
+    def test_bot_words_are_not_rendered_as_the_members_words(self):
+        self.store.bind("成员乙", ROOM, JING)
+        self.store.record(self.message("照平时的方式说话", sequence=1))
+        self.store.record_bot_reply(ROOM, "宝子，别急。")
+        followup = self.message("兄弟，咱俩都是爷们！", sequence=2)
+        self.store.record(followup)
+
+        client = Mock()
+        client.complete_text.return_value = "收到"
+        Dialogue(client).reply(self.store.conversation_snapshot(followup))
+        _, prompt = client.complete_text.call_args.args
+        history = client.complete_text.call_args.kwargs["history"]
+        self.assertNotIn("宝子", prompt)
+        self.assertEqual(history, [{"role": "user", "content": "[P1] 成员乙：照平时的方式说话"},
+                                   {"role": "assistant", "content": "[机器人发言] 宝子，别急。"}])
 
     def test_limit_and_time_filter_return_chronological_records(self):
         self.store.bind("成员乙", ROOM, JING)

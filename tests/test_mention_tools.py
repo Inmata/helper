@@ -6,8 +6,10 @@ import sys
 import threading
 import time
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from plugins.mention_chat import Plugin
@@ -22,6 +24,7 @@ from wxbot_framework.integrations.jev import JevClient
 from wxbot_framework.integrations.magpie_tools import (MagpieResult, MagpieTools, MagpieToolsUnavailableError,
                                                        _McpEndpoint)
 from wxbot_framework.messaging.mentions import parse_quote
+from wxbot_framework.plugin_engine.manager import PluginRecord
 from wxbot_framework.recent_images import RECENT_IMAGES, RecentImages
 
 NATIVE = Path(__file__).resolve().parent.parent / "native"
@@ -668,6 +671,86 @@ class MentionChatToolTests(unittest.TestCase):
         self.assertIn("【联网搜索结果】", ctx.last_user)
         self.assertEqual(ctx.sent, [("reply_at", "3.14 已经发了。没错。")])
 
+    def test_two_slow_turns_do_not_hold_a_fast_reply_and_same_sender_keeps_order(self):
+        started, release, dispatched, followed = (threading.Event() for _ in range(4))
+
+        class BlockingSearch(FakeMagpie):
+            def search(self, query, **options):
+                if "第一条" in query:
+                    started.set()
+                    release.wait(4)
+                return super().search(query, **options)
+
+        plugin, ctx = self.build("不用这条固定回复", magpie=BlockingSearch())
+        ctx.config, ctx.llm = {}, ctx.client
+        sent = []
+        send = ctx.reply_at
+
+        def record_send(message, text, **options):
+            sent.append(message.text)
+            if "接着问" in message.text:
+                followed.set()
+            return send(message, text, **options)
+
+        ctx.reply_at = record_send
+        plugin.on_load(ctx)
+
+        def dispatch():
+            plugin.on_message(mention("帮我搜一下第一条"), ctx)
+            plugin.on_message(replace(mention("帮我搜一下另一条"), sender_id=OTHER), ctx)
+            plugin.on_message(mention("接着问"), ctx)
+            plugin.on_message(replace(mention("普通问候"), sender_id="wxid_fast"), ctx)
+            dispatched.set()
+
+        worker = threading.Thread(target=dispatch)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(2), "慢搜索没有开始")
+            self.assertTrue(dispatched.wait(1), "普通艾特仍在等慢搜索")
+            self.assertEqual([text.split("\u2005")[-1] for text in sent], ["普通问候"])
+            release.set()
+            self.assertTrue(followed.wait(3), "同一人的后续问题没有恢复")
+            texts = [text.split("\u2005")[-1] for text in sent]
+            self.assertLess(texts.index("帮我搜一下第一条"), texts.index("接着问"))
+        finally:
+            release.set()
+            worker.join(5)
+            unload = getattr(plugin, "on_unload", None)
+            if unload:
+                unload(ctx)
+
+    def test_running_slow_reply_blocks_hot_reload_but_is_canceled_on_shutdown(self):
+        started, release = threading.Event(), threading.Event()
+
+        class BlockingSearch(FakeMagpie):
+            def search(self, query, **options):
+                started.set()
+                release.wait(5)
+                return super().search(query, **options)
+
+        plugin, ctx = self.build("这条不能发", magpie=BlockingSearch())
+        ctx.config, ctx.llm = {}, ctx.client
+        plugin.on_load(ctx)
+        record = PluginRecord(SimpleNamespace(api="v1", name="mention_chat"), plugin, ctx,
+                              "_mention_async_test", 8)
+        record.thread.start()
+        try:
+            record.enqueue(mention("帮我搜一下天气"))
+            self.assertTrue(started.wait(2))
+            with self.assertRaisesRegex(RuntimeError, "正在处理消息"):
+                record.deactivate()
+            self.assertTrue(record.active)
+
+            record.deactivate(force=True)
+            self.assertTrue(record.join())
+            self.assertEqual(ctx.sent, [])
+            self.assertEqual(ctx.completions, 0)
+        finally:
+            release.set()
+            if record.active:
+                record.deactivate(force=True)
+                record.join()
+
     def test_links_the_model_copies_are_removed_from_the_sent_reply(self):
         plugin, ctx = self.build("3.14 发了（[官网](https://www.python.org/downloads/)）。见 https://docs.python.org/3/",
                                  jev=FakeJev(search=0.9))
@@ -681,6 +764,71 @@ class MentionChatToolTests(unittest.TestCase):
         self.assertIn("（没成功）工具服务连不上或超时", ctx.last_user)
         self.assertEqual(ctx.sent, [("reply_at", "没查到，搜索挂了")])
 
+    def test_search_retry_reuses_the_original_target_after_a_failure(self):
+        magpie = FakeMagpie(error=MagpieToolsUnavailableError("x"))
+        plugin, ctx = self.build("查过了。", jev=FakeJev(search=0.9), magpie=magpie)
+        original = "帮我搜一下桌游比赛的公开成绩榜"
+        now = time.monotonic()
+        plugin.on_message(mention(original, received_at=now), ctx)
+        magpie.error = None
+
+        plugin.on_message(mention("别犟嘴了 重试搜索", received_at=now + 1), ctx)
+        plugin.on_message(mention("重试", received_at=now + 2), ctx)
+
+        self.assertEqual(magpie.queries, [original, original, original])
+        self.assertIn("重试目标：" + original, ctx.last_user)
+
+    def test_retry_cannot_borrow_another_members_query_or_replace_a_new_topic(self):
+        plugin, ctx = self.build("查过了。", jev=FakeJev(search=0.9))
+        now = time.monotonic()
+        first = "搜一下桌游比赛成绩"
+        second = "重新搜一下下周的展会"
+        plugin.on_message(mention(first, received_at=now), ctx)
+        plugin.on_message(replace(mention("重试搜索", received_at=now + 1), sender_id=OTHER), ctx)
+        self.assertEqual(ctx.magpie.queries, [first])
+        self.assertIn("上一次", ctx.sent[-1][1])
+        plugin.on_message(mention(second, received_at=now + 2), ctx)
+        self.assertEqual(ctx.magpie.queries, [first, second])
+
+    def test_factual_correction_verifies_the_previous_subject_even_when_jev_rejects(self):
+        plugin, ctx = self.build("查到了，确实是两个不同的游戏。", jev=FakeJev(search=0.0))
+        stamp = datetime.now(timezone.utc).isoformat()
+        prior = {"text": "讲讲星海旅人0到2的时间线", "received_at": stamp}
+        ctx.members.conversation_snapshot = lambda message: ConversationSnapshot(
+            ROOM, "2026-11-10", 0, "小明", (prior,), message.text)
+
+        plugin.on_message(mention("大陆前传和0不是一个游戏吧", received_at=time.monotonic()), ctx)
+
+        self.assertEqual(len(ctx.magpie.queries), 1)
+        self.assertIn("星海旅人0", ctx.magpie.queries[0])
+        self.assertIn("不是一个游戏", ctx.magpie.queries[0])
+
+    def test_vague_recheck_uses_public_title_and_does_not_accuse_the_member(self):
+        plugin, ctx = self.build("他现编个假百科，压根没这游戏。", magpie=FakeMagpie(search="搜索引擎接口新闻"))
+        stamp = datetime.now(timezone.utc).isoformat()
+        history = ({"text": "《星海旅人0》由示例公司发行。", "received_at": stamp},
+                   {"text": "我之前查过，根本没有。", "received_at": stamp, "bot_generated": True})
+        ctx.members.conversation_snapshot = lambda message: ConversationSnapshot(
+            ROOM, "2026-11-10", 0, "小明", (), message.text, history=history)
+
+        plugin.on_message(mention("那你联网查询重新讲讲", received_at=time.monotonic()), ctx)
+
+        self.assertEqual(len(ctx.magpie.queries), 1)
+        self.assertIn("星海旅人0", ctx.magpie.queries[0])
+        self.assertNotIn("根本没有", ctx.magpie.queries[0])
+        self.assertIn("还没核实", ctx.sent[-1][1])
+        self.assertNotIn("现编", ctx.sent[-1][1])
+
+    def test_failed_fact_check_says_it_could_not_verify_without_guessing(self):
+        magpie = FakeMagpie(error=MagpieToolsUnavailableError("x"))
+        plugin, ctx = self.build("肯定没有。", magpie=magpie)
+        plugin.on_message(mention("《星海旅人0》真的有吗？", received_at=time.monotonic()), ctx)
+
+        self.assertEqual(len(magpie.queries), 1)
+        self.assertIn("星海旅人0", magpie.queries[0])
+        self.assertIn("还没核实", ctx.sent[-1][1])
+        self.assertEqual(ctx.completions, 0)
+
     def test_ambiguous_images_get_a_fixed_question_without_model_call(self):
         plugin, ctx = self.build("不该调用")
         for number in (1, 2):
@@ -689,6 +837,32 @@ class MentionChatToolTests(unittest.TestCase):
         plugin.on_message(mention("看看图", received_at=time.monotonic()), ctx)
         self.assertEqual(ctx.sent, [("reply_at", ASK_WHICH_IMAGE)])
         self.assertEqual(ctx.completions, 0)
+
+    def test_look_at_all_followup_uses_the_images_from_the_clarification(self):
+        plugin, ctx = self.build("第一张和第二张都看了。")
+        first = image(RECENT_IMAGES, message_id=1)
+        second = image(RECENT_IMAGES, message_id=2)
+        plugin.on_message(mention("", received_at=time.monotonic()), ctx)
+        self.assertEqual(ctx.sent, [("reply_at", ASK_WHICH_IMAGE)])
+
+        image(RECENT_IMAGES, message_id=3)
+        plugin.on_message(mention("都看不行", received_at=time.monotonic()), ctx)
+
+        self.assertEqual([path for path, _ in ctx.magpie.images], [first.path, second.path])
+        self.assertIn("【看图结果】第1张：", ctx.last_user)
+        self.assertIn("【看图结果】第2张：", ctx.last_user)
+        self.assertEqual(ctx.sent[-1], ("reply_at", "第一张和第二张都看了。"))
+        self.assertEqual(ctx.completions, 1)
+
+    def test_batch_vision_keeps_the_number_of_an_unavailable_image(self):
+        plugin, ctx = self.build("第一张看到了，第二张没下载下来。")
+        first = image(RECENT_IMAGES, message_id=1)
+        image(RECENT_IMAGES, message_id=2, status="failed")
+        plugin.on_message(mention("两张都看", received_at=time.monotonic()), ctx)
+
+        self.assertEqual([path for path, _ in ctx.magpie.images], [first.path])
+        self.assertIn("【看图结果】第1张：", ctx.last_user)
+        self.assertIn("【看图结果】第2张：（没成功）图片没下载成功", ctx.last_user)
 
     def test_disabled_tools_leave_the_reply_path_unchanged(self):
         plugin, ctx = self.build("好的")

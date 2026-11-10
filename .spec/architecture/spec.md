@@ -71,6 +71,7 @@ related:
 | `MemoryLearner` | 增量学习调度 |
 | `HourlyChat` | 定时主动发言候选（冷场兜底） |
 | `ProactiveChat.timer` | 事件驱动主动发言的去抖计时（插件 `proactive_chat` 自建，`on_unload` 时停止） |
+| `MentionChat.slow` | 艾特回复的看图、联网及后续回复（插件 `mention_chat` 自建，`on_unload` 时停止） |
 | `WechatImageReceiver` | 每个账号一个异步图片下载线程；下载完成后投递图片事件 |
 | `mention-tool` | 艾特回复里单次 Jev 判断或工具调用的限时线程（守护线程，超过本轮截止时间即放弃） |
 | `Plugin.<名称>` | 每个插件的消息队列 |

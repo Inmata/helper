@@ -1,13 +1,18 @@
 """真正艾特机器人后，用本群人格回复当前发言者。"""
 import threading
 import time
+from collections import OrderedDict
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from .._shared import idiom_state
+from .slow_replies import SlowReplies
 
 from wxbot_framework.conversation.dialogue import Dialogue
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
-from wxbot_framework.conversation.mention_tools import (MentionTools, ToolOutcome, previous_question, read_tool_options,
+from wxbot_framework.conversation.mention_tools import (ASK_PUBLIC_SEARCH_TARGET, ASK_SEARCH_TARGET, IMAGE_WINDOW_SECONDS,
+                                                        SEARCH_RETRY_SECONDS, MentionTools, ToolOutcome,
+                                                        previous_question, public_search_topic, read_tool_options,
                                                         strip_links)
 from wxbot_framework.conversation.repetition import too_similar
 from wxbot_framework.conversation.tool_router import JevToolRouter
@@ -28,6 +33,7 @@ RECENT_BOT_ROWS = 5
 DETAIL_HINTS = ("详细", "详解", "细说", "展开", "具体说说", "完整", "全文", "全篇", "原文", "一步一步", "逐步")
 # 框架按已编译桥接声明的图片能力；没有时找不到图要如实说“收不到图片”，而不是让对方去引用。
 IMAGE_CAPABILITY = "group.image.receive"
+TOOL_FOLLOWUP_LIMIT = 64
 
 
 def read_aliases(config):
@@ -42,6 +48,18 @@ def wants_detail(query):
     return any(hint in query for hint in DETAIL_HINTS)
 
 
+def _tool_followup(cache, key, received_at, window):
+    saved = cache.get(key)
+    return saved[1] if saved and 0 <= received_at - saved[0] <= window else None
+
+
+def _remember_tool_followup(cache, key, received_at, value):
+    cache[key] = (received_at, value)
+    cache.move_to_end(key)
+    if len(cache) > TOOL_FOLLOWUP_LIMIT:
+        cache.popitem(last=False)
+
+
 class Plugin:
     def __init__(self):
         # 同一群、同一发言者、相同提问的回复在生成或发送期间不重复生成。
@@ -50,6 +68,10 @@ class Plugin:
         self._pending_lock = threading.Lock()
         self.aliases = ()  # on_load 按配置填；测试与热重载时缺省为空
         self.tools = None  # on_load 按配置填看图 / 联网阈值；None 表示不调用工具
+        self._image_choices = OrderedDict()
+        self._last_searches = OrderedDict()
+        self._followup_lock = threading.Lock()
+        self._slow = None
 
     def _claim(self, key, arrived_at):
         """认领本次生成；仍在生成中，或本次到达时首次回复尚未结束，返回 False。
@@ -86,6 +108,24 @@ class Plugin:
         if not self.members.history_enabled:
             raise ValueError("艾特上下文对话需要 history_enabled: true")
         ctx.llm  # 启动时核对配置，不请求接口。
+        self._slow = SlowReplies(ctx.logger)
+
+    def has_pending_callbacks(self):
+        return self._slow is not None and self._slow.busy()
+
+    def on_unload(self, ctx):
+        if self._slow is not None:
+            self._slow.close()
+
+    def _ensure_running(self):
+        if self._slow is not None and self._slow.stopped.is_set():
+            raise SnapshotExpired("艾特插件已停止")
+
+    @contextmanager
+    def _delivery_guard(self, guard, *args):
+        with guard(*args):
+            self._ensure_running()
+            yield
 
     def room_game(self, room, ctx, *, message=None):
         """本群正在进行的接龙进度；没有或读不出来时返回 None。"""
@@ -145,19 +185,37 @@ class Plugin:
             jev = None
         tools = MentionTools(router=JevToolRouter(jev, **self.tools), magpie=lambda: ctx.magpie,
                              images=RECENT_IMAGES, image_supported=IMAGE_CAPABILITY in getattr(ctx, "capabilities", ()),
-                             logger=ctx.logger)
+                             logger=ctx.logger, stopped=self._slow.stopped if self._slow is not None else None)
         # 只艾特没写正文时，他上一条发言（如“这张图是啥意思？”）才是真正的问题。
         context_question = ""
+        followup_topic = None
+        queued = max(0.0, time.monotonic() - message.received_at)
+        now = datetime.now(timezone.utc) - timedelta(seconds=queued)
         if not question and snapshot is not None:
             # 以这条艾特到达的墙钟时刻比较，扣掉它排队等待处理的时间。
-            queued = max(0.0, time.monotonic() - message.received_at)
             names = self._bot_names(message.chat_id)
             context_question = previous_question(
-                snapshot.messages, now=datetime.now(timezone.utc) - timedelta(seconds=queued),
+                snapshot.messages, now=now,
                 is_mention=lambda text: bool(typed_at(text, names)))
-        return tools.run(question=question, room=message.chat_id, sender=message.sender_id,
-                         received_at=message.received_at, quote=message.data.get("quote"),
-                         context_question=context_question)
+        if snapshot is not None:
+            followup_topic = public_search_topic(question or context_question, previous=snapshot.messages,
+                                                 history=snapshot.history, now=now)
+        key = (message.session_id, message.chat_id, message.sender_id)
+        arrived = message.received_at
+        with self._followup_lock:
+            choices = _tool_followup(self._image_choices, key, arrived, IMAGE_WINDOW_SECONDS) or ()
+            last_search = _tool_followup(self._last_searches, key, arrived, SEARCH_RETRY_SECONDS) or ""
+        outcome = yield from tools.steps(question=question, room=message.chat_id, sender=message.sender_id,
+                                         received_at=arrived, quote=message.data.get("quote"), context_question=context_question,
+                                         image_choices=choices, previous_search=last_search, followup_topic=followup_topic)
+        with self._followup_lock:
+            if outcome.image_choices:
+                _remember_tool_followup(self._image_choices, key, arrived, outcome.image_choices)
+            elif choices and any(result.image_number for result in outcome.results):
+                self._image_choices.pop(key, None)
+            if outcome.search_query:
+                _remember_tool_followup(self._last_searches, key, arrived, outcome.search_query)
+        return outcome
 
     def on_message(self, message, ctx):
         # 图片事件（type 3）由原生服务记入 RECENT_IMAGES，这里只回复文本里的艾特。
@@ -168,8 +226,28 @@ class Plugin:
         source = at_source(message, self.members, self.aliases)
         if source is None:
             return
+        key = (message.session_id, message.chat_id, message.sender_id)
+        resume = lambda: self._reply_turn(message, ctx, source)
+        slow = self._slow
+        if slow is not None and slow.queue_if_active(key, resume):
+            return
+        turn = resume()
+        if slow is None:
+            for _ in turn:
+                pass
+            return
+        try:
+            next(turn)
+        except StopIteration:
+            return
+        if not slow.handoff(key, turn):
+            turn.close()
+
+    def _reply_turn(self, message, ctx, source):
+        if self._slow is not None and self._slow.stopped.is_set():
+            return
         personality = ctx.personality(message)
-        guard = lambda: ctx.personality_guard(personality)
+        guard = lambda: self._delivery_guard(ctx.personality_guard, personality)
         clean_query = strip_at_labels(message.text)
         if source == "typed":
             # 手打的 @ 没有微信的 U+2005 分隔符，strip_at_labels 去不掉，单独去掉命中的那个名字。
@@ -185,14 +263,14 @@ class Plugin:
         game = self.room_game(message.chat_id, ctx, message=message)
         if game and self.is_move(clean_query, game):
             return  # 答案由接龙插件判定并出题，人格不重复回复也不编造进度。
-        key = (message.chat_id, message.sender_id, clean_query)
+        key = (message.session_id, message.chat_id, message.sender_id, clean_query)
         if not self._claim(key, message.received_at):
             ctx.logger.info("艾特对话跳过：相同提问仍在回复中 room=%s", message.chat_id)
             return
         result = SpeakResult()
         try:
             snapshot = self.members.conversation_snapshot(message)
-            guard = lambda: ctx.response_guard(snapshot, personality)
+            guard = lambda: self._delivery_guard(ctx.response_guard, snapshot, personality)
             detail = wants_detail(clean_query)
             tools = build_default_tools(ctx.knowledge, self.members)
             context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
@@ -203,18 +281,24 @@ class Plugin:
             def send_at(part, send_guard=guard):
                 return ctx.reply_at(message, part, display_name=display, delivery_guard=send_guard)
 
-            outcome = self._run_tools(message, ctx, clean_query, snapshot)
+            outcome = yield from self._run_tools(message, ctx, clean_query, snapshot)
+            self._ensure_running()
             if outcome.ask:
-                # 找不到或分不清要看哪张图：不猜，直接请对方引用。
+                # 工具目标不明确时直接请对方补充。
                 speak(outcome.ask, tier=QA, byte_budget=budget, result=result, send_at=send_at)
                 if result.failed:
                     raise RuntimeError("原生艾特发送未成功")
-                ctx.logger.info("艾特对话：请对方指明图片 room=%s", message.chat_id)
+                if outcome.results:
+                    ctx.logger.info("艾特对话：核对未完成 room=%s", message.chat_id)
+                else:
+                    prompt_kind = "补充搜索目标" if outcome.ask in (ASK_PUBLIC_SEARCH_TARGET, ASK_SEARCH_TARGET) else "指明图片"
+                    ctx.logger.info("艾特对话：请对方%s room=%s", prompt_kind, message.chat_id)
                 return
             if outcome.used:
                 options["tool_results"] = outcome.payload()
 
             def generate(avoid=None):
+                self._ensure_running()
                 return personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(
                     snapshot, knowledge=context.knowledge, style=context.style,
                     speaker_profile=context.speaker_profile, people=context.people,
@@ -223,6 +307,7 @@ class Plugin:
                     personality.name)
 
             reply = generate()
+            self._ensure_running()
             repeated = too_similar(reply, self._recent_bot_texts(message.chat_id))
             if repeated:
                 ctx.logger.info("艾特回复与最近发言相近，换角度重说一次：room=%s", message.chat_id)
@@ -253,7 +338,7 @@ class Plugin:
             ctx.logger.info("艾特对话完成：room=%s persona=%s context=%d", message.chat_id,
                             personality.name, len(snapshot.messages))
         except SnapshotExpired:
-            ctx.logger.info("艾特对话已取消：记录或人格状态已变更")
+            ctx.logger.info("艾特对话已取消：记录、人格或插件状态已变更")
         except LLMError as error:
             ctx.logger.warning("艾特对话失败：%s", error)
             try:

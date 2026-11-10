@@ -6,15 +6,15 @@
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import math
-import os
 from pathlib import Path
 import queue
 import secrets
 import threading
 
-from .image_metadata import ImageMetadata, ImageMetadataError, ImageStore, parse_image_metadata
-from .images import MAX_IMAGE_BYTES
+from .image_metadata import (ImageMetadata, ImageMetadataError, ImageStore,
+                             image_download_reference, parse_image_metadata)
 
 
 _PUBLIC_FIELDS = (
@@ -104,9 +104,7 @@ class ImageReceiver:
             self._failed(snapshot, "图片元数据无效")
             return False
         snapshot["image_metadata"] = {name: getattr(metadata, name) for name in _PUBLIC_FIELDS}
-        snapshot["image_quality"] = ("standard" if metadata.cdnmidimgurl or metadata.filekey else
-                                     "original" if metadata.cdnbigimgurl else
-                                     "thumbnail" if metadata.cdnthumburl else "unknown")
+        snapshot["image_quality"] = image_download_reference(metadata)[2]
         full = False
         with self._enqueue_lock:
             if self._stop.is_set():
@@ -134,20 +132,7 @@ class ImageReceiver:
                 return destination
         raise FileExistsError("无法生成不重复的图片临时文件名")
 
-    @staticmethod
-    def _validate_download(destination: Path):
-        information = destination.lstat()
-        if (not stat_is_regular(information.st_mode) or destination.resolve(strict=True) != destination or
-                not 0 < information.st_size <= MAX_IMAGE_BYTES):
-            raise ValueError("图片下载结果必须为范围内的普通文件")
-        with destination.open("rb") as source:
-            opened = os.fstat(source.fileno())
-            header = source.read(16)
-        if (not stat_is_regular(opened.st_mode) or not 0 < opened.st_size <= MAX_IMAGE_BYTES or
-                not header):
-            raise ValueError("图片下载结果必须为非空且不超过 20 MiB 的普通文件")
-
-    def _download(self, metadata: ImageMetadata):
+    def _download(self, metadata: ImageMetadata, sequence):
         destination = self._new_download_path()
         if not self._active():
             return None
@@ -155,30 +140,31 @@ class ImageReceiver:
             raise ValueError("图片下载未成功")
         if not self._active():
             return None
-        self._validate_download(destination)
-        return destination
+        return self.store.commit_file(destination, sequence=sequence)
 
     def _process(self, data, metadata):
-        if not self._active():
-            return
-        try:
-            temporary = self._download(metadata)
-            if temporary is None or not self._active():
-                return
-            path = self.store.commit_file(temporary, sequence=data.get("sequence"))
+        attempts = (metadata,)
+        if metadata.cdnbigimgurl and (metadata.cdnmidimgurl or metadata.filekey):
+            attempts += (replace(metadata, cdnbigimgurl=""),)
+        for attempt in attempts:
             if not self._active():
-                # 会话已结束：保留已提交文件，不执行物理删除。
                 return
-            data.update(image_status="ready", image_path=str(path), image_error="")
-            self._deliver(data)
-        except ImageDownloadSkipped as error:
-            # 不属于失败：图片不在当前接口的支持范围，保留可观察原因。
-            data.update(image_status="skipped", image_path="",
-                        image_error=str(error) or "图片不在支持范围")
-            self._deliver(data)
-        except Exception:
-            # 下载器和文件系统异常可能包含 CDN URL、密钥或 XML，不能直接转发。
-            self._failed(data, "图片下载或保存失败")
+            data["image_quality"] = image_download_reference(attempt)[2]
+            try:
+                path = self._download(attempt, data.get("sequence"))
+            except ImageDownloadSkipped as error:
+                data.update(image_status="skipped", image_path="",
+                            image_error=str(error) or "图片不在支持范围")
+                self._deliver(data)
+                return
+            except Exception:
+                # 异常可能包含 CDN 地址、密钥或 XML，只在候选耗尽时投递通用错误。
+                continue
+            if path is not None:
+                data.update(image_status="ready", image_path=str(path), image_error="")
+                self._deliver(data)
+            return
+        self._failed(data, "图片下载或保存失败")
 
     def _run(self):
         while not self._stop.is_set():
@@ -206,7 +192,3 @@ class ImageReceiver:
                 self._queue.task_done()
         if threading.current_thread() is not self._worker:
             self._worker.join(timeout=min(timeout, 60))
-
-
-def stat_is_regular(mode):
-    return (mode & 0o170000) == 0o100000

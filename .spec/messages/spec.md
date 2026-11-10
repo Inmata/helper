@@ -51,13 +51,13 @@ related:
 | `image_status` | 投递时为 `ready`、`failed` 或 `skipped` |
 | `image_path` | `ready` 时为已保存图片的本地绝对路径，其余为空 |
 | `image_error` | `failed` / `skipped` 的原因；不包含 XML、CDN 地址或密钥 |
-| `image_quality` | `standard`、`original`、`thumbnail` 或 `unknown` |
+| `image_quality` | `standard`、`original`、`thumbnail` 或 `unknown`；`ready` 时记录实际保存的画质 |
 | `image_metadata` | 公开字段：`md5`、`width`、`height`、`length`、`hdlength`、`cdnthumbwidth`、`cdnthumbheight`、`cdnthumblength`、`cdnmidwidth`、`cdnmidheight`、`encryver` |
 
 状态语义：
 
-- `ready`：图片已下载、校验并保存在当前账号目录，`image_path` 可直接读取。
-- `failed`：下载、校验或保存失败，`image_path` 为空；原事件不重试，可观察原因在 `image_error`。
+- `ready`：图片已下载、校验并保存在当前账号目录，`image_path` 可直接读取。优先下载原图，失败且有普通图引用时改试普通图；只有普通图引用时直接下载普通图。
+- `failed`：没有候选图片可成功下载并保存，`image_path` 为空；不重新入队，可观察原因在 `image_error`。
 - `skipped`：不在支持范围，未发起下载。包括会话不在图片名单、消息只有缩略图引用（`cdnthumbaeskey` 不被原生下载接口接受）、以及密钥格式不符合原生接口要求。
 
 公开边界：

@@ -121,16 +121,16 @@ class RecentImages:
                     return records[index]
         return None
 
-    def wait(self, record, timeout):
+    def wait(self, record, timeout, *, stopped=None):
         """等 pending 的图片下载结束，最多 ``timeout`` 秒；返回最新状态（仍可能是 pending）。"""
         deadline = self.clock() + timeout
         with self._changed:
             while True:
                 current = next((item for item in self._rooms.get(record.room, ()) if item.key == record.key), record)
                 remaining = deadline - self.clock()
-                if current.status != PENDING or remaining <= 0:
+                if current.status != PENDING or remaining <= 0 or (stopped is not None and stopped.is_set()):
                     return current
-                self._changed.wait(remaining)
+                self._changed.wait(min(remaining, 0.05) if stopped is not None else remaining)
 
     def clear(self):
         with self._changed:

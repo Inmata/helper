@@ -362,6 +362,15 @@ class FragmentObservationTests(unittest.TestCase):
         with self.assertLogs(self.LOGGER, "WARNING"):
             self.assertEqual(self.reply("  或苹果。\n"), "或苹果。")
 
+    def test_robot_history_label_never_becomes_a_reply_prefix(self):
+        for output in ("[机器人发言] 查到了。", "【机器人发言】：查到了。",
+                       '{"reply":"[机器人发言] 查到了。"}'):
+            with self.subTest(output=output):
+                self.assertEqual(self.reply(output), "查到了。")
+        self.assertEqual(self.reply("你看到的标签是[机器人发言]。"), "你看到的标签是[机器人发言]。")
+        with self.assertRaises(LLMError):
+            self.reply("[机器人发言]")
+
     def test_normal_answers_are_not_flagged(self):
         for text in ("苹果。", "好", "或许吧，我觉得可以。", "但是我更喜欢香蕉，因为它不容易坏。",
                      "还是苹果", "可以并且应该这样做，原因有三点：第一，成本低；第二，风险小。",

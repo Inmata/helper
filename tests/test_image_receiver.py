@@ -16,10 +16,11 @@ AESKEY = "8399c0d5e5f4b2a1c3d4e5f60718293a"
 MD5 = "0123456789abcdef0123456789abcdef"
 XML = (f'<msg><img aeskey="{AESKEY}" cdnmidimgurl="https://cdn/mid" '
        f'filekey="mid-key" length="1024" md5="{MD5}" /></msg>')
+XML_WITH_ORIGINAL = XML.replace('<img ', '<img cdnbigimgurl="https://cdn/big" ')
 EVENT = {"wx_type": 3, "chat_id": "1@chatroom", "room_wxid": "1@chatroom", "sender_id": "wxid_a",
          "sequence": 4, "native_message_id": "99", "raw_content": XML, "image_status": "pending",
          "image_path": "", "image_error": ""}
-SECRETS = (AESKEY, "mid-key", "https://cdn/mid", "<msg", "<img")
+SECRETS = (AESKEY, "mid-key", "https://cdn/mid", "https://cdn/big", "<msg", "<img")
 
 
 
@@ -88,6 +89,29 @@ class ImageReceiverTests(unittest.TestCase):
         self.assertTrue(path.name.startswith("image-4-"))
         self.assertEqual(event["native_message_id"], "99")
         self.assert_public(event)
+
+    def test_original_and_standard_fallback_publish_actual_quality(self):
+        for original, success, expected in ((PNG, True, "original"),
+                                            (b"partial", False, "standard"),
+                                            (b"not an image", True, "standard")):
+            with self.subTest(original=original, success=success):
+                calls = []
+
+                def download(metadata, destination):
+                    calls.append((bool(metadata.cdnbigimgurl), destination))
+                    destination.write_bytes(original if metadata.cdnbigimgurl else PNG)
+                    return success if metadata.cdnbigimgurl else True
+
+                receiver = self.make(download)
+                self.assertTrue(receiver.submit(dict(EVENT, raw_content=XML_WITH_ORIGINAL)))
+                self.assertTrue(wait_until(lambda: self.events))
+                event = self.events.pop(0)
+                self.assertEqual((event["image_status"], event["image_quality"]), ("ready", expected))
+                self.assertEqual(Path(event["image_path"]).read_bytes(), PNG)
+                self.assertEqual([original for original, _ in calls],
+                                 [True] if expected == "original" else [True, False])
+                self.assertEqual(len({path for _, path in calls}), len(calls))
+                self.assert_public(event)
 
     def test_failed_download_is_observable_and_keeps_no_ready_path(self):
         def fail(_metadata, destination):

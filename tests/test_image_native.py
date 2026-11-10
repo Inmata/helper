@@ -265,8 +265,8 @@ class ImageDownloadMappingTests(unittest.TestCase):
             "aeskey": "0123456789abcdef0123456789abcdef",
             "image_type": 2})
 
-    def test_big_image_uses_big_url_and_type_one(self):
-        self.assertTrue(self.download(self.BIG))
+    def test_big_image_uses_big_url_and_type_one_even_when_mid_is_present(self):
+        self.assertTrue(self.download(self.BIG.replace('<img ', '<img cdnmidimgurl="https://cdn/mid" ')))
         download = self.calls[0][1]["download_image"]
         self.assertEqual((download["filekey"], download["image_type"]),
                          ("https://cdn/big", 1))

@@ -58,6 +58,15 @@ class ImageMetadata:
     filekey: str = field(default="", repr=False)
 
 
+def image_download_reference(metadata: ImageMetadata) -> tuple[str, int, str]:
+    if metadata.cdnbigimgurl:
+        return metadata.cdnbigimgurl, 1, "original"
+    filekey = metadata.cdnmidimgurl or metadata.filekey
+    if filekey:
+        return filekey, 2, "standard"
+    return "", 0, "thumbnail" if metadata.cdnthumburl else "unknown"
+
+
 def _number(attributes, name, maximum):
     if name not in attributes:
         return None

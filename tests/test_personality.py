@@ -39,6 +39,7 @@ class FixedPersonalityTests(unittest.TestCase):
         self.ctx._llm = Mock(complete_text=provider or Mock(return_value="这是自然具体的回答。"))
         plugin = ChatPlugin()
         plugin.on_load(self.ctx)
+        self.addCleanup(plugin.on_unload, self.ctx)
         return plugin
 
     def test_old_mode_command_returns_notice_without_switching(self):
@@ -116,7 +117,7 @@ class FixedPersonalityTests(unittest.TestCase):
         history = provider.call_args.kwargs["history"]
         self.assertEqual([row["role"] for row in history], ["user", "assistant"])
         self.assertIn("A 是什么", history[0]["content"])
-        self.assertEqual(history[1]["content"], "B 是这样来的。")
+        self.assertEqual(history[1]["content"], "[机器人发言] B 是这样来的。")
 
     def test_cross_day_does_not_cancel_reply(self):
         def change(*args, **kwargs):
@@ -183,7 +184,7 @@ class FixedPersonalityTests(unittest.TestCase):
         kb.link(ROOM, OTHER, "示例人物乙", CAT)
         plugin.on_message(self.chat("我是谁", sender=OTHER, sequence=2, sender_wechat_name="示例微信昵称"), self.ctx)
         sent = provider.call_args.args[1]
-        self.assertIn("【当前发言者】示例人物乙", sent)
+        self.assertIn("【当前发言者】[P1] 示例人物乙", sent)
         self.assertIn("【当前发言者档案】已绑定", sent)
         self.assertIn("name=示例人物乙", sent)
         self.assertIn("乙哥", sent)
@@ -280,7 +281,7 @@ class FixedPersonalityTests(unittest.TestCase):
         history = provider.call_args.kwargs["history"]
         self.assertEqual([row["role"] for row in history], ["user", "assistant"])
         self.assertIn("前面聊了甲", history[0]["content"])
-        self.assertEqual(history[1]["content"], "机器人说过乙")
+        self.assertEqual(history[1]["content"], "[机器人发言] 机器人说过乙")
 
     def test_invalid_model_reply_preserves_context(self):
         plugin = self.setup_chat(Mock(return_value=""))

@@ -87,6 +87,9 @@ class PluginRecord:
         if not acquired and not force:
             raise RuntimeError(f"插件 {self.spec.name} 正在处理消息，请稍后重试")
         try:
+            pending = getattr(self.instance, "has_pending_callbacks", None)
+            if not force and self.spec.api == "v1" and callable(pending) and pending():
+                raise RuntimeError(f"插件 {self.spec.name} 正在处理消息，请稍后重试")
             self.active = False
             self.stop_event.set()
         finally:

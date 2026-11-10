@@ -1,4 +1,5 @@
 """真正艾特机器人后，用本群人格回复当前发言者。"""
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -32,6 +33,7 @@ USED_SAMPLE = 10
 RECENT_BOT_ROWS = 5
 # 提问含这些词时视为明确要求详细回答，使用 detail_max_tokens 预算。
 DETAIL_HINTS = ("详细", "详解", "细说", "展开", "具体说说", "完整", "全文", "全篇", "原文", "一步一步", "逐步")
+CATCH_UP = re.compile(r"补个?课|(?:最后|最终|后来).{0,4}(?:定|说好)|(?:刚才|刚刚|昨晚|昨天).{0,8}(?:聊|讨论)")
 # 框架按已编译桥接声明的图片能力；没有时找不到图要如实说“收不到图片”，而不是让对方去引用。
 IMAGE_CAPABILITY = "group.image.receive"
 TOOL_FOLLOWUP_LIMIT = 64
@@ -287,16 +289,28 @@ class Plugin:
         try:
             snapshot = self.members.conversation_snapshot(message)
             guard = lambda: self._delivery_guard(message, ctx.response_guard, snapshot, personality)
-            detail = wants_detail(clean_query)
-            tools = build_default_tools(ctx.knowledge, self.members)
-            context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
-            options = {"detail": True} if detail else {"examples": context.examples}
             display = self.members.at_display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
             budget = 1023 - len(("@" + display + "\u2005\n").encode("utf-8"))
 
             def send_at(part, send_guard=guard):
                 return ctx.reply_at(message, part, display_name=display, delivery_guard=send_guard)
 
+            if CATCH_UP.search(clean_query):
+                rows = self.members.recent_snapshot(message.chat_id, limit=100, before_id=snapshot.anchor_id,
+                                                    context=True).messages
+                reply = Dialogue(ctx.llm_for(message, personality=personality),
+                                 display_timezone=ctx.display_timezone).catch_up(rows, clean_query)
+                self._ensure_running()
+                speak(reply, tier=QA, byte_budget=budget, result=result, send_at=send_at)
+                if result.failed:
+                    raise RuntimeError("原生艾特发送未成功")
+                ctx.logger.info("群聊补课完成：记录=%d", len(rows))
+                return
+
+            detail = wants_detail(clean_query)
+            tools = build_default_tools(ctx.knowledge, self.members)
+            context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
+            options = {"detail": True} if detail else {"examples": context.examples}
             outcome = yield from self._run_tools(message, ctx, clean_query, snapshot)
             self._ensure_running()
             if outcome.ask:

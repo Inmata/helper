@@ -1,6 +1,5 @@
 """群艾特的短回复偶尔使用语音。"""
 from random import random
-import re
 from subprocess import SubprocessError
 from time import monotonic
 
@@ -9,14 +8,23 @@ from wxbot_framework.integrations.voice_local import LocalVoice
 
 COMMAND = "/音色"
 _FEATURE = "voice_tone"
-_REQUEST = re.compile(r"^(?:请)?(?:用语音(?:条)?(?:回|说)|语音回复)")
 _AUTO_CHANCE = 0.05
 _INTERVAL_SECONDS = 30 * 60
 _MAX_CHARS = 40
 
+VOICE_PROMPT = """
+语音约定：看当前提问和同一人的这几轮对话，判断对方是不是想听你出声。
+想听你念、用语音安慰、用某种口音说，或接着上一条语音说「再来一句」时，在一句顺口的回复前加【语音】。只写要念的内容，不附拼音、动作或说明。
+明确要求打字或别发语音时加【文字】。单独的「说说」「说一句」、讨论语音功能、引用语音问内容，都照常输出正文，不加标记。历史里别人的请求不算这轮的要求。
+标记只供程序使用，是上面正文格式的唯一例外。"""
 
-def requests_voice(question):
-    return bool(_REQUEST.match(question))
+
+def voice_reply_format(reply):
+    if reply.startswith(("【语音】", "[语音]")):
+        return reply[4:].strip(), True
+    if reply.startswith(("【文字】", "[文字]")):
+        return reply[4:].strip(), False
+    return reply, None
 
 
 class VoiceReply:
@@ -57,14 +65,13 @@ class VoiceReply:
             ctx.room_state.put(room, _FEATURE, {"voice": choice})
             ctx.reply(message, f"本群语音已切换为{choice}。")
 
-    def reserve(self, message, ctx, question, reply, *, automatic):
+    def reserve(self, message, reply, preference, *, automatic):
         """只选择本轮发送形式并记下冷却时间；不等待合成。"""
-        if ("voice.send" not in getattr(ctx, "capabilities", ()) or not reply or
-                len(reply) > _MAX_CHARS or "\n" in reply):
+        if preference is False or not reply or len(reply) > _MAX_CHARS or "\n" in reply:
             return False
         room = message.chat_id
         now = monotonic()
-        if not requests_voice(question) and (
+        if preference is None and (
                 not automatic or now < self._next.get(room, 0) or random() >= _AUTO_CHANCE):
             return False
         self._next[room] = now + _INTERVAL_SECONDS

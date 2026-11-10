@@ -10,7 +10,8 @@ from threading import Lock, Thread
 _LENGTH = struct.Struct("<I")
 _RUNTIME = Path(__file__).resolve().parents[2] / ".runtime/voice-xuanshen"
 _SPEAKERS = {"阿梓": "Azusa", "炫神": "XuanShen", "星瞳": "XingTong", "七海": "Nana7mi",
-             "东雪莲": "Azuma", "永雏塔菲": "Taffy", "电棍": "otto", "孙笑川": "sun"}
+             "东雪莲": "Azuma", "永雏塔菲": "Taffy", "电棍": "otto", "孙笑川": "sun",
+             "张顺飞": "ZhangShunFei"}
 _PYTHON = _RUNTIME / "venv/Scripts/python.exe"
 
 

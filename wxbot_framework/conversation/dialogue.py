@@ -305,7 +305,8 @@ class Dialogue:
         labeled = bool(getattr(snapshot, "speaker_tag", ""))
         for row in _without_quoted_context(getattr(snapshot, "history", ()) or (), quote):
             if row.get("bot_generated"):
-                text = ("[机器人发言] " if labeled else "") + row["text"]
+                text = ("[机器人发言] " if labeled else "")
+                text += ("[语音] " if row.get("context_kind") == "voice" else "") + row["text"]
                 result.append({"role": "assistant", "content": text})
             else:
                 name = _speaker_label(row.get("speaker") if labeled else "", row.get("speaker_name") or "群友")

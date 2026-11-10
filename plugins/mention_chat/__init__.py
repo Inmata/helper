@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .slow_replies import SlowReplies
-from .voice_reply import COMMAND as VOICE_COMMAND, VoiceReply, requests_voice
+from .voice_reply import COMMAND as VOICE_COMMAND, VOICE_PROMPT, VoiceReply, voice_reply_format
 
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue, resolve_reply_quote
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
@@ -322,8 +322,6 @@ class Plugin:
             tools = build_default_tools(ctx.knowledge, self.members)
             context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
             options = {"detail": True} if detail else {"examples": context.examples}
-            if requests_voice(clean_query) and "voice.send" in getattr(ctx, "capabilities", ()):
-                options["system"] = SYSTEM + "\n这轮对方要用语音听。直接说他想听的内容，用一句能顺口念出来的话。"
             outcome = yield from self._run_tools(message, ctx, clean_query, snapshot)
             self._ensure_running()
             if outcome.ask:
@@ -339,36 +337,42 @@ class Plugin:
                 return
             if outcome.used:
                 options["tool_results"] = outcome.payload()
+            can_voice = not detail and not outcome.used and "voice.send" in getattr(ctx, "capabilities", ())
+            if can_voice:
+                options["system"] = SYSTEM + VOICE_PROMPT
 
             def generate(avoid=None):
                 self._ensure_running()
-                return personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(
+                text = personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(
                     snapshot, knowledge=context.knowledge, style=context.style,
                     speaker_profile=context.speaker_profile, people=context.people,
                     room_game=self.game_context(game) if game else None, quote=quote, avoid=avoid,
                     question=clean_query, **options),
                     personality.name)
+                text, preference = voice_reply_format(text) if can_voice else (text, None)
+                if not text:
+                    raise LLMError("大模型对话结果格式不正确，请重试")
+                return text, preference
 
-            reply = generate()
+            reply, voice_preference = generate()
             self._ensure_running()
             repeated = too_similar(reply, self._recent_bot_texts(message.chat_id))
             if repeated:
                 ctx.logger.info("艾特回复与最近发言相近，换角度重说一次：room=%s", message.chat_id)
                 try:
-                    retried = generate(avoid=repeated)
+                    retried, retried_preference = generate(avoid=repeated)
                 except LLMError as error:
                     # 重说失败不能把已经拿到的首次结果丢掉，更不能改发错误提示。
                     ctx.logger.warning("艾特回复重说失败，按首次结果发送：%s", error)
                 else:
-                    reply = retried
+                    reply, voice_preference = retried, retried_preference
                     if too_similar(reply, self._recent_bot_texts(message.chat_id)):
                         ctx.logger.info("艾特回复重说后仍相近，按原样发送：room=%s", message.chat_id)
             # 用了工具的回复按问答单条发出；带网址的消息容易触发微信风控，模型照抄了网址也在这里去掉。
             if outcome.used:
                 reply = strip_links(reply) or reply
             tier = (DETAIL if detail else QA) if outcome.used else classify_tier(clean_query, detail=detail)
-            if not outcome.used and tier != DETAIL and self.voice_reply.reserve(
-                    message, ctx, clean_query, reply, automatic=tier == CHAT):
+            if can_voice and self.voice_reply.reserve(message, reply, voice_preference, automatic=tier == CHAT):
                 yield  # 语音合成由慢队列等待，其他成员的文字回复继续处理。
                 self._ensure_running()
                 voice_sent = self.voice_reply.send(message, ctx, reply, guard=guard)

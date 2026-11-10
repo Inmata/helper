@@ -753,13 +753,14 @@ class MentionChatToolTests(unittest.TestCase):
 
     def test_voice_synthesis_does_not_block_another_members_text(self):
         started, release, fast, followed = (threading.Event() for _ in range(4))
-        plugin, ctx = self.build("这句用来测试。")
+        plugin, ctx = self.build(["[语音] 这句用来测试。", "普通文字。"])
         ctx.config, ctx.llm = {}, ctx.client
         plugin.on_load(ctx)
         ctx.capabilities |= {"voice.send"}
         sent = []
 
-        def synthesize(_text):
+        def synthesize(text):
+            self.assertEqual(text, "这句用来测试。")
             started.set()
             release.wait(5)
             return b"voice"
@@ -783,7 +784,7 @@ class MentionChatToolTests(unittest.TestCase):
         with patch("plugins.mention_chat.voice_reply.synthesize_voice", side_effect=synthesize):
             record.thread.start()
             try:
-                record.enqueue(mention("用语音回：说句晚安"))
+                record.enqueue(mention("念句晚安给我听"))
                 self.assertTrue(started.wait(2), "语音合成没有开始")
                 record.enqueue(mention("详细说说前一句"))
                 record.enqueue(replace(mention("详细说说另一件事"), sender_id=OTHER))

@@ -29,7 +29,7 @@ class VoiceReply:
         self._voices = LocalVoice.available_voices()
         if self._voices:
             try:
-                self._local = LocalVoice(self._voices)
+                self._local = LocalVoice(self._voices[0])
             except OSError as error:
                 logger.warning("本地音色未启动：%s", type(error).__name__)
 

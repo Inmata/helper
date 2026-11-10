@@ -9,16 +9,17 @@ from threading import Lock, Thread
 
 _LENGTH = struct.Struct("<I")
 _RUNTIME = Path(__file__).resolve().parents[2] / ".runtime/voice-xuanshen"
-_SPEAKERS = {"阿梓": "Azusa", "炫神": "XuanShen", "星瞳": "XingTong"}
+_SPEAKERS = {"阿梓": "Azusa", "炫神": "XuanShen", "星瞳": "XingTong", "七海": "Nana7mi",
+             "东雪莲": "Azuma", "永雏塔菲": "Taffy", "电棍": "otto", "孙笑川": "sun"}
 _PYTHON = _RUNTIME / "venv/Scripts/python.exe"
 
 
 class LocalVoice:
-    def __init__(self, voices):
+    def __init__(self, voice):
         self._lock = Lock()
         self._responses = Queue()
         self._process = subprocess.Popen(
-            [str(_PYTHON), "-u", "-X", "utf8", __file__, *voices],
+            [str(_PYTHON), "-u", "-X", "utf8", __file__, voice],
             cwd=_RUNTIME, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
@@ -72,6 +73,17 @@ def _short_samples(model, text):
             return samples
 
 
+def _trim_leading_silence(samples, rate):
+    import numpy as np
+
+    frame = rate // 50
+    blocks = samples[:len(samples) // frame * frame].reshape(-1, frame)
+    rms = np.sqrt(np.square(blocks).mean(axis=1))
+    onset = np.flatnonzero(rms >= max(0.001, rms.max(initial=0) * 0.02))
+    # 开头保留 80 毫秒，避免弱起音紧贴切口。
+    return samples[max(0, int(onset[0]) - 4) * frame:] if len(onset) else samples
+
+
 def _worker():
     import os
     import time
@@ -89,21 +101,25 @@ def _worker():
     from parrots import TextToSpeech, set_log_level
 
     set_log_level("WARNING")
-    models = {}
-    for voice in sys.argv[1:]:
-        model = TextToSpeech(
+
+    def load_voice(voice):
+        return TextToSpeech(
             bert_model_path=str(root / "parrots-chinese-roberta-wwm-ext-large"),
             hubert_model_path=str(root / "parrots-chinese-hubert-base"),
             speaker_model_path=str(root / "speakers"), speaker_name=_SPEAKERS[voice],
             device="cuda", half=True, ensure_nltk=False,
         )
-        with torch.inference_mode():
-            _short_samples(model, "大家好。")
-        models[voice] = model
-    print(f"本地音色已预热：{'、'.join(models)}，{time.perf_counter() - started:.2f} 秒", file=sys.stderr)
+    current = sys.argv[1]
+    model = load_voice(current)
+    with torch.inference_mode():
+        _short_samples(model, "大家好。")
+    print(f"本地音色已预热：{current}，{time.perf_counter() - started:.2f} 秒", file=sys.stderr)
     for line in sys.stdin.buffer:
         voice, text = line.decode("utf-8").split("\t", 1)
-        model = models[voice]
+        if voice != current:
+            model = None
+            model = load_voice(voice)
+            current = voice
         with torch.inference_mode():
             samples = _short_samples(model, text.strip())
         if samples is None:
@@ -112,6 +128,7 @@ def _worker():
             continue
         wav = BytesIO()
         samples = resample_poly(samples, 16000, model.sampling_rate)
+        samples = _trim_leading_silence(samples, 16000)
         soundfile.write(wav, samples, 16000, format="WAV", subtype="PCM_16")
         data = wav.getbuffer()
         wire.write(_LENGTH.pack(len(data)))

@@ -9,8 +9,9 @@ from datetime import datetime, timedelta, timezone
 from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .slow_replies import SlowReplies
+from .voice_reply import VoiceReply, requests_voice
 
-from wxbot_framework.conversation.dialogue import Dialogue, resolve_reply_quote
+from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue, resolve_reply_quote
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
 from wxbot_framework.conversation.mention_tools import (ASK_PUBLIC_SEARCH_TARGET, ASK_SEARCH_TARGET, IMAGE_WINDOW_SECONDS,
                                                         SEARCH_RETRY_SECONDS, MentionTools, ToolOutcome,
@@ -76,6 +77,7 @@ class Plugin:
         self._followup_lock = threading.Lock()
         self._slow = None
         self.cold = None
+        self.voice_reply = VoiceReply()
 
     def _claim(self, key, arrived_at):
         """认领本次生成；仍在生成中，或本次到达时首次回复尚未结束，返回 False。
@@ -315,6 +317,8 @@ class Plugin:
             tools = build_default_tools(ctx.knowledge, self.members)
             context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
             options = {"detail": True} if detail else {"examples": context.examples}
+            if requests_voice(clean_query) and "voice.send" in getattr(ctx, "capabilities", ()):
+                options["system"] = SYSTEM + "\n这轮对方要用语音听。直接说他想听的内容，用一句能顺口念出来的话。"
             outcome = yield from self._run_tools(message, ctx, clean_query, snapshot)
             self._ensure_running()
             if outcome.ask:
@@ -358,6 +362,12 @@ class Plugin:
             if outcome.used:
                 reply = strip_links(reply) or reply
             tier = (DETAIL if detail else QA) if outcome.used else classify_tier(clean_query, detail=detail)
+            if not outcome.used and tier != DETAIL:
+                voice_sent = self.voice_reply.send(message, ctx, clean_query, reply, automatic=tier == CHAT, guard=guard)
+                if voice_sent is not None:
+                    if voice_sent:
+                        result.sent.append(reply)
+                    return  # 微信发送结果不明时不补发文字。
             # 闲聊拆分时把插话检测并入守卫：后续条在拿到守卫后、原生发送前再查一次。
             gate = InterjectionGate(interjection_probe(self.members, message.chat_id)) if tier == CHAT else None
             send_guard = gate.wrap(guard) if gate is not None else guard

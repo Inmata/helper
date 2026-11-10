@@ -127,11 +127,14 @@ class PluginContext:
         return self._service.send_image(message.chat_id, path, expected_session=message.session_id,
                                         delivery_guard=delivery_guard)
 
-    def reply_voice(self, message, path, *, delivery_guard=None):
+    def reply_voice(self, message, path, *, transcript="", delivery_guard=None):
         if "voice.send" not in self.capabilities:
             raise CapabilityError("当前后端尚未开放语音条发送")
-        return self._service.send_voice(message.chat_id, path, expected_session=message.session_id,
+        sent = self._service.send_voice(message.chat_id, path, expected_session=message.session_id,
                                         delivery_guard=delivery_guard)
+        if sent and transcript:
+            self._record_bot_reply(message.chat_id, transcript)
+        return sent
 
     def reply_at(self, message, text, *, display_name=None, delivery_guard=None):
         if not message.is_group:

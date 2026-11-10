@@ -35,6 +35,7 @@ related:
 
 - 通用桥接导出 `WxSendVoice` 时，后端声明 `voice.send`。本地控制台使用 `send-voice 会话ID "音频路径"`；插件可经 `ctx.reply_voice(message, path)` 回复。两者复用现有发送锁及连接校验，不走文本节奏。
 - 本地单声道 16 位 PCM WAV 在内存中转成微信 SILK，也可直接发送支持的 SILK 文件。最多 60 秒、输入最多 20 MiB，发送为可播放的原生语音条（类型 34）。发送结果表示微信接受提交。
+- `ctx.reply_voice` 也接受内存中的音频；提供语音正文时，只在发送成功后将其记为机器人发言。
 
 ## 验收
 

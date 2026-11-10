@@ -35,8 +35,11 @@ def _silk(data):
 
 
 def prepare_voice(path):
-    with Path(path).open("rb") as source:
-        data = source.read(MAX_BYTES + 1)
+    if isinstance(path, bytes):
+        data = path
+    else:
+        with Path(path).open("rb") as source:
+            data = source.read(MAX_BYTES + 1)
     if not 0 < len(data) <= MAX_BYTES:
         raise ValueError("语音文件必须非空，且不超过 20 MiB")
     if data.startswith((TENCENT_HEADER, STANDARD_HEADER)):

@@ -20,10 +20,12 @@ def requests_voice(question):
 class VoiceReply:
     def __init__(self):
         self._next = {}
+        self._use_xuanshen = False
         self._xuanshen = None
 
     def start(self, logger):
-        if XuanShenVoice.available():
+        self._use_xuanshen = XuanShenVoice.available()
+        if self._use_xuanshen:
             try:
                 self._xuanshen = XuanShenVoice()
             except OSError as error:
@@ -45,21 +47,26 @@ class VoiceReply:
                 not automatic or now < self._next.get(room, 0) or random() >= _AUTO_CHANCE):
             return None
         self._next[room] = now + _INTERVAL_SECONDS
-        wav, voice = None, "Windows"
-        if self._xuanshen is not None:
+        if self._use_xuanshen:
+            if self._xuanshen is None:
+                return None
             try:
                 wav = self._xuanshen.synthesize(reply)
-                if wav is not None:
-                    voice = "炫神"
             except (OSError, ValueError) as error:
-                ctx.logger.warning("炫神语音合成失败，改用 Windows 音色：%s", type(error).__name__)
+                ctx.logger.warning("炫神语音合成失败，改发文字：%s", type(error).__name__)
                 self.close()
-        try:
+                return None
             if wav is None:
+                ctx.logger.info("炫神语音重试后仍超长，改发文字")
+                return None
+            voice = "炫神"
+        else:
+            try:
                 wav = synthesize_voice(reply)
-        except (OSError, SubprocessError, ValueError) as error:
-            ctx.logger.warning("本机语音合成失败，改发文字：%s", type(error).__name__)
-            return None
+            except (OSError, SubprocessError, ValueError) as error:
+                ctx.logger.warning("本机语音合成失败，改发文字：%s", type(error).__name__)
+                return None
+            voice = "Windows"
         sent = ctx.reply_voice(message, wav, transcript=reply, delivery_guard=guard)
         ctx.logger.info("艾特语音回复：%s，音色=%s，合成到回执 %.2f 秒",
                         "已提交" if sent else "未确认", voice, monotonic() - now)

@@ -54,11 +54,16 @@ class XuanShenVoice:
 
 
 def _short_samples(model, text):
+    import torch
+
     max_seconds = 2 + len(text) / 4
     # 炫神每秒解码 25 个 token；parrots 将 t2s_max_sec 乘 50 作为 token 上限。
     model.t2s_max_sec = max_seconds / 2
-    samples = model.predict(text, text_language="zh", top_k=1)
-    return samples if len(samples) <= max_seconds * model.sampling_rate else None
+    for seed in (7, 11):
+        torch.manual_seed(seed)
+        samples = model.predict(text, text_language="zh", top_k=5)
+        if len(samples) <= max_seconds * model.sampling_rate:
+            return samples
 
 
 def _worker():

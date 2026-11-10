@@ -52,7 +52,7 @@ class VoiceReply:
             available = "、".join(self._voices) or "未安装角色音色"
             ctx.reply(message, f"当前音色：{self.current_voice(room, ctx)}。可选：{available}。")
         elif choice not in self._voices:
-            ctx.reply(message, f"当前可用音色：{'、'.join(self._voices) or '无'}。用法：/音色 阿梓 或 /音色 炫神。")
+            ctx.reply(message, f"当前可用音色：{'、'.join(self._voices) or '无'}。用法：/音色 名称。")
         else:
             ctx.room_state.put(room, _FEATURE, {"voice": choice})
             ctx.reply(message, f"本群语音已切换为{choice}。")

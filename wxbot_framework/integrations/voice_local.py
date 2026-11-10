@@ -9,7 +9,7 @@ from threading import Lock, Thread
 
 _LENGTH = struct.Struct("<I")
 _RUNTIME = Path(__file__).resolve().parents[2] / ".runtime/voice-xuanshen"
-_SPEAKERS = {"阿梓": "Azusa", "炫神": "XuanShen"}
+_SPEAKERS = {"阿梓": "Azusa", "炫神": "XuanShen", "星瞳": "XingTong"}
 _PYTHON = _RUNTIME / "venv/Scripts/python.exe"
 
 
@@ -63,7 +63,7 @@ def _short_samples(model, text):
     import torch
 
     max_seconds = 2 + len(text) / 4
-    # 这两个模型每秒解码 25 个 token；parrots 将 t2s_max_sec 乘 50 作为 token 上限。
+    # 这些模型每秒解码 25 个 token；parrots 将 t2s_max_sec 乘 50 作为 token 上限。
     model.t2s_max_sec = max_seconds / 2
     for seed in (7, 11):
         torch.manual_seed(seed)

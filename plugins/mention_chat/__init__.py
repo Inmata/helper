@@ -15,8 +15,8 @@ from .voice_reply import (COMMAND as VOICE_COMMAND, REPLY_COMMAND as VOICE_REPLY
 
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue, resolve_reply_quote
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
-from wxbot_framework.conversation.mention_tools import (ASK_PUBLIC_SEARCH_TARGET, ASK_SEARCH_TARGET, IMAGE_WINDOW_SECONDS,
-                                                        SEARCH_RETRY_SECONDS, UNVERIFIED_REPLY, MentionTools, ToolOutcome,
+from wxbot_framework.conversation.mention_tools import (IMAGE_WINDOW_SECONDS,
+                                                        SEARCH_RETRY_SECONDS, MentionTools, ToolOutcome,
                                                         previous_question, public_search_topic, read_tool_options,
                                                         strip_links)
 from wxbot_framework.conversation.repetition import too_similar
@@ -199,18 +199,21 @@ class Plugin:
         return tuple(row.get("text") or "" for row in rows
                      if isinstance(row, dict) and (row.get("bot_generated") or row.get("is_self")))
 
-    def _run_tools(self, message, ctx, question, snapshot=None, *, resolved_quote=None, follow=False):
-        """本轮艾特的看图 / 联网；没开启时返回空结果。Jev 读不出来时只按明确说法执行。"""
-        if self.tools is None:
-            return ToolOutcome()
+    def _tools(self, ctx):
         try:
             jev = ctx.jev
         except Exception as error:
             ctx.logger.warning("Jev 不可用，只按明确说法看图或搜索：%s", type(error).__name__)
             jev = None
-        tools = MentionTools(router=JevToolRouter(jev, **self.tools), magpie=lambda: ctx.magpie,
-                             images=RECENT_IMAGES, image_supported=IMAGE_CAPABILITY in getattr(ctx, "capabilities", ()),
-                             logger=ctx.logger, stopped=self._slow.stopped if self._slow is not None else None)
+        return MentionTools(router=JevToolRouter(jev, **self.tools), magpie=lambda: ctx.magpie,
+                            images=RECENT_IMAGES, image_supported=IMAGE_CAPABILITY in getattr(ctx, "capabilities", ()),
+                            logger=ctx.logger, stopped=self._slow.stopped if self._slow is not None else None)
+
+    def _run_tools(self, message, ctx, question, snapshot=None, *, resolved_quote=None, follow=False):
+        """本轮艾特的看图 / 联网；没开启时返回空结果。Jev 读不出来时只按明确说法执行。"""
+        if self.tools is None:
+            return ToolOutcome()
+        tools = self._tools(ctx)
         # 只艾特没写正文时，他上一条发言（如“这张图是啥意思？”）才是真正的问题。
         context_question = ""
         followup_topic = None
@@ -311,6 +314,19 @@ class Plugin:
                 self.cold.command(message, ctx, args)
             return
         turns = getattr(self.members, "turns", None) if message.dispatch_sequence else None
+        key = turn_key(message)
+        resume = lambda: self._process_message(message, ctx, turns)
+        if self._slow is None:
+            for _ in resume():
+                pass
+        elif not self._slow.queue_if_active(key, resume):
+            turn = resume()
+            if not self._slow.handoff(key, turn):
+                turn.close()
+
+    def _process_message(self, message, ctx, turns):
+        # 判断、模型生成和工具等待都在成员队列内，不占插件收消息的线程。
+        self._ensure_running()
         if turns is not None and turns.merged(message):
             return
         source = at_source(message, self.members, self.aliases)
@@ -332,22 +348,7 @@ class Plugin:
             return  # 答案由接龙插件判定。
         if turns is not None:
             turns.claim(message)
-        key = turn_key(message)
-        resume = lambda: self._reply_turn(message, ctx, clean_query, game, turns=turns, source=source, depth=depth)
-        slow = self._slow
-        if slow is not None and slow.queue_if_active(key, resume):
-            return
-        turn = resume()
-        if slow is None:
-            for _ in turn:
-                pass
-            return
-        try:
-            next(turn)
-        except StopIteration:
-            return
-        if not slow.handoff(key, turn):
-            turn.close()
+        yield from self._reply_turn(message, ctx, clean_query, game, turns=turns, source=source, depth=depth)
 
     def _reply_turn(self, message, ctx, clean_query, game, *, turns=None, source=None, depth=0):
         if self.cold is not None and self.cold.active(message):
@@ -485,11 +486,7 @@ class Plugin:
                 if result.interrupted:
                     ctx.logger.info("闲聊拆分发送中有人插话，丢弃剩余 %d 条：room=%s", result.dropped, message.chat_id)
 
-            if missing_quote:
-                yield from respond(missing_quote, QA)
-                return
-
-            if catch_up:
+            if catch_up and not missing_quote:
                 rows = snapshot.group_messages
                 reply = Dialogue(ctx.llm_for(message, personality=personality),
                                  display_timezone=ctx.display_timezone).catch_up(rows, clean_query, quote=quote)
@@ -502,34 +499,27 @@ class Plugin:
             tools = build_default_tools(ctx.knowledge, self.members)
             context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
             options = {"detail": True} if detail else {"examples": context.examples}
-            outcome = yield from self._run_tools(message, ctx, clean_query, snapshot, resolved_quote=quote, follow=plain)
+            if missing_quote:
+                outcome = ToolOutcome(ask=missing_quote)
+            else:
+                outcome = yield from self._run_tools(message, ctx, clean_query, snapshot, resolved_quote=quote, follow=plain)
             self._ensure_running()
             if before_send is not None:
                 before_send()
-            if outcome.ask:
-                # 工具目标不明确时直接请对方补充。
-                yield from respond(outcome.ask, QA)
-                if outcome.results:
-                    ctx.logger.info("艾特对话：核对未完成 room=%s", message.chat_id)
-                else:
-                    prompt_kind = "补充搜索目标" if outcome.ask in (ASK_PUBLIC_SEARCH_TARGET, ASK_SEARCH_TARGET) else "指明图片"
-                    ctx.logger.info("艾特对话：请对方%s room=%s", prompt_kind, message.chat_id)
-                return
             if outcome.used:
                 options["tool_results"] = outcome.payload()
-            if outcome.context:
-                options["turn_context"] = outcome.context
+            if outcome.context or outcome.ask:
+                options["turn_context"] = "\n".join(filter(None, (outcome.context, outcome.ask)))
             can_voice = fixed_voice or (not detail and not outcome.used and voice_supported)
             if can_voice:
                 options["system"] = SYSTEM + VOICE_PROMPT
                 if fixed_voice:
                     options["system"] += FIXED_VOICE_PROMPT
 
-            def generate(avoid=None, *, evidence_only=False):
+            def generate(avoid=None, *, guidance=""):
                 self._ensure_running()
-                prompt_options = options if not evidence_only else {
-                    **options, "system": SYSTEM + "\n只回答本轮被问的那一点。删掉联网资料没有明确支持的细节；"
-                    "前一轮的说法待核对。无法核对的部分直接说没核实。",
+                prompt_options = options if not guidance else {
+                    **options, "system": options.get("system", SYSTEM) + "\n" + guidance,
                 }
                 text = personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(
                     snapshot, knowledge=context.knowledge, style=context.style,
@@ -571,15 +561,32 @@ class Plugin:
                     ctx.logger.info("艾特回复证据核对：status=%s p=%s", decision.status, decision.probability)
                     return decision.status == REJECTED
                 if rejected(reply):
-                    try:
-                        revised, _ = generate(evidence_only=True)
-                    except LLMError:
-                        revised = UNVERIFIED_REPLY
-                    reply = UNVERIFIED_REPLY if revised != UNVERIFIED_REPLY and rejected(revised) else revised
+                    reply, _ = generate(guidance="刚才的回答包含资料未支持的说法。只保留能回答本轮问题的已知内容，"
+                                                 "删掉无关的额外断言；直接说具体内容，不汇报核对流程。")
+                    if rejected(reply):
+                        query = Dialogue(ctx.llm_for(message, personality=personality)).search_followup(
+                            clean_query, context=outcome.context, evidence=evidence, answer=reply)
+                        self._ensure_running()
+                        followup = self._tools(ctx).search(query)
+                        outcome.results.append(followup)
+                        options["tool_results"] = outcome.payload()
+                        evidence = "\n".join(strip_links(item.text) for item in outcome.results
+                                             if item.tool == "search" and item.ok)
+                        with self._followup_lock:
+                            _remember_tool_followup(self._last_searches,
+                                (message.session_id, message.chat_id, message.sender_id), message.received_at,
+                                (query, outcome.search_subject or clean_query))
+                        ctx.logger.info("艾特回复补充搜索：%s room=%s", "成功" if followup.ok else "失败", message.chat_id)
+                        reply, _ = generate(guidance="结合新增搜索资料重新回答当前问题，纠正先前没有依据的说法。"
+                                                     "有可靠的部分就直接答，缺口要具体到对象或比较口径，不用流程式结语。")
+                        if rejected(reply):
+                            reply, _ = generate(guidance="现有资料仍不足以支持刚才的具体断言，请完全放弃那些断言。"
+                                "围绕当前问题，用群友的语气说清具体卡在哪里，必要时只问一个能继续查的关键条件。"
+                                "不要添加新的数字、排名或其他事实结论，不说未核实、暂不下结论这类审核话术。")
             # 用了工具的回复按问答单条发出；带网址的消息容易触发微信风控，模型照抄了网址也在这里去掉。
             if outcome.used:
                 reply = strip_links(reply) or reply
-            tier = (DETAIL if detail else QA) if outcome.used else classify_tier(clean_query, detail=detail)
+            tier = (DETAIL if detail else QA) if outcome.used or outcome.ask else classify_tier(clean_query, detail=detail)
             yield from respond(reply, tier, preference=voice_preference if can_voice else False)
             ctx.logger.info("艾特对话完成：room=%s persona=%s context=%d", message.chat_id,
                             personality.name, len(snapshot.messages))
@@ -587,10 +594,6 @@ class Plugin:
             ctx.logger.info("艾特对话已取消：%s", error)
         except LLMError as error:
             ctx.logger.warning("艾特对话失败：%s", error)
-            try:
-                dispatch(lambda: ctx.reply(message, f"暂时无法回复：{error}", delivery_guard=guard))
-            except SnapshotExpired:
-                pass
         finally:
             # 已发出至少一条（含守卫或异常发生在首条之后）就保留去重记录，避免排队中的同一提问重发。
             self._release(key, delivered=bool(result.sent))

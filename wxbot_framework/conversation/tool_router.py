@@ -47,7 +47,8 @@ SEARCH_QUESTION = {
 ANSWER_QUESTION = {
     "instructions": "核对拟发送回答里的具体公开事实有没有得到本轮搜索资料支持；不把用户原话或机器人的前文当证据。"
                     "识图结果可以支持对图片的描述，不单凭图片核实现实中是否兑现或发生。",
-    "true": "回答只陈述资料支持且对应时间、对象、版本或场次的事实；允许口语化和直说有些细节没查到。",
+    "true": "回答中的具体事实得到资料支持，时间、对象、版本或场次一致；允许口语、玩笑和基于资料的解释。"
+            "没有新增事实断言、只询问缺失的比较口径或条件时也算 true，不要求每个口语表达都有出处。",
     "false": "混入资料未支持的具体事实，串用另一年的结果或其他对象；"
              "即使主答案正确，顺带报了未核实的其他比赛、日期、规则、金额或现状也算 false。",
 }
@@ -136,7 +137,7 @@ class JevToolRouter:
 
     def verify_answer(self, *, question, context, evidence, answer, vision=""):
         state = {"提问": question, "补充语境": context[:600],
-                 "本轮搜索资料": evidence[:3000], "拟发送的回答": answer[:1500]}
+                 "本轮搜索资料": evidence[:6000], "拟发送的回答": answer[:1500]}
         if vision:
             state["看图结果"] = vision[:800]
         return self._decide("evidence", state, ANSWER_QUESTION, 0.65, 2)

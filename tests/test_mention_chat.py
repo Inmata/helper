@@ -603,20 +603,21 @@ class MentionDeliveryTests(unittest.TestCase):
         self.assertIn("【引用】甲：我八点到", ctx.last_user)
         self.assertNotIn("几点来", ctx.last_user)
 
-    def test_missing_voice_and_app_card_are_reported_without_asking_model(self):
+    def test_missing_quotes_are_described_to_model_for_natural_clarification(self):
         for ref_type, ref_app_type, expected in (
             ("34", "", "我没读到这条语音的转写。"),
             ("49", "19", "我没读到这张卡片的正文。可以把原卡片再发一次。"),
             ("49", "", "我没读到你引用的那条消息。可以把原话发来。"),
         ):
             with self.subTest(ref_type=ref_type):
-                plugin, ctx = self.build("模型不应被调用")
+                plugin, ctx = self.build("你方便把原消息再贴一次吗？")
                 message = mention("说了什么")
                 message.data["quote"] = {"name": "小明", "ref_type": ref_type,
                                          "ref_app_type": ref_app_type, "svrid": "123"}
                 plugin.on_message(message, ctx)
-                self.assertEqual(ctx.sent, [("reply_at", expected)])
-                self.assertEqual(ctx.completions, 0)
+                self.assertEqual(ctx.sent, [("reply_at", "你方便把原消息再贴一次吗？")])
+                self.assertIn(expected, ctx.last_user)
+                self.assertEqual(ctx.completions, 1)
 
     def test_typed_at_label_is_not_left_in_the_question(self):
         plugin, ctx = self.build("在的")
@@ -717,6 +718,8 @@ class ColdReplyTests(unittest.TestCase):
         ctx.room_state = RoomStateStore(members)
         ctx.llm = ctx.client
         plugin.on_load(ctx)
+        plugin._slow.close()
+        plugin._slow = None
         self.addCleanup(plugin.on_unload, ctx)
         return plugin, ctx
 

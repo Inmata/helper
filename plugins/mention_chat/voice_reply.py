@@ -2,6 +2,7 @@
 from random import random
 from subprocess import SubprocessError
 from time import monotonic
+from threading import Lock
 
 from wxbot_framework.conversation.personality import DEFAULT_VOICE, VOICE_FEATURE, room_voice, voice_self_name
 from wxbot_framework.conversation.members import MemberError
@@ -60,6 +61,7 @@ class VoiceReply:
         self._voices = ()
         self._local = None
         self._stopped = False
+        self._synthesis_lock = Lock()
 
     def start(self, logger):
         self._stopped = False
@@ -161,33 +163,34 @@ class VoiceReply:
 
     def send(self, message, ctx, reply, *, voice, guard, dispatch=None):
         """合成失败返回 None；已提交则返回微信发送结果。"""
-        if self._stopped:
-            return None
-        now = monotonic()
-        if self._voices:
-            if voice not in self._voices:
+        with self._synthesis_lock:
+            if self._stopped:
                 return None
-            try:
-                if self._local is None:
-                    ctx.logger.info("本地音色进程重新启动：%s", voice)
-                    self._local = LocalVoice(voice)
-                wav = self._local.synthesize(voice, reply)
-            except (OSError, ValueError) as error:
-                ctx.logger.warning("%s语音合成失败，改发文字：%s（%s）", voice, type(error).__name__, error)
-                self._close_local()
-                return None
-            if wav is None:
-                ctx.logger.info("%s语音重试后仍超长，改发文字", voice)
-                return None
-        else:
-            if voice != DEFAULT_VOICE:
-                return None
-            try:
-                wav = synthesize_voice(reply)
-            except (OSError, SubprocessError, ValueError) as error:
-                ctx.logger.warning("本机语音合成失败，改发文字：%s", type(error).__name__)
-                return None
-            voice = "Windows"
+            now = monotonic()
+            if self._voices:
+                if voice not in self._voices:
+                    return None
+                try:
+                    if self._local is None:
+                        ctx.logger.info("本地音色进程重新启动：%s", voice)
+                        self._local = LocalVoice(voice)
+                    wav = self._local.synthesize(voice, reply)
+                except (OSError, ValueError) as error:
+                    ctx.logger.warning("%s语音合成失败，改发文字：%s（%s）", voice, type(error).__name__, error)
+                    self._close_local()
+                    return None
+                if wav is None:
+                    ctx.logger.info("%s语音重试后仍超长，改发文字", voice)
+                    return None
+            else:
+                if voice != DEFAULT_VOICE:
+                    return None
+                try:
+                    wav = synthesize_voice(reply)
+                except (OSError, SubprocessError, ValueError) as error:
+                    ctx.logger.warning("本机语音合成失败，改发文字：%s", type(error).__name__)
+                    return None
+                voice = "Windows"
         submit = lambda: ctx.reply_voice(message, wav, transcript=reply, delivery_guard=guard)
         sent = dispatch(submit) if dispatch is not None else submit()
         ctx.logger.info("艾特语音回复：%s，音色=%s，合成到回执 %.2f 秒",

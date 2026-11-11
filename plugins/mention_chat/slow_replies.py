@@ -1,4 +1,4 @@
-"""艾特的慢回复队列；同一会话内，同一发言者的后续回复排在其前一轮之后。"""
+"""有界回复队列：不同发言者并行，同一发言者按到达顺序处理。"""
 from collections import deque
 import queue
 import threading
@@ -13,8 +13,10 @@ class SlowReplies:
         self._ready = queue.Queue()
         self._following = {}
         self._count = 0
-        self._thread = threading.Thread(target=self._run, name="MentionChat.slow", daemon=True)
-        self._thread.start()
+        self._threads = [threading.Thread(target=self._run, name=f"MentionChat.slow.{index + 1}", daemon=True)
+                         for index in range(4)]
+        for thread in self._threads:
+            thread.start()
 
     def busy(self):
         with self._lock:
@@ -32,7 +34,7 @@ class SlowReplies:
             return True
 
     def handoff(self, key, turn):
-        """接手走到需要等待的位置、仍需继续的回复。"""
+        """接手该发言者的新一轮回复。"""
         with self._lock:
             if not self.stopped.is_set() and self._reserve():
                 self._following[key] = deque()
@@ -73,5 +75,7 @@ class SlowReplies:
         with self._lock:
             if not self.stopped.is_set():
                 self.stopped.set()
-                self._ready.put(None)
-        self._thread.join()
+                for _ in self._threads:
+                    self._ready.put(None)
+        for thread in self._threads:
+            thread.join()

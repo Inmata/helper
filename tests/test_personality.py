@@ -42,6 +42,8 @@ class FixedPersonalityTests(unittest.TestCase):
         self.ctx._llm = Mock(complete_text=provider or Mock(return_value="这是自然具体的回答。"))
         plugin = ChatPlugin()
         plugin.on_load(self.ctx)
+        plugin._slow.close()
+        plugin._slow = None
         self.addCleanup(plugin.on_unload, self.ctx)
         return plugin
 
@@ -135,8 +137,6 @@ class FixedPersonalityTests(unittest.TestCase):
         provider = Mock(return_value=reply)
         self.ctx._room_state = self.store.room_state
         plugin = self.setup_chat(provider)
-        plugin._slow.close()
-        plugin._slow = None
         self.ctx.capabilities = frozenset({"voice.send"})
         self.backend.send_voice = Mock(side_effect=lambda *args: VoiceSubmission(
             f"voice-{self.backend.send_voice.call_count}"))
@@ -206,7 +206,9 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertEqual(len(voice_rows), len(spoken))
 
     def test_fixed_voice_covers_tools_clarification_missing_quote_and_catch_up(self):
-        plugin, _ = self.setup_fixed_voice("看到一只猫。")
+        plugin, provider = self.setup_fixed_voice("看到一只猫。")
+        provider.side_effect = ["看到一只猫。", "这次搜索页面没打开。", "请引用那张图片。",
+                                "引用语音没拿到转写。", "刚才讨论了一只猫。"]
         plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
         outcomes = (ToolOutcome(results=[ToolResult("vision", True, "一只猫")]),
                     ToolOutcome(results=[ToolResult("search", False, note="搜索超时")]),
@@ -468,7 +470,7 @@ class FixedPersonalityTests(unittest.TestCase):
     def test_invalid_model_reply_preserves_context(self):
         plugin = self.setup_chat(Mock(return_value=""))
         plugin.on_message(self.chat(), self.ctx)
-        self.assertIn("暂时无法回复", self.backend.sent[-1][1])
+        self.assertEqual(self.backend.sent, [])
         self.assertTrue(self.store.history("测试成员", ROOM))
 
     def test_game_reply_preserves_next_word_and_rule(self):

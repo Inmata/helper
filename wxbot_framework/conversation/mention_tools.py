@@ -9,9 +9,9 @@
   没有实质内容（如“现在呢”）、候选图又是提问人自己刚发的，也直接看图（隐式看图）；其余交给 Jev（``ToolTurn``），
   先判断看图，识图结果再参与搜索判断。Jev 不可用时含糊提问不调用工具。
 * 重试：明确要求重试搜索时沿用同一发言者上次搜索词；没有可沿用的目标时请对方补充。
-* 预算：普通看图最多一次，明确要求都看时最多三张；每轮最多搜索一次，所有工具共用同一截止时间。
+* 预算：普通看图最多一次，明确要求都看时最多三张；初次流程最多搜索一次，共用同一截止时间；答案证据不足时可独立补查一次。
   客户端的超时只约束单次 socket 操作，所以每次判断 / 调用都在单独线程里执行、最多等到
-  剩余时间，迟到的结果丢弃。艾特没有正文时，提问人 90 秒内的上一条发言当作问题来判断。搜索失败直接说明未核实。回复里不带网址（见 ``strip_links``）。
+  剩余时间，迟到的结果丢弃。艾特没有正文时，提问人 90 秒内的上一条发言当作问题来判断。搜索失败和澄清状态交给聊天模型生成回复。回复里不带网址（见 ``strip_links``）。
 """
 from __future__ import annotations
 
@@ -62,15 +62,14 @@ VISION_RESULT_CHARS = 800
 SEARCH_RESULT_CHARS = 3000
 SEARCH_VISION_CONTEXT_CHARS = 300
 
-ASK_WHICH_IMAGE = "你刚发了好几张图，引用想让我看的那张再艾特我"
-ASK_WHICH_OTHER_IMAGE = "群里刚有好几张图，引用想让我看的那张再艾特我"
-ASK_FOR_IMAGE ="没找到你要我看的图，引用那张图再艾特我"
-QUOTED_IMAGE_MISSING = "你引用的那张图我这边没收到，可能是我上线前发的，重新发一下再艾特我"
-NO_IMAGE_SUPPORT = "我这边暂时收不到图片，看不了图"
-TOO_MANY_IMAGES = "一次最多看三张，你分几次发，或者引用最想看的那张。"
-ASK_SEARCH_TARGET = "我没找到你上一次搜的内容，把要查的东西再说一遍。"
-ASK_PUBLIC_SEARCH_TARGET = "你想联网核对哪件事？把名字或要查的内容再说一遍。"
-UNVERIFIED_REPLY = "这条我还没核实，先不下结论。"
+ASK_WHICH_IMAGE = "图片状态：当前发言者近期发了多张图片，尚未指定目标。请自然地询问要看哪张，可以让对方引用。"
+ASK_WHICH_OTHER_IMAGE = "图片状态：其他群友近期发了多张图片，尚未指定目标。请自然地询问要看哪张，可以让对方引用。"
+ASK_FOR_IMAGE = "图片状态：本轮没有匹配到图片。结合当前提问，请对方提供或引用目标图片，不猜图片内容。"
+QUOTED_IMAGE_MISSING = "图片状态：引用的图片没有收录，原因未知。请对方重新发送目标图片，不猜原图内容或缺失原因。"
+NO_IMAGE_SUPPORT = "图片状态：当前连接不支持收取图片。根据对方的问题自然说明这一限制，可请对方描述关键内容。"
+TOO_MANY_IMAGES = "图片状态：本轮超过三张图片的处理容量。请对方分批提供或先选最重要的图片。"
+ASK_SEARCH_TARGET = "搜索状态：没有保存这位发言者上次的搜索目标。请结合当前对话自然地问清这次要查什么。"
+ASK_PUBLIC_SEARCH_TARGET = "搜索状态：当前请求没有明确的查询对象，近期对话也未定位到公开主题。请简短问清目标。"
 
 _STATUS_NOTE = {FAILED: "图片没下载成功", SKIPPED: "图片没有下载", PENDING: "图片还在下载，没等到"}
 _ERROR_NOTE = {"MagpieToolsUnavailableError": "工具服务连不上或超时", "MagpieToolsAuthError": "工具服务鉴权失败",
@@ -102,7 +101,7 @@ class ToolResult:
 @dataclass
 class ToolOutcome:
     results: list = field(default_factory=list)
-    ask: str | None = None  # 非空时不生成回复，直接用这句请对方说明
+    ask: str | None = None  # 给聊天模型的状态与澄清要求，不直接发送
     image_choices: tuple = ()
     search_query: str = ""
     search_subject: str = ""
@@ -267,6 +266,10 @@ class MentionTools:
             except StopIteration as result:
                 return result.value
 
+    def search(self, query):
+        """根据已发现的信息缺口补查一次，使用独立的工具调用预算。"""
+        return self._search(query, self.clock() + self.budget)
+
     def steps(self, *, question, room, sender, received_at, quote=None, context_question="", image_choices=(),
               previous_search="", followup_topic=None, previous_subject="", focus=None, search_date=""):
         """``context_question``：艾特没有正文时提问人上一条发言（见 ``previous_question``），只用来判断和调用工具。"""
@@ -289,8 +292,6 @@ class MentionTools:
             yield
             result = self._search(previous_search, deadline)
             outcome.results.append(replace(result, search_target=previous_search))
-            if not result.ok:
-                outcome.ask = f"这条我还没核实，{result.note}。"
             return self._finish(outcome, started)
         if followup_topic is not None:
             if not followup_topic:
@@ -300,8 +301,6 @@ class MentionTools:
             yield
             result = self._search(outcome.search_query, deadline)
             outcome.results.append(result)
-            if not result.ok:
-                outcome.ask = f"这条我还没核实，{result.note}。"
             return self._finish(outcome, started)
         all_images = not has_quote and bool(_ALL_IMAGES.fullmatch(question.strip()))
         explicit_vision = all_images or wants(question, VISION_HINTS)
@@ -349,7 +348,7 @@ class MentionTools:
                 return outcome
             selection = candidates if all_images else (image,) if image is not None else ()
             if not selection:
-                # 引用的图对不上记录（多半是上线前发的）也不让模型猜，直接请对方重发。
+                # 引用的图对不上记录（多半是上线前发的）把缺失状态交给模型，澄清时不猜原图。
                 outcome.ask = (NO_IMAGE_SUPPORT if not self.image_supported else
                                QUOTED_IMAGE_MISSING if quoted_image else ASK_FOR_IMAGE)
                 return outcome
@@ -391,8 +390,6 @@ class MentionTools:
                 outcome.results.append(result)
                 if result.ok:
                     turn.record_search(result.text)
-                else:
-                    outcome.ask = f"这条我还没核实，{result.note}。"
         return self._finish(outcome, started)
 
     def _finish(self, outcome, started):

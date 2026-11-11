@@ -136,8 +136,7 @@ class DedupeTests(unittest.TestCase):
         failing = FakeDialogue(self.client, error=LLMError("大模型连接失败或超时"))
         with use_dialogue(failing), self.assertLogs("MentionDedupeTests", level="WARNING"):
             self.plugin.on_message(make_message(), self.ctx)
-        self.ctx.reply.assert_called_once()
-        self.assertIn("暂时无法回复", self.ctx.reply.call_args.args[1])
+        self.ctx.reply.assert_not_called()
         self.assertEqual(self.plugin._pending, {})
         # 异常后立即重试会重新生成，而不是被当成仍在生成。
         working = FakeDialogue(self.client)

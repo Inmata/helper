@@ -134,7 +134,7 @@ class FixedPersonalityTests(unittest.TestCase):
         self.store.record(self.message("别人聊吉他", sender=OTHER, sequence=2))
         provider = Mock(return_value="刚才大家聊吉他，你也想试试吗？")
         plugin = self.setup_chat(provider)
-        plugin.on_message(self.chat("刚才聊什么？"), self.ctx)
+        plugin.on_message(self.chat("吉他适合新手吗？"), self.ctx)
         sent = provider.call_args.args[1]
         self.assertIn("【当前发言者近期发言】", sent)
         self.assertIn("本人前文", sent)
@@ -320,7 +320,7 @@ class FixedPersonalityTests(unittest.TestCase):
         self.store.record(self.message("机器人说过乙", sequence=2, data={"bot_generated": True}))
         provider = Mock(return_value="详细回答。")
         plugin = self.setup_chat(provider)
-        ask = "请详细展开刚才的讨论，继续展开也可以"
+        ask = "请详细展开学吉他的步骤，继续展开也可以"
         plugin.on_message(self.chat(ask, sequence=3), self.ctx)
         provider.assert_called_once()
         sent = provider.call_args.args[1]

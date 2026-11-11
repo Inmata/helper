@@ -22,7 +22,7 @@ from wxbot_framework.conversation.personality import PERSONA_SUMMARIES, personal
 from wxbot_framework.conversation.planner import (REPLY, WAIT, JevSpeakPlanner, build_speak_context,
                                                   generate_proactive)
 from wxbot_framework.conversation.turns import judge_turn
-from wxbot_framework.conversation.utterance import CHAT, InterjectionGate, SpeakResult, interjection_probe, speak
+from wxbot_framework.conversation.utterance import CHAT, QA, InterjectionGate, SpeakResult, interjection_probe, speak
 from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.messaging.mentions import addressed_elsewhere, at_source
 from wxbot_framework.timeutil import describe_local, parse_utc
@@ -80,6 +80,7 @@ class Plugin:
         self._versions = {}
         self._last_sticker = {}
         self._callbacks = {}
+        self._repeated = {}
 
     def on_load(self, ctx):
         self._thread = None
@@ -133,6 +134,8 @@ class Plugin:
             message, self.members, self.options.get("mention_aliases", ())) is not None
         # 群友消息计入预算由 MemberStore.record 统一完成（定时主动发言共用），这里不重复计。
         with self._lock:
+            if self._repeated.get(room) != message.text.strip():
+                self._repeated.pop(room, None)
             # 任何群友新消息（含艾特）都让正在判断、生成或发送的一轮作废，挂着的复判也一并作废。
             self._versions[room] = self._versions.get(room, 0) + 1
             self._waiting.pop(room, None)
@@ -230,7 +233,7 @@ class Plugin:
         with self._lock:
             return self._versions.get(room, 0) != version
 
-    def _fresh_guard(self, room, version, newer, guard):
+    def _fresh_guard(self, room, version, newer, guard, *, repeat_text=""):
         """发送守卫：在原守卫内、原生发送前再核对一次，使判定贴近真实发送时刻。
 
         原守卫持有聊天记录锁，群消息落库也要拿这把锁：守卫内读到的记录水位之后的消息，
@@ -245,6 +248,9 @@ class Plugin:
                 # 原生发送正常返回后仍在聊天记录锁内记账（数据库锁 → 预算锁）：此后到达的群友消息才计入新一轮；
                 # 原生调用返回假值也记，是偏保守的一侧。
                 self.budget.mark_sent(room)
+                if repeat_text:
+                    with self._lock:
+                        self._repeated[room] = repeat_text
         return guarded
 
     def _callback_hint(self, room, message, context, action, ctx, *, recheck):
@@ -317,36 +323,48 @@ class Plugin:
             # 判断前就已有更新的消息：不浪费 Jev 调用，交给下一轮。
             ctx.logger.info("主动发言跳过：room=%s reason=newer-message", room)
             return False
-        action = self.planner.decide(context)
-        args = action.args
-        ctx.logger.info("主动发言判断：room=%s action=%s p=%s threshold=%s top=%s seconds=%s reason=%s",
-                        room, action.type, args.get("probability"), args.get("threshold"), args.get("top"),
-                        args.get("seconds"), args.get("reason", ""))
-        if self._superseded(room, version) or direct():
-            return False
-        holding, callback = self._callback_hint(room, message, context, action, ctx, recheck=recheck)
-        if holding:
-            return False
-        if action.type == WAIT and not recheck and not callback:
-            self._schedule_recheck(room, message, version, ctx)
-            return False
-        if (action.type != REPLY and not callback) or self._superseded(room, version):
-            return False
-        model = ctx.llm_for(message, personality=persona)
-        stickers = sticker_catalog() if "group.image.send" in ctx.capabilities else {}
-        stickers.pop(self._last_sticker.get(room), None)
-        target = args.get("target", len(context.lines) - 1)
-        intent = args.get("intent", "")
-        ctx.logger.info("群聊接话：来源=主动 意图=%s 目标=%s", intent, rows[-len(context.lines) + target]["id"])
-        text = personality_text(generate_proactive(model, context.lines, local_time=context.local_time,
-                                                   recent_bot=self._recent_bot_texts(room),
-                                                   stickers=stickers,
-                                                   intent=intent, target=target, callback=callback,
-                                                   examples=pick_speech_examples(self.members, room)))
-        sticker_name = text.removeprefix("表情:") if text.startswith("表情:") else ""
-        sticker = stickers.get(sticker_name)
-        if text.startswith("表情:") and sticker is None:
-            return False
+        repeat_text = ""
+        if (len(rows) >= 2 and not rows[-2].get("bot_generated") and not rows[-2].get("is_self")
+                and rows[-2]["sender_id"] != rows[-1]["sender_id"]
+                and rows[-2]["text"].strip() == rows[-1]["text"].strip()):
+            repeat_text = rows[-1]["text"].strip()
+        if repeat_text:
+            with self._lock:
+                if self._repeated.get(room) == repeat_text:
+                    return False
+            text, callback, sticker = repeat_text, "", None
+            ctx.logger.info("群聊接话：来源=加一 room=%s 目标=%s", room, rows[-1]["id"])
+        else:
+            action = self.planner.decide(context)
+            args = action.args
+            ctx.logger.info("主动发言判断：room=%s action=%s p=%s threshold=%s top=%s seconds=%s reason=%s",
+                            room, action.type, args.get("probability"), args.get("threshold"), args.get("top"),
+                            args.get("seconds"), args.get("reason", ""))
+            if self._superseded(room, version) or direct():
+                return False
+            holding, callback = self._callback_hint(room, message, context, action, ctx, recheck=recheck)
+            if holding:
+                return False
+            if action.type == WAIT and not recheck and not callback:
+                self._schedule_recheck(room, message, version, ctx)
+                return False
+            if (action.type != REPLY and not callback) or self._superseded(room, version):
+                return False
+            model = ctx.llm_for(message, personality=persona)
+            stickers = sticker_catalog() if "group.image.send" in ctx.capabilities else {}
+            stickers.pop(self._last_sticker.get(room), None)
+            target = args.get("target", len(context.lines) - 1)
+            intent = args.get("intent", "")
+            ctx.logger.info("群聊接话：来源=主动 意图=%s 目标=%s", intent, rows[-len(context.lines) + target]["id"])
+            text = personality_text(generate_proactive(model, context.lines, local_time=context.local_time,
+                                                       recent_bot=self._recent_bot_texts(room),
+                                                       stickers=stickers,
+                                                       intent=intent, target=target, callback=callback,
+                                                       examples=pick_speech_examples(self.members, room)))
+            sticker_name = text.removeprefix("表情:") if text.startswith("表情:") else ""
+            sticker = stickers.get(sticker_name)
+            if text.startswith("表情:") and sticker is None:
+                return False
         if not text:
             ctx.logger.info("主动发言跳过：room=%s reason=nothing-to-say", room)
             return False
@@ -366,7 +384,7 @@ class Plugin:
         try:
             gate = InterjectionGate(interjection_probe(self.members, room))
             guard = gate.wrap(self._fresh_guard(room, version, lambda: newer() or direct(),
-                                                lambda: ctx.response_guard(snapshot, persona)))
+                                                lambda: ctx.response_guard(snapshot, persona), repeat_text=repeat_text))
             if sticker is not None:
                 if ctx.reply_image(message, sticker, delivery_guard=guard):
                     self._last_sticker[room] = sticker_name
@@ -374,7 +392,8 @@ class Plugin:
                 else:
                     result.failed = True
             else:
-                speak(text, tier=CHAT, byte_budget=1023, interjected=gate, result=result, send_at=send)
+                speak(text, tier=QA if repeat_text else CHAT, byte_budget=1023, interjected=gate,
+                      result=result, send_at=send)
         finally:
             # 拆分发送中途抛异常时，已发出的部分照样计入配额。
             self.budget.release(room, sent=bool(result.sent))

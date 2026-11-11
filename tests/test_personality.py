@@ -243,6 +243,22 @@ class FixedPersonalityTests(unittest.TestCase):
         plugin.voice_reply._local.synthesize.return_value = b"audio"
         return plugin, provider
 
+    def test_automatic_voice_accepts_eighty_characters_and_resumes_after_ten_seconds(self):
+        text = "今天真热闹，" * 13 + "哈。"
+        self.assertEqual(len(text), 80)
+        plugin, provider = self.setup_fixed_voice(text)
+        with patch("plugins.mention_chat.voice_reply.random", return_value=0):
+            for sequence, now, length, voice_count in ((100, 1000, 80, 1), (101, 1009, 80, 1),
+                                                      (102, 1010, 80, 2), (103, 1020, 81, 2)):
+                with self.subTest(now=now, length=length):
+                    provider.return_value = text + ("哈" if length == 81 else "")
+                    with patch("plugins.mention_chat.voice_reply.monotonic", return_value=now):
+                        plugin.on_message(self.chat("今晚真热闹", sequence=sequence), self.ctx)
+                    self.assertEqual(self.backend.send_voice.call_count, voice_count)
+        plugin.voice_reply._local.synthesize.assert_called_with("星瞳", text)
+        self.assertEqual([item[1] for item in self.backend.sent],
+                         ["@测试成员\u2005\n" + text, "@测试成员\u2005\n" + text + "哈"])
+
     def test_read_voice_command_preserves_literal_text_and_reviews_after_sending(self):
         plugin, provider = self.setup_fixed_voice()
         provider.side_effect = AssertionError("原文朗读不应调用聊天模型")

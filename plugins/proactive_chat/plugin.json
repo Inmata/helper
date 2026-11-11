@@ -1,7 +1,7 @@
 {
   "api": "v1",
   "author": "Inmata",
-  "description": "没人艾特时，群里一停顿就用 Jev 判断要不要像群友一样插一句；有配额、冷却与连续发言限制",
+  "description": "不同群友连续发相同文字时自动加一；其他停顿用 Jev 判断是否接话，共用主动发言配额与冷却",
   "services": ["llm"],
   "requires": ["group.text.receive", "group.text.send"]
 }

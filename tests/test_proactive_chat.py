@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import test_chat_summary as daily
 from plugins.proactive_chat import Plugin, read_options
 from wxbot_framework.conversation.planner import (REPLY, SKIP, WAIT, Action, JevSpeakPlanner, SpeakBudget,
                                                   SpeakContext, anonymize_text, build_speak_context,
@@ -577,6 +578,123 @@ class PluginTests(unittest.TestCase):
                        {"rooms": "x"}, {"quiet_seconds": 10, "max_wait_seconds": 5}):
             with self.subTest(config=config), self.assertRaises(ValueError):
                 read_options(config)
+
+
+class PlusOneTests(unittest.TestCase):
+    tearDown = daily.DailySummaryTests.tearDown
+    new_store = daily.DailySummaryTests.new_store
+    message = daily.DailySummaryTests.message
+    model = daily.DailySummaryTests.model
+
+    def setUp(self):
+        daily.DailySummaryTests.setUp(self)
+        self.clock = Clock()
+        self.sequence = 0
+        self.speaker = Plugin()
+        self.speaker.active = True
+        self.speaker.options = read_options({})
+        self.speaker.members = self.store
+        self.speaker.room_state = self.store.room_state
+        self.speaker.clock = self.clock
+        self.speaker.budget = self.store.speak_budget
+        self.speaker.budget.clock = self.clock
+        self.speaker.planner = MagicMock()
+        self.speaker.planner.decide.return_value = Action(SKIP)
+
+    def enqueue(self, text, sender=daily.CAT, room=daily.ROOM, **kwargs):
+        self.sequence += 1
+        message = self.message(text, sender=sender, room=room, sequence=self.sequence, **kwargs)
+        self.store.record(message)
+        self.speaker.on_message(message, self.ctx)
+        return message
+
+    def consider_due(self):
+        self.clock.value += 3.1
+        return [self.speaker.consider(room, message, self.ctx, version=version, recheck=recheck)
+                for room, message, version, recheck in self.speaker._due()]
+
+    def test_two_members_repeat_original_text_without_models_or_sentence_splitting(self):
+        text = "好耶。今天加餐！"
+        self.enqueue(text)
+        self.enqueue(text, daily.OTHER)
+        self.assertEqual(self.consider_due(), [True])
+        self.assertEqual(self.backend.sent, [(daily.ROOM, text)])
+        self.speaker.planner.decide.assert_not_called()
+        self.assertEqual(self.calls, [])
+        saved = self.store.recent_rows(daily.ROOM, limit=1, include_bot=True)[0]
+        self.assertEqual((saved["text"], saved["bot_generated"]), (text, 1))
+        self.assertEqual(self.speaker.budget.count(daily.ROOM), 1)
+
+    def test_same_member_different_text_and_bot_separator_do_not_repeat(self):
+        self.enqueue("好耶")
+        self.enqueue("好耶")
+        self.assertEqual(self.consider_due(), [False])
+        self.enqueue("换个话题", daily.OTHER)
+        self.assertEqual(self.consider_due(), [False])
+        self.store.record_bot_reply(daily.ROOM, "好耶")
+        self.enqueue("好耶", daily.OTHER)
+        self.assertEqual(self.consider_due(), [False])
+        self.assertEqual(self.speaker.planner.decide.call_count, 3)
+        self.assertEqual(self.backend.sent, [])
+
+    def test_commands_self_messages_and_direct_mentions_are_not_queued(self):
+        for text, options in (("/help", {}), ("好耶", {"is_self": True}),
+                              ("@机器人 好耶", {"data": {"is_at_self": True}})):
+            with self.subTest(text=text, options=options):
+                self.enqueue(text, **options)
+                self.enqueue(text, daily.OTHER, **options)
+                self.assertEqual(self.consider_due(), [])
+        self.assertEqual(self.backend.sent, [])
+
+    def test_one_repeat_per_run_and_different_text_starts_a_new_run(self):
+        self.enqueue("好耶")
+        self.enqueue("好耶", daily.OTHER)
+        self.assertEqual(self.consider_due(), [True])
+        self.clock.value += 61
+        self.enqueue("好耶")
+        self.enqueue("好耶", daily.OTHER)
+        self.assertEqual(self.consider_due(), [False])
+        self.enqueue("聊点别的")
+        self.enqueue("好耶")
+        self.enqueue("好耶", daily.OTHER)
+        self.assertEqual(self.consider_due(), [True])
+        self.assertEqual(self.backend.sent, [(daily.ROOM, "好耶")] * 2)
+        self.speaker.planner.decide.assert_not_called()
+
+    def test_repeats_are_room_scoped_and_still_use_shared_budget(self):
+        self.speaker.budget.record(daily.ROOM)
+        self.enqueue("好耶")
+        self.enqueue("好耶", daily.OTHER)
+        self.assertEqual(self.consider_due(), [False])
+        self.enqueue("好耶", room=daily.OTHER_ROOM)
+        self.enqueue("好耶", daily.OTHER, room=daily.OTHER_ROOM)
+        self.assertEqual(self.consider_due(), [True])
+        self.clock.value += 61
+        self.enqueue("好耶")
+        self.enqueue("好耶", daily.OTHER)
+        self.assertEqual(self.consider_due(), [True])
+        self.assertEqual(self.backend.sent, [(daily.OTHER_ROOM, "好耶"), (daily.ROOM, "好耶")])
+
+    def test_new_message_before_send_cancels_repeat_without_consuming_budget(self):
+        original = self.ctx.reply
+
+        def interrupted_reply(message, text, **kwargs):
+            self.enqueue("已经换话题了")
+            return original(message, text, **kwargs)
+
+        self.ctx.reply = interrupted_reply
+        self.enqueue("好耶")
+        self.enqueue("好耶", daily.OTHER)
+        with self.assertRaises(SnapshotExpired):
+            self.consider_due()
+        self.assertEqual(self.backend.sent, [])
+        self.assertEqual(self.speaker.budget.count(daily.ROOM), 0)
+
+    def test_sticker_marker_is_repeated_as_literal_text(self):
+        self.enqueue("表情:吃瓜")
+        self.enqueue("表情:吃瓜", daily.OTHER)
+        self.assertEqual(self.consider_due(), [True])
+        self.assertEqual(self.backend.sent, [(daily.ROOM, "表情:吃瓜")])
 
 
 if __name__ == "__main__":

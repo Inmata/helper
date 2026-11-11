@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from .dialogue import AVOID_PHRASES, AVOID_REPEAT
+from .personality import FIXED_NAME, PERSONA_SUMMARIES
 from .repetition import too_similar
 from .utterance import QA, classify_tier
 
@@ -57,7 +58,7 @@ class SpeakContext:
     streak: int = 0
 
 
-PERSONA_SUMMARY = "熟人损友：二十多岁、口语自然、懂群梗、能适度调侃；不是客服，不抢话，不刷存在感。"
+PERSONA_SUMMARY = PERSONA_SUMMARIES[FIXED_NAME]
 # 提到机器人但没有艾特：英文 ai/bot 要求前后不是字母，避免 “said”“robot” 之类误中。
 MENTION_RE = re.compile(r"(?<![a-z])(ai|bot)(?![a-z])|机器人|人工智能", re.I)
 

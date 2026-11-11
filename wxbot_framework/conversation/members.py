@@ -360,22 +360,23 @@ class MemberStore:
         return self.transcript.history(name, room, limit=limit, since=since)
 
     def personality(self, room):
-        """当前群人格：基准语气加生效的人格补充版本（0 表示只用基准）。"""
-        from .personality import PersonalityState, room_voice
+        """当前群人格：所选语气加生效的人格补充版本（0 表示无补充）。"""
+        from .personality import FIXED_NAME, PROMPTS, PersonalityState, room_voice
         with self.database.lock:
             db = self.connection()
             voice = room_voice(self.room_state, room)
-            row = db.execute("SELECT generation, revision FROM room_personalities WHERE account=? AND room=?",
+            row = db.execute("SELECT generation, revision, name FROM room_personalities WHERE account=? AND room=?",
                              (self.account, room)).fetchone()
             version, revision = (row[0], row[1]) if row else (0, 0)
+            name = row[2] if row and row[2] in PROMPTS else FIXED_NAME
             if not version:
-                return PersonalityState(room, revision=revision, voice=voice)
+                return PersonalityState(room, name=name, revision=revision, voice=voice)
             stored = db.execute("SELECT supplement FROM persona_versions WHERE account=? AND room=? AND version=?",
                                 (self.account, room, version)).fetchone()
         text = _persona_text(stored[0]) if stored else ""
         if not text:
-            return PersonalityState(room, revision=revision, voice=voice)
-        return PersonalityState(room, generation=version, supplement=text, revision=revision, voice=voice)
+            return PersonalityState(room, name=name, revision=revision, voice=voice)
+        return PersonalityState(room, name=name, generation=version, supplement=text, revision=revision, voice=voice)
 
     def persona_revision(self, room):
         """本群人格切换计数；归纳开始时取一次，存版时比对，期间有切换就作废结果。"""
@@ -443,7 +444,7 @@ class MemberStore:
         from .personality import FIXED_NAME
         # revision 与生效指针同一条语句写入：每次切换（含切回同一版）都加一。
         db.execute("INSERT INTO room_personalities(account,room,name,generation,revision) VALUES(?,?,?,?,1) "
-                   "ON CONFLICT(account,room) DO UPDATE SET name=excluded.name, generation=excluded.generation, "
+                   "ON CONFLICT(account,room) DO UPDATE SET generation=excluded.generation, "
                    "revision=room_personalities.revision + 1",
                    (self.account, room, FIXED_NAME, version))
 
@@ -461,7 +462,17 @@ class MemberStore:
         return (parse_utc(row[0]), row[1]) if row else None
 
     def set_personality(self, room, name):
-        raise MemberError("已固定为熟人损友风格，不再切换人格")
+        from .personality import PERSONALITY_ALIASES, PROMPTS
+        if room not in self.groups:
+            raise MemberError("该群不在配置中")
+        name = PERSONALITY_ALIASES.get(name, name)
+        if name not in PROMPTS:
+            raise MemberError("可选人格：损友（熟人损友）、俏皮（俏皮损友）。用法：/人格 名称")
+        with self.transaction() as db:
+            db.execute("INSERT INTO room_personalities(account,room,name,generation,revision) VALUES(?,?,?,0,1) "
+                       "ON CONFLICT(account,room) DO UPDATE SET name=excluded.name, "
+                       "revision=room_personalities.revision + 1", (self.account, room, name))
+            return self.personality(room)
 
     def personality_is_current(self, state):
         return self.personality(state.room) == state

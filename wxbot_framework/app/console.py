@@ -91,7 +91,7 @@ class ConsoleCommands:
         members = app.members
         if sub == "show":
             state = members.personality(room)
-            logger.info("人格补充：%s", json.dumps({"room": room, "version": state.generation,
+            logger.info("人格补充：%s", json.dumps({"room": room, "name": state.name, "version": state.generation,
                                                    "supplement": state.supplement or None}, ensure_ascii=False))
         elif sub == "history":
             rows = [{"version": row["version"], "created_at": row["created_at"], "source": row["source"],

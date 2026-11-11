@@ -13,6 +13,7 @@ from wxbot_framework.conversation.planner import (REPLY, SKIP, WAIT, Action, Jev
                                                   SpeakContext, anonymize_text, build_speak_context,
                                                   describe_gap, generate_proactive, jev_state, mentions_bot)
 from wxbot_framework.conversation.members import SnapshotExpired
+from wxbot_framework.conversation.personality import (PLAYFUL_NAME, PLAYFUL_PROMPT, PersonalityLLM, PersonalityState)
 from wxbot_framework.integrations.jev import JevClient, JevError, JevFormatError
 from wxbot_framework.sdk import Message
 
@@ -260,7 +261,7 @@ class PluginTests(unittest.TestCase):
         self.plugin.members.turns = None
         self.plugin.members.wechat_name.return_value = "小助手"
         self.plugin.members.display_name.return_value = "小助手"
-        self.plugin.members.personality.return_value = MagicMock(name="人格", supplement="")
+        self.plugin.members.personality.return_value = PersonalityState(ROOM)
         self.plugin.members.message_id.return_value = 10  # 触发这一轮的消息已落库，序号 10
         self.plugin.room_state = None
         self.clock = Clock()
@@ -291,6 +292,19 @@ class PluginTests(unittest.TestCase):
         self.ctx.reply.assert_called_once()
         self.assertEqual(self.ctx.reply.call_args.args[1], "在这呢")
         self.assertEqual(self.plugin.budget.count(ROOM), 1)
+
+    def test_selected_personality_reaches_decision_and_generation(self):
+        state = PersonalityState(ROOM, name=PLAYFUL_NAME, supplement="爱好：火锅")
+        self.plugin.members.personality.return_value = state
+        self.ctx.llm_for.return_value = PersonalityLLM(self.model, state, current=lambda: True)
+        self.plugin.planner = MagicMock()
+        self.plugin.planner.decide.return_value = Action(REPLY)
+        self.assertTrue(self.consider())
+        context = self.plugin.planner.decide.call_args.args[0]
+        self.assertIn(PLAYFUL_NAME, context.persona)
+        self.assertIn(state.supplement, context.persona)
+        self.assertTrue(self.model.complete_json.call_args.args[0].startswith(PLAYFUL_PROMPT))
+        self.assertEqual(self.ctx.llm_for.call_args.kwargs["personality"], state)
 
     def test_banter_waits_for_another_message_and_passes_the_original_line(self):
         self.plugin.planner = JevSpeakPlanner(fake_jev(reply_banter=0.12, silent_conversation=0.88))

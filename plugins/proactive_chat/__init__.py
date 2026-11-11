@@ -18,8 +18,8 @@ from .._shared.stickers import sticker_catalog
 from wxbot_framework.commands import is_control
 from wxbot_framework.conversation.context_tools import pick_speech_examples
 from wxbot_framework.conversation.members import BEIJING, SnapshotExpired
-from wxbot_framework.conversation.personality import personality_text
-from wxbot_framework.conversation.planner import (PERSONA_SUMMARY, REPLY, WAIT, JevSpeakPlanner, build_speak_context,
+from wxbot_framework.conversation.personality import PERSONA_SUMMARIES, personality_text
+from wxbot_framework.conversation.planner import (REPLY, WAIT, JevSpeakPlanner, build_speak_context,
                                                   generate_proactive)
 from wxbot_framework.conversation.turns import judge_turn
 from wxbot_framework.conversation.utterance import CHAT, InterjectionGate, SpeakResult, interjection_probe, speak
@@ -311,7 +311,7 @@ class Plugin:
             row["received_at"] = parse_utc(row["received_at"])
         persona = self.members.personality(room)
         context = build_speak_context(rows, now=datetime.now(timezone.utc), bot_names=self._bot_names(room),
-                                      persona=PERSONA_SUMMARY + (persona.supplement and "\n" + persona.supplement),
+                                      persona=PERSONA_SUMMARIES[persona.name] + (persona.supplement and "\n" + persona.supplement),
                                       streak=self.budget.streak(room), local_time=describe_local(local))
         if newer():
             # 判断前就已有更新的消息：不浪费 Jev 调用，交给下一轮。

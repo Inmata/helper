@@ -1,4 +1,4 @@
-"""固定熟人损友语气、真实艾特、上下文及并发取消的验证。"""
+"""群人格选择、真实艾特、上下文及并发取消的验证。"""
 import json
 import sys
 import threading
@@ -11,12 +11,13 @@ from plugins.mention_chat import Plugin as ChatPlugin
 from plugins.mention_chat.slow_replies import SlowReplies
 from plugins.mention_chat.voice_reply import REPLY_FEATURE
 from plugins.personality import Plugin as PersonalityPlugin
-from wxbot_framework.conversation.members import MemberError
+from wxbot_framework.conversation.members import MemberError, PersonaSuperseded
 from wxbot_framework.conversation.mention_tools import ToolOutcome, ToolResult
 from wxbot_framework.messaging.mentions import (at_source, learned_aliases, parse_at_members, parse_quote,
                                                 reset_learned_aliases, strip_at_labels, typed_at)
 from wxbot_framework.conversation.dialogue import SYSTEM as CHAT_SYSTEM
-from wxbot_framework.conversation.personality import (FIXED_NAME, FIXED_PROMPT, VOICE_FEATURE, PersonalityState,
+from wxbot_framework.conversation.personality import (FIXED_NAME, FIXED_PROMPT, PLAYFUL_NAME, PLAYFUL_PROMPT,
+                                                      VOICE_FEATURE, PersonalityExpired, PersonalityState,
                                                       prepare_switch, game_reply)
 from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.commands import COMMANDS, help_text
@@ -50,15 +51,108 @@ class FixedPersonalityTests(unittest.TestCase):
         self.addCleanup(plugin.on_unload, self.ctx)
         return plugin
 
-    def test_old_mode_command_returns_notice_without_switching(self):
-        prepared = prepare_switch(self.message("@机器人\u2005/切换人格 嘴臭"), self.store)
+    def test_personality_commands_view_and_switch_with_admin_permission(self):
         plugin = PersonalityPlugin()
         plugin.on_load(self.ctx)
-        plugin.on_message(prepared, self.ctx)
-        self.assertIn("已固定", self.backend.sent[-1][1])
-        self.assertEqual(self.store.personality(ROOM).name, FIXED_NAME)
+        initial = self.store.personality(ROOM)
+        for command in ("/人格", "/切换人格"):
+            plugin.on_message(prepare_switch(self.message(command, sender=OTHER), self.store), self.ctx)
+            self.assertIn("当前人格：熟人损友", self.backend.sent[-1][1])
+            self.assertIn("俏皮", self.backend.sent[-1][1])
+            self.assertEqual(self.store.personality(ROOM), initial)
+        plugin.on_message(prepare_switch(self.message("/人格 俏皮", sender=OTHER), self.store), self.ctx)
+        self.assertIn("只有管理员", self.backend.sent[-1][1])
+        self.assertEqual(self.store.personality(ROOM), initial)
+        for command, name in (("/人格 俏皮", PLAYFUL_NAME), ("/人格 损友", FIXED_NAME),
+                              ("/切换人格 俏皮损友", PLAYFUL_NAME), ("/人格 熟人损友", FIXED_NAME)):
+            plugin.on_message(prepare_switch(self.message("@机器人\u2005" + command), self.store), self.ctx)
+            self.assertIn("已切换为" + name, self.backend.sent[-1][1])
+            self.assertEqual(self.store.personality(ROOM).name, name)
+        before = self.store.personality(ROOM)
+        plugin.on_message(prepare_switch(self.message("/人格 嘴臭"), self.store), self.ctx)
+        self.assertIn("可选人格", self.backend.sent[-1][1])
+        self.assertEqual(self.store.personality(ROOM), before)
+        self.assertIn("/人格", COMMANDS)
+        self.assertIn("/人格：", help_text(False))
+        self.assertNotIn("/人格 <", help_text(False))
+        self.assertIn("/人格 <损友|俏皮>", help_text(True))
+
+    def test_personality_command_scope_does_not_change_state(self):
+        before = self.store.personality(ROOM)
+        for message in (self.message("/人格 俏皮", is_self=True),
+                        self.message("/人格 俏皮", data={"bot_generated": True}),
+                        self.message("/人格 俏皮", data={"dispatch_to_plugins": False}),
+                        self.message("/人格 俏皮", room="999@chatroom"),
+                        self.message("/人格化 俏皮"), Message("/人格 俏皮", CAT, sender_id=CAT)):
+            self.assertIs(prepare_switch(message, self.store), message)
+        self.assertEqual(self.store.personality(ROOM), before)
+
+    def test_personality_persists_per_room_and_account_and_keeps_supplements(self):
+        self.store.save_persona(ROOM, {"text": "爱好：游戏"})
+        self.store.set_personality(ROOM, "俏皮")
+        saved = self.store.personality(ROOM)
+        reopened = self.new_store()
+        self.assertEqual(reopened.personality(ROOM), saved)
+        self.assertEqual(reopened.personality(daily.OTHER_ROOM).name, FIXED_NAME)
+        self.assertEqual(self.new_store(account="wxid_second").personality(ROOM).name, FIXED_NAME)
+        self.store.save_persona(ROOM, {"text": "爱好：火锅"})
+        self.assertEqual(self.store.personality(ROOM).name, PLAYFUL_NAME)
+        self.store.rollback_persona(ROOM)
+        self.assertEqual(self.store.personality(ROOM).supplement, "爱好：游戏")
+        self.store.activate_persona(ROOM, 0)
+        self.assertEqual(self.store.personality(ROOM).name, PLAYFUL_NAME)
+        self.assertEqual(len(self.store.persona_versions(ROOM)), 2)
+        with self.assertRaisesRegex(MemberError, "不在配置中"):
+            self.store.set_personality("999@chatroom", "俏皮")
         with self.assertRaises(MemberError):
             self.store.set_personality(ROOM, "嘴臭")
+
+    def test_legacy_personality_falls_back_to_original_style(self):
+        with self.store.transaction() as db:
+            db.execute("INSERT INTO room_personalities(account,room,name,generation,revision) VALUES(?,?,?,0,1)",
+                       (ROBOT, ROOM, "嘴臭"))
+        self.assertEqual(self.store.personality(ROOM).name, FIXED_NAME)
+
+    def test_personality_round_trip_cancels_reply_and_old_derivation(self):
+        before = self.store.personality(ROOM)
+        self.store.set_personality(ROOM, "俏皮")
+        self.store.set_personality(ROOM, "损友")
+        self.assertFalse(self.store.personality_is_current(before))
+        with self.assertRaises(PersonalityExpired), self.store.personality_delivery_guard(before):
+            pass
+        with self.assertRaises(PersonaSuperseded):
+            self.store.save_persona(ROOM, {"text": "过时补充"}, expected_revision=before.revision)
+        self.assertEqual(self.store.persona_versions(ROOM), [])
+
+    def test_playful_personality_reaches_text_and_voice_generation(self):
+        plugin, provider = self.setup_fixed_voice("【文字】再夸两句，我爱听。")
+        self.store.set_personality(ROOM, "俏皮")
+        plugin.on_message(self.chat("你真聪明，打字回我", sequence=100), self.ctx)
+        self.assertTrue(provider.call_args.args[0].startswith(PLAYFUL_PROMPT))
+        self.assertIn("再夸两句", "".join(row[1] for row in self.backend.sent))
+        plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
+        provider.return_value = "再夸两句，我爱听。"
+        plugin.on_message(self.chat("你今天心情不错呀", sequence=101), self.ctx)
+        self.assertTrue(provider.call_args.args[0].startswith(PLAYFUL_PROMPT))
+        plugin.voice_reply._local.synthesize.assert_called_once_with("星瞳", "再夸两句，我爱听。")
+
+    def test_personality_switch_during_generation_discards_old_reply(self):
+        def change(*args, **kwargs):
+            prepare_switch(self.message("/人格 俏皮"), self.store)
+            return "这条已经过时"
+        plugin = self.setup_chat(change)
+        plugin.on_message(self.chat(), self.ctx)
+        self.assertEqual(self.backend.sent, [])
+
+    def test_runtime_switches_personality_before_plugin_dispatch(self):
+        app = object.__new__(BotApplication)
+        app.config, app.members, app.plugins = {"chat_allowlist": []}, self.store, Mock()
+        app.plugins.capture.side_effect = lambda message: message
+        before = self.store.personality(ROOM)
+        app._emit(self.message("/人格 俏皮"))
+        state = app.plugins.dispatch.call_args.args[0].data["personality_switch"]
+        self.assertEqual(state.name, PLAYFUL_NAME)
+        self.assertFalse(self.store.personality_is_current(before))
 
     def test_fixed_style_wraps_function_constraints_without_truncation(self):
         provider = Mock(return_value={"reply": "回答"})

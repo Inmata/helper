@@ -1,5 +1,5 @@
 {
   "api": "v1",
-  "description": "兼容旧人格指令，提示已固定为熟人损友风格",
+  "description": "查看与切换本群的熟人损友、俏皮损友人格",
   "requires": ["group.text.receive", "group.text.send"]
 }

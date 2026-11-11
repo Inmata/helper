@@ -30,8 +30,8 @@ READ_REVIEW_QUESTION = {
              "谐音梗、自嘲、夸张或含蓄略低俗的黄梗，没有明确的恶意伤害、性骚扰或露骨色情；语义不明确。",
 }
 REPLY_USAGE = "用法：/语音回复 <@群友|M序号|昵称|微信ID> [开启|关闭]；省略目标查看本群设置。"
-_AUTO_CHANCE = 0.5
-_INTERVAL_SECONDS = 10
+_AUTO_CHANCE = 0.35
+_INTERVAL_SECONDS = 30
 _MAX_AUTO_CHARS = 80
 _MAX_REQUEST_CHARS = 80
 

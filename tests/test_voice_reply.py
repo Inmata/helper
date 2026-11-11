@@ -41,19 +41,19 @@ class FastQueue(Queue):
 
 
 class VoiceTests(unittest.TestCase):
-    def test_automatic_voice_half_chance_ten_second_cooldown_and_explicit_preference(self):
+    def test_automatic_voice_35_percent_thirty_second_cooldown_and_explicit_preference(self):
         reply = VoiceReply()
         message = Message('晚安', '123@chatroom')
         with patch('plugins.mention_chat.voice_reply.monotonic', return_value=1000), \
-                patch('plugins.mention_chat.voice_reply.random', return_value=0.5):
+                patch('plugins.mention_chat.voice_reply.random', return_value=0.35):
             self.assertFalse(reply.reserve(message, '晚安。', None, automatic=True))
         with patch('plugins.mention_chat.voice_reply.monotonic', return_value=1000), \
-                patch('plugins.mention_chat.voice_reply.random', return_value=0.49):
+                patch('plugins.mention_chat.voice_reply.random', return_value=0.34):
             self.assertTrue(reply.reserve(message, '晚安。', None, automatic=True))
-        with patch('plugins.mention_chat.voice_reply.monotonic', return_value=1009), \
+        with patch('plugins.mention_chat.voice_reply.monotonic', return_value=1029), \
                 patch('plugins.mention_chat.voice_reply.random', return_value=0):
             self.assertFalse(reply.reserve(message, '晚安。', None, automatic=True))
-        with patch('plugins.mention_chat.voice_reply.monotonic', return_value=1010), \
+        with patch('plugins.mention_chat.voice_reply.monotonic', return_value=1030), \
                 patch('plugins.mention_chat.voice_reply.random', return_value=0):
             self.assertFalse(reply.reserve(message, '晚安。', False, automatic=True))
             self.assertFalse(reply.reserve(message, '晚安。', None, automatic=False))

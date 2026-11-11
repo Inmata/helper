@@ -243,13 +243,13 @@ class FixedPersonalityTests(unittest.TestCase):
         plugin.voice_reply._local.synthesize.return_value = b"audio"
         return plugin, provider
 
-    def test_automatic_voice_accepts_eighty_characters_and_resumes_after_ten_seconds(self):
+    def test_automatic_voice_accepts_eighty_characters_and_resumes_after_thirty_seconds(self):
         text = "今天真热闹，" * 13 + "哈。"
         self.assertEqual(len(text), 80)
         plugin, provider = self.setup_fixed_voice(text)
         with patch("plugins.mention_chat.voice_reply.random", return_value=0):
-            for sequence, now, length, voice_count in ((100, 1000, 80, 1), (101, 1009, 80, 1),
-                                                      (102, 1010, 80, 2), (103, 1020, 81, 2)):
+            for sequence, now, length, voice_count in ((100, 1000, 80, 1), (101, 1029, 80, 1),
+                                                      (102, 1030, 80, 2), (103, 1060, 81, 2)):
                 with self.subTest(now=now, length=length):
                     provider.return_value = text + ("哈" if length == 81 else "")
                     with patch("plugins.mention_chat.voice_reply.monotonic", return_value=now):

@@ -101,7 +101,7 @@ def maintenance_options(config, *, contributors=None):
         validate_target(room)
         if not room.endswith("@chatroom"):
             raise ValueError("启动问候目标必须是群 ID")
-        text = greeting.get("text", "来了")
+        text = greeting.get("text", "你们好呀")
         if not isinstance(text, str) or not text.strip() or "\0" in text:
             raise ValueError("启动问候 text 应为非空字符串")
         if len(text.encode("utf-8")) > 900:

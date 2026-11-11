@@ -100,10 +100,10 @@ class PluginContext:
         from ..conversation.personality import PersonalityState
         return self._members.personality(message.chat_id) if self._members is not None else PersonalityState(message.chat_id)
 
-    def llm_for(self, message, *, personality=None):
+    def llm_for(self, message, *, personality=None, for_reply=False):
         from ..conversation.personality import PersonalityLLM
         state = personality if personality is not None else self.personality(message)
-        return PersonalityLLM(self.llm, state, current=lambda: self._members is None or
+        return PersonalityLLM(self.llm, state, for_reply=for_reply, current=lambda: self._members is None or
                               self._members.personality_is_current(state))
 
     def personality_guard(self, state):

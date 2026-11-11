@@ -350,7 +350,7 @@ class Plugin:
                 return False
             if (action.type != REPLY and not callback) or self._superseded(room, version):
                 return False
-            model = ctx.llm_for(message, personality=persona)
+            model = ctx.llm_for(message, personality=persona, for_reply=True)
             stickers = sticker_catalog() if "group.image.send" in ctx.capabilities else {}
             stickers.pop(self._last_sticker.get(room), None)
             target = args.get("target", len(context.lines) - 1)

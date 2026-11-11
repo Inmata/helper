@@ -68,7 +68,7 @@ def snapshot_for(room, anchor, context):
 
 
 def reply(client, state, snapshot):
-    llm = PersonalityLLM(client, state, current=lambda: True)
+    llm = PersonalityLLM(client, state, current=lambda: True, for_reply=True)
     try:
         return Dialogue(llm).reply(snapshot), None
     except Exception as error:  # 只记录类型，不带可能含密钥或原文的消息。

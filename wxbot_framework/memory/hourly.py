@@ -242,7 +242,8 @@ class HourlyScheduler:
             if not self.members.snapshot_is_current(snapshot):
                 raise SnapshotExpired("主动群聊上下文已清空或跨天")
             self.candidates.update(candidate_id, "model_called")
-            result = model.complete_json(SYSTEM, json.dumps(payload, ensure_ascii=False), max_tokens=1024)
+            reply_model = PersonalityLLM(model.client, persona, current=model.current, for_reply=True)
+            result = reply_model.complete_json(SYSTEM, json.dumps(payload, ensure_ascii=False), max_tokens=1024)
             wants_speak, text, topic = result.get("speak"), result.get("text"), result.get("topic")
             if type(wants_speak) is not bool or not isinstance(text, str) or not isinstance(topic, str):
                 raise LLMError("主动发言结果格式不正确")

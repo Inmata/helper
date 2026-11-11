@@ -451,7 +451,7 @@ class FakeCtx:
     def personality(self, message):
         return PersonalityState(ROOM)
 
-    def llm_for(self, message, *, personality=None):
+    def llm_for(self, message, *, personality=None, for_reply=False):
         return self.client
 
     @contextmanager

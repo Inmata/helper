@@ -86,7 +86,7 @@ class ColdReply:
         if now < entry["next_reply"]:
             return None
         try:
-            reply = ctx.llm_for(message).complete_text(
+            reply = ctx.llm_for(message, for_reply=True).complete_text(
                 SYSTEM, f"对方刚说：{query or '（只艾特了你，没说话）'}", max_tokens=128).strip()
         except (LLMError, SnapshotExpired) as error:
             ctx.logger.info("冷处理本轮跳过：%s", type(error).__name__)

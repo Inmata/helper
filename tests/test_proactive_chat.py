@@ -306,6 +306,7 @@ class PluginTests(unittest.TestCase):
         self.assertIn(state.supplement, context.persona)
         self.assertTrue(self.model.complete_json.call_args.args[0].startswith(PLAYFUL_PROMPT))
         self.assertEqual(self.ctx.llm_for.call_args.kwargs["personality"], state)
+        self.assertTrue(self.ctx.llm_for.call_args.kwargs["for_reply"])
 
     def test_banter_waits_for_another_message_and_passes_the_original_line(self):
         self.plugin.planner = JevSpeakPlanner(fake_jev(reply_banter=0.12, silent_conversation=0.88))

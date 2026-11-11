@@ -529,7 +529,7 @@ class Plugin:
 
             if catch_up and not missing_quote:
                 rows = snapshot.group_messages
-                reply = Dialogue(ctx.llm_for(message, personality=personality),
+                reply = Dialogue(ctx.llm_for(message, personality=personality, for_reply=True),
                                  display_timezone=ctx.display_timezone).catch_up(rows, clean_query, quote=quote)
                 self._ensure_running()
                 yield from respond(reply, QA)
@@ -562,7 +562,7 @@ class Plugin:
                 prompt_options = options if not guidance else {
                     **options, "system": options.get("system", SYSTEM) + "\n" + guidance,
                 }
-                text = personality_text(Dialogue(ctx.llm_for(message, personality=personality)).reply(
+                text = personality_text(Dialogue(ctx.llm_for(message, personality=personality, for_reply=True)).reply(
                     snapshot, knowledge=context.knowledge, style=context.style,
                     speaker_profile=context.speaker_profile, people=context.people,
                     room_game=self.game_context(game) if game else None, quote=quote, avoid=avoid,

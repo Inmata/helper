@@ -621,6 +621,42 @@ class HourlyTests(unittest.TestCase):
         self.assertEqual(self.backend.sent, [])
         scheduler.model.client.complete_json.assert_not_called()
 
+    def test_playful_hourly_generation_uses_reply_role(self):
+        from wxbot_framework.conversation.personality import REPLY_TAIL
+        self.store.set_personality(ROOM, "俏皮")
+        scheduler = self.scheduler()
+        self.activity(scheduler)
+        self.assertEqual(self.candidate_statuses(scheduler), ["sent"])
+        self.assertTrue(scheduler.model.client.complete_json.call_args.args[1].endswith(REPLY_TAIL))
+
+    def test_hourly_long_context_summary_keeps_internal_task_contract(self):
+        from wxbot_framework.conversation.personality import REPLY_TAIL
+        self.store.set_personality(ROOM, "俏皮")
+        client = Mock()
+
+        def generate(system, user, **options):
+            if user.endswith(REPLY_TAIL):
+                payload = json.loads(user[:-len(REPLY_TAIL)])
+                self.assertIn("recent_summary", payload)
+                self.assertNotIn("recent", payload)
+                return {"speak": True, "topic": "练琴", "text": "那一小段练顺了吗，我想听听。"}
+            payload = json.loads(user)
+            self.assertIn("task", payload)
+            return {"summary": "两位群友在交流练琴进展。"}
+
+        client.complete_json.side_effect = generate
+        scheduler = self.scheduler(client)
+        for sequence in range(20):
+            self.record("练琴记录" * 250, sender=CAT if sequence % 2 else OTHER, sequence=100 + sequence)
+        self.now += timedelta(minutes=1)
+        scheduler.next_candidate[ROOM] = self.now
+        scheduler.tick()
+        self.assertEqual(self.candidate_statuses(scheduler), ["sent"])
+        calls = client.complete_json.call_args_list
+        self.assertGreater(len(calls), 1)
+        self.assertTrue(all(REPLY_TAIL not in call.args[1] for call in calls[:-1]))
+        self.assertTrue(calls[-1].args[1].endswith(REPLY_TAIL))
+
     def test_midnight_is_silent(self):
         scheduler = self.scheduler(run_id="night")
         self.now = self.now.replace(hour=15, minute=59, second=59)

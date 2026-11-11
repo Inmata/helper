@@ -104,6 +104,7 @@ flowchart TD
 - 图片能力只按已编译桥接的实际导出声明：同时存在 V4 媒体队列与 `WxDownloadImage` 时才把 `image.receive` 等加入后端能力；旧 V3/V2 DLL 不声明，依赖图片能力的插件不会加载。`mention_chat` 不把图片能力写进 `requires`，按运行时能力决定能否看图，旧 DLL 下仍可联网搜索。
 - 最近图片索引 `recent_images.RECENT_IMAGES` 是进程内单例：原生服务写、艾特回复读，按群有界、服务启动时清空，不落库。
 - `MemberStore` 持有会话轮次 `turns` 和主动发言预算 `speak_budget`，事件驱动与定时发言共用预算。群人格、音色及固定语音设置经 `RoomStateStore` 持久化；清空上下文、人格切换与连接变化分别使对应的待发回复失效。
+- 面向群友的模型生成显式使用 `PersonalityLLM(for_reply=True)`：人格模块持有角色表达与历史资料组织；对话、主动发言等模块持有事实和功能约束。搜索词、成语判定、记忆提取等内部任务沿用默认入口。俏皮人格将旧机器人发言作为资料理解，熟人损友保留原 API 历史结构。
 - 语音识别在原生服务的单 worker 执行器中运行，完整音频在内存中转写，再进入普通消息链路；合并转发只记录为资料，通过 `dispatch_to_plugins=False` 停在落库之后。详见 [messages](../messages/spec.md)。
 - 本地角色音色由 `VoiceReply` 持有 `LocalVoice`，后者管理独立 Python 3.12 合成进程和响应读取线程，模型与环境位于 `.runtime/voice-xuanshen/`；插件卸载先关闭语音资源，再等待慢回复队列。Windows 系统音色由 `voice_synth.py` 按次启动隐藏子进程。音频经统一 `ServiceFacade` 发送，发送约束见 [delivery](../delivery/spec.md)。
 

@@ -18,7 +18,7 @@ from wxbot_framework.messaging.mentions import (at_source, learned_aliases, pars
                                                 reset_learned_aliases, strip_at_labels, typed_at)
 from wxbot_framework.conversation.dialogue import SYSTEM as CHAT_SYSTEM
 from wxbot_framework.conversation.personality import (FIXED_NAME, FIXED_PROMPT, PLAYFUL_NAME, PLAYFUL_PROMPT,
-                                                      VOICE_FEATURE, PersonalityExpired, PersonalityState,
+                                                      CHAT_STYLE_PROMPT, REPLY_TAIL, VOICE_FEATURE, PersonalityExpired, PersonalityState,
                                                       prepare_switch, game_reply)
 from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.commands import COMMANDS, help_text
@@ -128,13 +128,19 @@ class FixedPersonalityTests(unittest.TestCase):
     def test_playful_personality_reaches_text_and_voice_generation(self):
         plugin, provider = self.setup_fixed_voice("【文字】再夸两句，我爱听。")
         self.store.set_personality(ROOM, "俏皮")
+        self.store.record_bot_reply(ROOM, "你还好意思说，真笨。")
         plugin.on_message(self.chat("你真聪明，打字回我", sequence=100), self.ctx)
         self.assertTrue(provider.call_args.args[0].startswith(PLAYFUL_PROMPT))
+        self.assertNotIn(CHAT_STYLE_PROMPT, provider.call_args.args[0])
+        self.assertTrue(provider.call_args.args[1].endswith(REPLY_TAIL))
+        self.assertIn("你还好意思说，真笨。", provider.call_args.args[1])
+        self.assertNotIn("history", provider.call_args.kwargs)
         self.assertIn("再夸两句", "".join(row[1] for row in self.backend.sent))
         plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
         provider.return_value = "再夸两句，我爱听。"
         plugin.on_message(self.chat("你今天心情不错呀", sequence=101), self.ctx)
         self.assertTrue(provider.call_args.args[0].startswith(PLAYFUL_PROMPT))
+        self.assertTrue(provider.call_args.args[1].endswith(REPLY_TAIL))
         plugin.voice_reply._local.synthesize.assert_called_once_with("星瞳", "再夸两句，我爱听。")
 
     def test_personality_switch_during_generation_discards_old_reply(self):

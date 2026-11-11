@@ -1,29 +1,41 @@
 sequenceDiagram
-    participant WX as bridge
+    participant WX as 原生服务
     participant App as BotApplication
     participant In as ingress
-    participant M as MemberStore/History
-    participant R as Maintenance
-    participant P as Plugins
+    participant M as 成员库与历史
+    participant R as 维护队列
+    participant P as 插件
     participant S as ServiceFacade
 
-    Note over WX,S: 本文件为完整顺序源；docs/images/message-flow-3.png 是省略维护分流与人格兼容步骤的主链路图。
-
-    WX->>App: message
-    App->>In: submit
-    In->>R: owner DM? maintenance queue
-    In->>In: chat_allowlist filter
-    In->>P: capture
-    In->>M: record
-    M-->>In: inserted?
-    In->>App: notify learner
-    In->>M: prepare_reset
-    In->>R: group maintenance command?
-    In->>P: prepare_switch
-    In->>P: dispatch
-    P->>M: snapshot
-    P->>S: send_text(delivery_guard)
-    S->>S: validate session / wait pacing / re-check guard
-    S->>WX: send
-
-    Note over In,P: capture before record
+    Note over WX,App: 图片下载或语音转写完成后进入同一入口
+    WX->>App: Message
+    App->>In: submit(message)
+    alt 维护者私聊
+        In->>R: 入队后返回
+    else 会话通过 chat_allowlist
+        In->>P: capture：先记录接收水位
+        In->>M: record：保存消息
+        opt 新消息成功落库且学习已启用
+            In->>App: memory_worker.notify()
+        end
+        alt dispatch_to_plugins 为 false
+            Note over In,M: 合并转发等资料只保存，不触发回复
+        else 可分发消息
+            In->>M: prepare_reset：快速清空上下文
+            In->>R: 检查群维护命令
+            alt 命中维护通道
+                R-->>In: 已接手，返回
+            else 继续分发
+                opt personality 插件启用
+                    In->>M: prepare_switch：查看或切换群人格
+                end
+                In->>P: dispatch：进入各插件队列
+                P->>M: 获取上下文与人格快照
+                Note over P: 艾特慢回复按群和成员串行，不同成员并行
+                P->>S: 文本、图片或语音与发送守卫
+                S->>S: 发送锁、连接校验、守卫复核
+                Note over S: 文本另有发送节奏等待
+                S->>WX: 原生发送
+            end
+        end
+    end

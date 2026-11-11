@@ -1,18 +1,23 @@
-graph TD
-    main[main.py] --> app[app/]
-    app --> engine[plugin_engine]
-    app --> conversation[conversation]
-    app --> memory[memory]
-    app --> messaging[messaging]
-    app --> integrations[integrations]
+flowchart TD
+    main["main.py 统一入口"] --> app["app：装配、接收顺序与生命周期"]
+    app --> engine["plugin_engine.manager：发现、队列与卸载"]
+    app --> memory["memory：学习、人格归纳、定时发言"]
+    app --> conversation["conversation：成员、轮次、群状态与决策"]
+    app --> adapters["integrations：微信、模型、工具与语音"]
+    app --> sdk["sdk.py：公开接口导出"]
+    engine --> sdk
+    plugins["plugins：回复、主动发言与群命令"] --> sdk
+    plugins --> conversation
+    plugins --> adapters
+    plugins --> shared["plugins/_shared：只读契约"]
+    sdk --> context["plugin_engine.context：插件上下文"]
+    sdk --> messaging["messaging：消息、发送锁、节奏与守卫"]
+    context --> conversation
+    context --> adapters
     memory --> conversation
-    conversation --> storage[storage]
+    memory --> adapters
+    conversation --> adapters
+    conversation --> storage["storage.Database：共享连接与事务"]
     memory --> storage
-    engine --> sdk[sdk]
-    plugins[plugins/] --> sdk
-    plugins --> shared["plugins/_shared"]
     app --> storage
-    app --> sdk
-
-    %% 禁止方向：底层不得导入 app，由 tests/test_architecture.py 静态检查。
-    storage -.->|forbidden| app
+    adapters --> native["native：Python 原生服务与 DLL"]

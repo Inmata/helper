@@ -27,15 +27,59 @@ related:
 把一条收到的消息按固定顺序交给成员库、维护通道与插件。这里不做业务判断，
 也不决定回复内容。
 
-![消息主链路：编号 1–8 为一次接收的主要步骤](../../docs/images/message-flow-3.png)
+<!-- diagram: ../../docs/diagrams/message-flow.mmd -->
 
-图注：图为从 `bridge` 到 `ServiceFacade` 的主链路；`ingress` 内的 allowlist 过滤、快速上下文清空、维护分流与人格兼容步骤未展开，完整顺序见规则 1。
+```mermaid
+sequenceDiagram
+    participant WX as 原生服务
+    participant App as BotApplication
+    participant In as ingress
+    participant M as 成员库与历史
+    participant R as 维护队列
+    participant P as 插件
+    participant S as ServiceFacade
+
+    Note over WX,App: 图片下载或语音转写完成后进入同一入口
+    WX->>App: Message
+    App->>In: submit(message)
+    alt 维护者私聊
+        In->>R: 入队后返回
+    else 会话通过 chat_allowlist
+        In->>P: capture：先记录接收水位
+        In->>M: record：保存消息
+        opt 新消息成功落库且学习已启用
+            In->>App: memory_worker.notify()
+        end
+        alt dispatch_to_plugins 为 false
+            Note over In,M: 合并转发等资料只保存，不触发回复
+        else 可分发消息
+            In->>M: prepare_reset：快速清空上下文
+            In->>R: 检查群维护命令
+            alt 命中维护通道
+                R-->>In: 已接手，返回
+            else 继续分发
+                opt personality 插件启用
+                    In->>M: prepare_switch：查看或切换群人格
+                end
+                In->>P: dispatch：进入各插件队列
+                P->>M: 获取上下文与人格快照
+                Note over P: 艾特慢回复按群和成员串行，不同成员并行
+                P->>S: 文本、图片或语音与发送守卫
+                S->>S: 发送锁、连接校验、守卫复核
+                Note over S: 文本另有发送节奏等待
+                S->>WX: 原生发送
+            end
+        end
+    end
+```
+
+图中包含维护分流、仅记录资料、群人格切换与统一发送入口；原生层先完成图片下载或语音转写，再进入 `ingress`。
 
 ## 必须成立的规则
 
 | 编号 | 规则 | 失败行为 |
 |---|---|---|
-| 1 | 顺序固定，逐段可读：维护者私聊分流 → `chat_allowlist` 过滤 → `capture` → 落库与学习通知 → 快速上下文清空 → 群维护分流 → 固定人格旧命令兼容 → 插件分发。 | 维护者私聊命中管理通道：进入维护队列后直接返回，不再分发插件；群维护未命中：继续插件分发，不重复回复。 |
+| 1 | 顺序固定，逐段可读：维护者私聊分流 → `chat_allowlist` 过滤 → `capture` → 落库与学习通知 → 检查 `dispatch_to_plugins` → 快速上下文清空 → 群维护分流 → 人格插件启用时执行 `prepare_switch` → 插件分发。人格查看与切换沿用同一群状态，切换立即使旧人格回复失效。 | 维护者私聊命中管理通道：进入维护队列后直接返回；仅记录的资料在落库后停止；群维护未命中：继续后续分发，不重复回复。 |
 | 2 | `capture` 先于落库：落库慢时，发题水位仍能排除“已经收到但尚未入队”的答案。 | — |
 | 3 | 落库失败只记录日志，消息继续分发到插件。 | 落库异常：`logger.exception` 记录，分发继续。 |
 | 4 | 同一条消息的所有插件拿到同一份群状态快照；已捕获的空状态不会被后来的游戏状态替换。 | — |

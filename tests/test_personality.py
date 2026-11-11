@@ -3,12 +3,14 @@ import json
 import sys
 import unittest
 from datetime import timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import test_chat_summary as daily
 from plugins.mention_chat import Plugin as ChatPlugin
+from plugins.mention_chat.voice_reply import REPLY_FEATURE
 from plugins.personality import Plugin as PersonalityPlugin
 from wxbot_framework.conversation.members import MemberError
+from wxbot_framework.conversation.mention_tools import ToolOutcome, ToolResult
 from wxbot_framework.messaging.mentions import (at_source, learned_aliases, parse_at_members, parse_quote,
                                                 reset_learned_aliases, strip_at_labels, typed_at)
 from wxbot_framework.conversation.dialogue import SYSTEM as CHAT_SYSTEM
@@ -128,6 +130,138 @@ class FixedPersonalityTests(unittest.TestCase):
                 saved = self.store.recent_rows(ROOM, limit=1, include_bot=True)[0]
                 self.assertEqual((saved["text"], saved["context_kind"]), (original, "voice"))
         self.assertEqual(self.backend.sent, [])
+
+    def setup_fixed_voice(self, reply="普通回答。"):
+        provider = Mock(return_value=reply)
+        self.ctx._room_state = self.store.room_state
+        plugin = self.setup_chat(provider)
+        plugin._slow.close()
+        plugin._slow = None
+        self.ctx.capabilities = frozenset({"voice.send"})
+        self.backend.send_voice = Mock(side_effect=lambda *args: VoiceSubmission(
+            f"voice-{self.backend.send_voice.call_count}"))
+        plugin.voice_reply._voices = ("星瞳",)
+        plugin.voice_reply._local = Mock()
+        plugin.voice_reply._local.synthesize.return_value = b"audio"
+        return plugin, provider
+
+    def test_fixed_voice_command_targets_permissions_restart_and_disable(self):
+        plugin, provider = self.setup_fixed_voice()
+        plugin.on_message(self.message("/语音回复 测试成员", sender=OTHER), self.ctx)
+        self.assertIn("只有管理员", self.backend.sent[-1][1])
+        self.assertIsNone(self.store.room_state.get(ROOM, REPLY_FEATURE))
+        plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
+        self.assertTrue(plugin.voice_reply.fixed(self.message(""), self.new_store().room_state))
+        self.assertFalse(plugin.voice_reply.fixed(self.message("", room=daily.OTHER_ROOM), self.store.room_state))
+        self.assertFalse(plugin.voice_reply.fixed(self.message("", sender=OTHER), self.store.room_state))
+        self.assertFalse(plugin.voice_reply.fixed(self.message(""), self.new_store("wxid_second").room_state))
+        self.store.remember_wechat_name(CAT, "新的微信昵称")
+        plugin.on_message(self.message("/语音回复", sender=OTHER), self.ctx)
+        self.assertIn("测试成员", self.backend.sent[-1][1])
+        plugin.on_message(self.chat("在吗"), self.ctx)
+        self.backend.send_voice.assert_called_once_with(ROOM, b"audio")
+        provider.assert_called_once()
+        plugin.on_message(self.message("/语音回复 新的微信昵称 关闭"), self.ctx)
+        self.assertIsNone(self.store.room_state.get(ROOM, REPLY_FEATURE))
+        plugin.on_message(self.chat("还在吗", sequence=101), self.ctx)
+        self.assertEqual(self.backend.sent[-1][2], (CAT,))
+        self.assertEqual(self.backend.send_voice.call_count, 1)
+
+    def test_fixed_voice_resolves_real_mention_member_code_and_rejects_ambiguity(self):
+        plugin, _ = self.setup_fixed_voice()
+        self.store.sync_room_directory(ROOM, (CAT, OTHER), {CAT: "同名", OTHER: "同名"})
+        plugin.on_message(self.message("/语音回复 同名"), self.ctx)
+        self.assertIn("多位群成员", self.backend.sent[-1][1])
+        plugin.on_message(self.message("/语音回复 @群友", data={"at_members": (CAT, OTHER)}), self.ctx)
+        self.assertIn("一次只能", self.backend.sent[-1][1])
+        self.assertIsNone(self.store.room_state.get(ROOM, REPLY_FEATURE))
+        plugin.on_message(self.message("/语音回复 @同名\u2005", data={"at_members": (OTHER,)}), self.ctx)
+        self.assertTrue(plugin.voice_reply.fixed(self.message("", sender=OTHER), self.store.room_state))
+        code = next(item["code"] for item in self.store.room_member_directory(ROOM) if item["wxid"] == OTHER)
+        plugin.on_message(self.message(f"/语音回复 {code} 关闭"), self.ctx)
+        self.assertIsNone(self.store.room_state.get(ROOM, REPLY_FEATURE))
+
+    def test_fixed_voice_bypasses_text_marker_random_and_cooldown(self):
+        plugin, provider = self.setup_fixed_voice("【文字】我在呢。")
+        plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
+        plugin.voice_reply._next[ROOM] = float("inf")
+        for sequence in (100, 101):
+            with patch("plugins.mention_chat.voice_reply.random", return_value=0.99):
+                plugin.on_message(self.chat("打字说你在吗", sequence=sequence), self.ctx)
+        self.assertEqual(self.backend.send_voice.call_count, 2)
+        self.assertIn("当前发言者已开启固定语音回复", provider.call_args.args[0])
+        plugin.voice_reply._local.synthesize.assert_called_with("星瞳", "我在呢。")
+
+    def test_fixed_voice_reads_full_multiline_detail_in_chunks_and_records_context(self):
+        text = "第一部分讲清楚事情的来龙去脉。" * 7 + "\n" + "第二部分补充具体做法。" * 5
+        plugin, _ = self.setup_fixed_voice(text)
+        plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
+        plugin.on_message(self.chat("详细解释一下"), self.ctx)
+        spoken = [call.args[1] for call in plugin.voice_reply._local.synthesize.call_args_list]
+        self.assertGreater(len(spoken), 1)
+        self.assertTrue(all(0 < len(part) <= 80 and "\n" not in part for part in spoken))
+        self.assertEqual("".join(spoken).replace(" ", ""), text.replace("\n", ""))
+        rows = self.store.recent_rows(ROOM, limit=20, include_bot=True, sender_id=ROBOT)
+        voice_rows = [row for row in rows if row["context_kind"] == "voice"]
+        self.assertEqual(len(voice_rows), len(spoken))
+
+    def test_fixed_voice_covers_tools_clarification_missing_quote_and_catch_up(self):
+        plugin, _ = self.setup_fixed_voice("看到一只猫。")
+        plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
+        outcomes = (ToolOutcome(results=[ToolResult("vision", True, "一只猫")]),
+                    ToolOutcome(results=[ToolResult("search", False, note="搜索超时")]),
+                    ToolOutcome(ask="请引用那张图片。"))
+        for sequence, outcome in enumerate(outcomes, 100):
+            def steps(*args, **kwargs):
+                yield from ()
+                return outcome
+            with patch.object(plugin, "_run_tools", side_effect=steps):
+                plugin.on_message(self.chat("这个有什么含义", sequence=sequence), self.ctx)
+        plugin.on_message(self.chat("这句什么意思", sequence=103,
+                                    quote={"ref_type": "34", "svrid": "missing", "fromusr": OTHER}), self.ctx)
+        plugin.on_message(self.chat("刚才最后定了啥", sequence=104), self.ctx)
+        self.assertEqual(self.backend.send_voice.call_count, 5)
+        spoken = [call.args[1] for call in plugin.voice_reply._local.synthesize.call_args_list]
+        self.assertIn("请引用那张图片。", spoken)
+        self.assertTrue(any("转写" in part for part in spoken))
+
+    def test_fixed_voice_synthesis_failure_only_falls_back_unsent_remainder(self):
+        text = "甲" * 80 + "乙" * 80 + "丙" * 10
+        plugin, _ = self.setup_fixed_voice(text)
+        plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
+        plugin.voice_reply._local.synthesize.side_effect = [b"audio", OSError("合成失败")]
+        plugin.on_message(self.chat("详细解释", sequence=100), self.ctx)
+        self.backend.send_voice.assert_called_once()
+        self.assertEqual(self.backend.sent[-1][1].split("\n", 1)[-1], "乙" * 80 + " " + "丙" * 10)
+
+    def test_fixed_voice_unknown_delivery_stops_without_text_resend(self):
+        plugin, _ = self.setup_fixed_voice("甲" * 160)
+        plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
+        self.backend.send_voice.side_effect = None
+        self.backend.send_voice.return_value = False
+        plugin.on_message(self.chat("详细解释", sequence=100), self.ctx)
+        self.backend.send_voice.assert_called_once()
+        self.assertEqual(len(self.backend.sent), 1)  # 只有命令回执。
+
+    def test_fixed_voice_still_uses_delivery_guard_for_each_chunk(self):
+        plugin, _ = self.setup_fixed_voice("甲" * 80 + "乙" * 80)
+        plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
+        def invalidate(voice, text):
+            if text.startswith("乙"):
+                self.store.reset_context(ROOM)
+            return b"audio"
+        plugin.voice_reply._local.synthesize.side_effect = invalidate
+        plugin.on_message(self.chat("详细解释"), self.ctx)
+        self.backend.send_voice.assert_called_once()
+
+    def test_fixed_voice_keeps_cold_reply_frequency_and_reads_the_reply(self):
+        plugin, _ = self.setup_fixed_voice("有话直说。")
+        plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
+        plugin.on_message(self.message("/冷处理 @测试成员 30m", data={"at_members": (CAT,)}), self.ctx)
+        plugin.on_message(self.chat("在吗"), self.ctx)
+        plugin.on_message(self.chat("还在吗", sequence=101), self.ctx)
+        self.backend.send_voice.assert_called_once()
+        plugin.voice_reply._local.synthesize.assert_called_once_with("星瞳", "有话直说。")
 
     def test_group_and_own_context_are_separate_and_keep_real_at(self):
         self.store.record(self.message("本人前文", sequence=1))

@@ -110,8 +110,8 @@ class TextRoutingTests(unittest.TestCase):
         import pefile
         from run_selftest import Config, TextConfig, AtTextConfig, ImageDownloadConfig, TEXT_DLL
         from filehelper_service import (ReceivedMessage, ReceivedTextMessage, ReceivedTextMessageV2,
-                                        ReceivedMediaMessageV4)
-        from text_service import V4_EXPORT, V3_EXPORT, V2_EXPORT, text_message_binding
+                                        ReceivedMediaMessageV4, ReceivedMediaMessageV5)
+        from text_service import VOICE_EXPORT, V4_EXPORT, V3_EXPORT, V2_EXPORT, text_message_binding
         self.assertEqual(ctypes.sizeof(Config), 1560)
         self.assertEqual(ctypes.sizeof(TextConfig), 1688)
         self.assertEqual(TextConfig.target.offset, 1560)
@@ -127,14 +127,18 @@ class TextRoutingTests(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(ReceivedMediaMessageV4), 28968)  # + 图片 XML 16KB + 原始编号
         self.assertEqual(ReceivedMediaMessageV4.image_xml.offset, 12576)
         self.assertEqual(ReceivedMediaMessageV4.native_message_id.offset, 28960)
+        self.assertEqual(ctypes.sizeof(ReceivedMediaMessageV5), 291120)
+        self.assertEqual(ReceivedMediaMessageV5.payload.offset, 28976)
         with pefile.PE(str(TEXT_DLL)) as pe:
             exports = {item.name for item in pe.DIRECTORY_ENTRY_EXPORT.symbols}
             self.assertEqual(pe.FILE_HEADER.Machine, 0x8664)
             self.assertTrue({b"WxSendText", b"WxSendAtText", b"WxStartTextReceiver", b"WxPollTextMessage",
                              b"WxPollTextMessageV2", b"WxWaitForTasks", b"WxRemoveSelfTest"}.issubset(exports))
-        # 接收协议跟着已编译 DLL 走：V4 收图片，V3 收 8KB 正文，否则按 V2 的 1KB 正文收，都能正常启动。
+        # 接收协议跟着已编译 DLL 走：优先语音协议，其次图片或纯文本协议。
         poll_export, message_type = text_message_binding(exports)
-        if V4_EXPORT in exports:
+        if VOICE_EXPORT in exports:
+            self.assertEqual((poll_export, message_type), (VOICE_EXPORT, ReceivedMediaMessageV5))
+        elif V4_EXPORT in exports:
             self.assertEqual((poll_export, message_type), (V4_EXPORT, ReceivedMediaMessageV4))
         elif V3_EXPORT in exports:
             self.assertEqual((poll_export, message_type), (V3_EXPORT, ReceivedTextMessage))

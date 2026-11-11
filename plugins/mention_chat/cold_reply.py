@@ -77,23 +77,23 @@ class ColdReply:
         entry = state.get(message.sender_id)
         return bool(entry and entry["until"] > time())
 
-    def handle_mention(self, message, ctx, query):
+    def reply(self, message, ctx, query):
         state = self.room_state.get(message.chat_id, FEATURE) or {}
         entry = state.get(message.sender_id)
         now = time()
         if not entry or entry["until"] <= now:
-            return False
+            return None
         if now < entry["next_reply"]:
-            return True
+            return None
         try:
             reply = ctx.llm_for(message).complete_text(
                 SYSTEM, f"对方刚说：{query or '（只艾特了你，没说话）'}", max_tokens=128).strip()
         except (LLMError, SnapshotExpired) as error:
             ctx.logger.info("冷处理本轮跳过：%s", type(error).__name__)
-            return True
+            return None
         finally:
             entry["next_reply"] = time() + INTERVAL
             self.room_state.put(message.chat_id, FEATURE, state)
         if reply and time() < entry["until"]:
-            ctx.reply_at(message, " ".join(reply.split()))
-        return True
+            return " ".join(reply.split())
+        return None

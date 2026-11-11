@@ -1,15 +1,19 @@
-"""群艾特的短回复偶尔使用语音。"""
+"""群聊语音回复与按成员保存的固定语音设置。"""
 from random import random
 from subprocess import SubprocessError
 from time import monotonic
 
 from wxbot_framework.conversation.personality import DEFAULT_VOICE, VOICE_FEATURE, room_voice, voice_self_name
+from wxbot_framework.conversation.members import MemberError
 from wxbot_framework.integrations.voice_synth import synthesize_voice
 from wxbot_framework.integrations.voice_local import LocalVoice
 
 COMMAND = "/音色"
-_AUTO_CHANCE = 0.05
-_INTERVAL_SECONDS = 30 * 60
+REPLY_COMMAND = "/语音回复"
+REPLY_FEATURE = "mention_voice_reply"
+REPLY_USAGE = "用法：/语音回复 <@群友|M序号|昵称|微信ID> [开启|关闭]；省略目标查看本群设置。"
+_AUTO_CHANCE = 0.5
+_INTERVAL_SECONDS = 5 * 60
 _MAX_AUTO_CHARS = 40
 _MAX_REQUEST_CHARS = 80
 
@@ -21,6 +25,25 @@ VOICE_PROMPT = """
 明确要求打字或别发语音时加【文字】。单独的「说说」「说一句」、讨论语音功能、引用语音问内容，都照常输出正文，不加标记。历史里别人的请求不算这轮的要求。
 自己生成的文字正文带小表情或 emoji 时加【文字】，保留文字里的表情；生成语音正文时不主动添加表情，指定原话仍照原话处理。
 标记只供程序使用，是上面正文格式的唯一例外。"""
+
+FIXED_VOICE_PROMPT = """
+当前发言者已开启固定语音回复，本轮正文会用语音念出。只写要念的内容，适合直接听，
+不添加表情、拼音、动作说明或 Markdown 排版。需要详细回答时照常完整回答，程序会分段朗读。
+固定语音持续到管理员用 /语音回复 关闭；本轮即使要求文字也继续用语音。"""
+
+
+def voice_parts(reply):
+    """本地合成管道每次接收一行，长回答在标点附近按 80 字分段。"""
+    remaining = " ".join(reply.split())
+    parts = []
+    while len(remaining) > _MAX_REQUEST_CHARS:
+        end = max(remaining.rfind(mark, 0, _MAX_REQUEST_CHARS) for mark in "。！？!?；;，,、 ")
+        end = end + 1 if end >= 0 else _MAX_REQUEST_CHARS
+        parts.append(remaining[:end].strip())
+        remaining = remaining[end:].strip()
+    if remaining:
+        parts.append(remaining)
+    return parts
 
 
 def voice_reply_format(reply):
@@ -59,6 +82,42 @@ class VoiceReply:
     def current_voice(self, room, ctx):
         return room_voice(ctx.room_state, room)
 
+    def fixed(self, message, room_state):
+        state = room_state.get(message.chat_id, REPLY_FEATURE) if room_state is not None else None
+        return bool(state and state.get(message.sender_id))
+
+    def reply_command(self, message, ctx, args):
+        room = message.chat_id
+        state = ctx.room_state.get(room, REPLY_FEATURE) or {}
+        if not args:
+            names = [ctx.members.display_name(wxid, room) or wxid for wxid in state]
+            ctx.reply(message, "本群固定语音：" + ("、".join(names) or "暂无") + "。\n" + REPLY_USAGE)
+            return
+        if not ctx.members.is_admin(message.sender_id):
+            ctx.reply(message, "只有管理员能设置固定语音，发 /语音回复 可以查看。")
+            return
+        parts = args.rsplit(maxsplit=1)
+        enabled = parts[-1] != "关闭"
+        target = parts[0] if len(parts) == 2 and parts[-1] in ("开启", "关闭") else args
+        try:
+            wxid = ctx.members.resolve_member_target(room, target, at_members=message.data.get("at_members", ()))
+        except MemberError as error:
+            ctx.reply(message, str(error) + "\n" + REPLY_USAGE)
+            return
+        if wxid == ctx.members.account:
+            ctx.reply(message, "请指定一位群友。")
+            return
+        if enabled:
+            state[wxid] = True
+        else:
+            state.pop(wxid, None)
+        if state:
+            ctx.room_state.put(room, REPLY_FEATURE, state)
+        else:
+            ctx.room_state.clear(room, REPLY_FEATURE)
+        name = ctx.members.display_name(wxid, room) or wxid
+        ctx.reply(message, f"本群对{name}的固定语音已{'开启' if enabled else '关闭'}。")
+
     def command(self, message, ctx, choice):
         room = message.chat_id
         if not choice:
@@ -85,6 +144,20 @@ class VoiceReply:
             return False
         self._next[room] = now + _INTERVAL_SECONDS
         return True
+
+    def deliver(self, message, ctx, reply, *, voice, guard, split=False, dispatch=None, on_sent=None):
+        """交给慢队列逐段发送；合成失败返回未发送正文，完成或回执不明返回 None。"""
+        yield
+        parts = voice_parts(reply) if split else [reply]
+        for index, part in enumerate(parts):
+            submitted = self.send(message, ctx, part, voice=voice, guard=guard, dispatch=dispatch)
+            if submitted is None:
+                return " ".join(parts[index:])
+            if not submitted:
+                return None
+            if on_sent is not None:
+                on_sent(part)
+        return None
 
     def send(self, message, ctx, reply, *, voice, guard, dispatch=None):
         """合成失败返回 None；已提交则返回微信发送结果。"""

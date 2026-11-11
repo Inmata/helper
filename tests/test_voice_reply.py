@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 from plugins.mention_chat import Plugin
 from plugins.mention_chat.slow_replies import SlowReplies
-from plugins.mention_chat.voice_reply import VoiceReply
+from plugins.mention_chat.voice_reply import VoiceReply, voice_parts
 from wxbot_framework.integrations import voice_local
 from wxbot_framework.messaging.message import Message, VoiceSubmission
 
@@ -41,6 +41,32 @@ class FastQueue(Queue):
 
 
 class VoiceTests(unittest.TestCase):
+    def test_automatic_voice_half_chance_five_minute_cooldown_and_explicit_preference(self):
+        reply = VoiceReply()
+        message = Message('晚安', '123@chatroom')
+        with patch('plugins.mention_chat.voice_reply.monotonic', return_value=1000), \
+                patch('plugins.mention_chat.voice_reply.random', return_value=0.5):
+            self.assertFalse(reply.reserve(message, '晚安。', None, automatic=True))
+        with patch('plugins.mention_chat.voice_reply.monotonic', return_value=1000), \
+                patch('plugins.mention_chat.voice_reply.random', return_value=0.49):
+            self.assertTrue(reply.reserve(message, '晚安。', None, automatic=True))
+        with patch('plugins.mention_chat.voice_reply.monotonic', return_value=1299), \
+                patch('plugins.mention_chat.voice_reply.random', return_value=0):
+            self.assertFalse(reply.reserve(message, '晚安。', None, automatic=True))
+        with patch('plugins.mention_chat.voice_reply.monotonic', return_value=1300), \
+                patch('plugins.mention_chat.voice_reply.random', return_value=0):
+            self.assertFalse(reply.reserve(message, '晚安。', False, automatic=True))
+            self.assertFalse(reply.reserve(message, '晚安。', None, automatic=False))
+            self.assertFalse(reply.reserve(message, '字' * 41, None, automatic=True))
+            self.assertTrue(reply.reserve(message, '晚安。', None, automatic=True))
+            self.assertTrue(reply.reserve(message, '指定原话。', True, automatic=False))
+
+    def test_voice_parts_preserve_long_unpunctuated_text(self):
+        text = '甲' * 79 + '😀' + 'abc' * 30
+        parts = voice_parts(text)
+        self.assertEqual(''.join(parts), text)
+        self.assertTrue(all(len(part) <= 80 for part in parts))
+
     def worker(self, *, delay=0, mode='audio'):
         launch = subprocess.Popen
 

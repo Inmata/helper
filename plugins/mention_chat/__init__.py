@@ -10,7 +10,8 @@ from datetime import datetime, timedelta, timezone
 from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .slow_replies import SlowReplies
-from .voice_reply import COMMAND as VOICE_COMMAND, VOICE_PROMPT, VoiceReply, voice_reply_format
+from .voice_reply import (COMMAND as VOICE_COMMAND, REPLY_COMMAND as VOICE_REPLY_COMMAND, FIXED_VOICE_PROMPT,
+                          VOICE_PROMPT, VoiceReply, voice_reply_format)
 
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue, resolve_reply_quote
 from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
@@ -304,6 +305,8 @@ class Plugin:
             args = parts[1] if len(parts) == 2 else ""
             if parts[0] == VOICE_COMMAND:
                 self.voice_reply.command(message, ctx, args)
+            elif parts[0] == VOICE_REPLY_COMMAND and not message.is_self:
+                self.voice_reply.reply_command(message, ctx, args)
             elif parts[0] == COLD_COMMAND and self.cold is not None and not message.is_self:
                 self.cold.command(message, ctx, args)
             return
@@ -329,8 +332,6 @@ class Plugin:
             return  # 答案由接龙插件判定。
         if turns is not None:
             turns.claim(message)
-        if self.cold is not None and self.cold.handle_mention(message, ctx, clean_query):
-            return
         key = turn_key(message)
         resume = lambda: self._reply_turn(message, ctx, clean_query, game, turns=turns, source=source, depth=depth)
         slow = self._slow
@@ -349,6 +350,29 @@ class Plugin:
             turn.close()
 
     def _reply_turn(self, message, ctx, clean_query, game, *, turns=None, source=None, depth=0):
+        if self.cold is not None and self.cold.active(message):
+            reply = self.cold.reply(message, ctx, clean_query)
+            if reply:
+                if ("voice.send" in getattr(ctx, "capabilities", ())
+                        and self.voice_reply.fixed(message, self.room_state)):
+                    personality = ctx.personality(message)
+                    @contextmanager
+                    def guard():
+                        with ctx.personality_guard(personality):
+                            self._ensure_running()
+                            if not self.cold.active(message):
+                                raise SnapshotExpired("冷处理已解除")
+                            yield
+                    try:
+                        remaining = yield from self.voice_reply.deliver(
+                            message, ctx, reply, voice=personality.voice, guard=guard, split=True)
+                        if remaining is not None:
+                            ctx.reply_at(message, remaining, delivery_guard=guard)
+                    except SnapshotExpired:
+                        pass
+                else:
+                    ctx.reply_at(message, reply)
+            return
         if turns is None:
             yield from self._reply_once(message, ctx, clean_query, game)
             return
@@ -434,10 +458,35 @@ class Plugin:
             def send_at(part, send_guard=guard):
                 return send_part(part, send_guard, use_at=True)
 
-            if missing_quote:
-                speak(missing_quote, tier=QA, byte_budget=budget, result=result, send_at=send_at)
+            voice_supported = "voice.send" in getattr(ctx, "capabilities", ())
+            fixed_voice = voice_supported and self.voice_reply.fixed(message, self.room_state)
+
+            def respond(reply, tier, *, preference=False):
+                use_voice = fixed_voice or (voice_supported and self.voice_reply.reserve(
+                    message, reply, preference, automatic=tier == CHAT))
+                if use_voice:
+                    def record_voice(part):
+                        result.sent.append(part)
+                        if sent is not None:
+                            sent(part)
+                    remaining = yield from self.voice_reply.deliver(
+                        message, ctx, reply, voice=personality.voice, guard=guard, split=fixed_voice,
+                        dispatch=dispatch, on_sent=record_voice)
+                    if remaining is None:
+                        return
+                    reply = remaining
+                gate = InterjectionGate(interjection_probe(self.members, message.chat_id)) if tier == CHAT else None
+                send_guard = gate.wrap(guard) if gate is not None else guard
+                speak(reply, tier=tier, byte_budget=budget, result=result,
+                      send_at=lambda part: send_at(part, send_guard),
+                      send_plain=lambda part: send_part(part, send_guard), interjected=gate)
                 if result.failed:
                     raise RuntimeError("原生艾特发送未成功")
+                if result.interrupted:
+                    ctx.logger.info("闲聊拆分发送中有人插话，丢弃剩余 %d 条：room=%s", result.dropped, message.chat_id)
+
+            if missing_quote:
+                yield from respond(missing_quote, QA)
                 return
 
             if catch_up:
@@ -445,9 +494,7 @@ class Plugin:
                 reply = Dialogue(ctx.llm_for(message, personality=personality),
                                  display_timezone=ctx.display_timezone).catch_up(rows, clean_query, quote=quote)
                 self._ensure_running()
-                speak(reply, tier=QA, byte_budget=budget, result=result, send_at=send_at)
-                if result.failed:
-                    raise RuntimeError("原生艾特发送未成功")
+                yield from respond(reply, QA)
                 ctx.logger.info("群聊补课完成：记录=%d", len(rows))
                 return
 
@@ -461,9 +508,7 @@ class Plugin:
                 before_send()
             if outcome.ask:
                 # 工具目标不明确时直接请对方补充。
-                speak(outcome.ask, tier=QA, byte_budget=budget, result=result, send_at=send_at)
-                if result.failed:
-                    raise RuntimeError("原生艾特发送未成功")
+                yield from respond(outcome.ask, QA)
                 if outcome.results:
                     ctx.logger.info("艾特对话：核对未完成 room=%s", message.chat_id)
                 else:
@@ -474,9 +519,11 @@ class Plugin:
                 options["tool_results"] = outcome.payload()
             if outcome.context:
                 options["turn_context"] = outcome.context
-            can_voice = not detail and not outcome.used and "voice.send" in getattr(ctx, "capabilities", ())
+            can_voice = fixed_voice or (not detail and not outcome.used and voice_supported)
             if can_voice:
                 options["system"] = SYSTEM + VOICE_PROMPT
+                if fixed_voice:
+                    options["system"] += FIXED_VOICE_PROMPT
 
             def generate(avoid=None, *, evidence_only=False):
                 self._ensure_running()
@@ -533,28 +580,7 @@ class Plugin:
             if outcome.used:
                 reply = strip_links(reply) or reply
             tier = (DETAIL if detail else QA) if outcome.used else classify_tier(clean_query, detail=detail)
-            if can_voice and self.voice_reply.reserve(message, reply, voice_preference, automatic=tier == CHAT):
-                yield  # 语音合成由慢队列等待，其他成员的文字回复继续处理。
-                self._ensure_running()
-                voice_sent = self.voice_reply.send(message, ctx, reply, voice=personality.voice,
-                                                   guard=guard, dispatch=dispatch)
-                if voice_sent is not None:
-                    if voice_sent:
-                        result.sent.append(reply)
-                        if sent is not None:
-                            sent(reply)
-                    return  # 微信发送结果不明时不补发文字。
-            # 闲聊拆分时把插话检测并入守卫：后续条在拿到守卫后、原生发送前再查一次。
-            gate = InterjectionGate(interjection_probe(self.members, message.chat_id)) if tier == CHAT else None
-            send_guard = gate.wrap(guard) if gate is not None else guard
-            speak(reply, tier=tier, byte_budget=budget, result=result,
-                  send_at=lambda part: send_at(part, send_guard),
-                  send_plain=lambda part: send_part(part, send_guard),
-                  interjected=gate)
-            if result.failed:
-                raise RuntimeError("原生艾特发送未成功")
-            if result.interrupted:
-                ctx.logger.info("闲聊拆分发送中有人插话，丢弃剩余 %d 条：room=%s", result.dropped, message.chat_id)
+            yield from respond(reply, tier, preference=voice_preference if can_voice else False)
             ctx.logger.info("艾特对话完成：room=%s persona=%s context=%d", message.chat_id,
                             personality.name, len(snapshot.messages))
         except SnapshotExpired as error:

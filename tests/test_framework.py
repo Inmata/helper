@@ -11,7 +11,7 @@ import threading
 import time
 import unittest
 import uuid
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from support.recyclable_tempdir import RecyclableTemporaryDirectory
 
@@ -64,6 +64,11 @@ class MemoryBackend:
 
 class FrameworkTests(unittest.TestCase):
     def setUp(self):
+        # 临时插件目录的共享包不能留给后续使用真实插件目录的测试。
+        self.enterContext(patch.dict(sys.modules))
+        for name in tuple(sys.modules):
+            if name == "_wxbot_plugins" or name.startswith("_wxbot_plugins."):
+                sys.modules.pop(name)
         self.previous_logging = logging.root.manager.disable
         logging.disable(logging.CRITICAL)
         SCRATCH.mkdir(parents=True, exist_ok=True)

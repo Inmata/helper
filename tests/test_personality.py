@@ -1,12 +1,14 @@
 """固定熟人损友语气、真实艾特、上下文及并发取消的验证。"""
 import json
 import sys
+import threading
 import unittest
 from datetime import timedelta
 from unittest.mock import Mock, patch
 
 import test_chat_summary as daily
 from plugins.mention_chat import Plugin as ChatPlugin
+from plugins.mention_chat.slow_replies import SlowReplies
 from plugins.mention_chat.voice_reply import REPLY_FEATURE
 from plugins.personality import Plugin as PersonalityPlugin
 from wxbot_framework.conversation.members import MemberError
@@ -14,9 +16,10 @@ from wxbot_framework.conversation.mention_tools import ToolOutcome, ToolResult
 from wxbot_framework.messaging.mentions import (at_source, learned_aliases, parse_at_members, parse_quote,
                                                 reset_learned_aliases, strip_at_labels, typed_at)
 from wxbot_framework.conversation.dialogue import SYSTEM as CHAT_SYSTEM
-from wxbot_framework.conversation.personality import (FIXED_NAME, FIXED_PROMPT, PersonalityState,
+from wxbot_framework.conversation.personality import (FIXED_NAME, FIXED_PROMPT, VOICE_FEATURE, PersonalityState,
                                                       prepare_switch, game_reply)
 from wxbot_framework.app.runtime import BotApplication
+from wxbot_framework.commands import COMMANDS, help_text
 from wxbot_framework.sdk import Message
 from wxbot_framework.messaging.message import VoiceSubmission
 
@@ -144,6 +147,133 @@ class FixedPersonalityTests(unittest.TestCase):
         plugin.voice_reply._local = Mock()
         plugin.voice_reply._local.synthesize.return_value = b"audio"
         return plugin, provider
+
+    def test_read_voice_command_is_public_and_preserves_literal_text_without_models(self):
+        plugin, provider = self.setup_fixed_voice()
+        provider.side_effect = AssertionError("原文朗读不应调用聊天模型")
+        self.ctx._jev = Mock()
+        self.ctx._magpie = Mock()
+        plugin.voice_reply._voices = ("星瞳", "炫神")
+        plugin.on_message(self.message("/音色 炫神"), self.ctx)
+        self.backend.sent.clear()
+        plugin.voice_reply._next[ROOM] = float("inf")
+        original = "【文字】卧槽，这波操作真牛逼。/音色 @小明，照原话念！"
+        for sequence, prefix in enumerate(("/语音 ", "@机器人\u2005/语音 "), 100):
+            plugin.on_message(self.message(prefix + original, sender=OTHER, sequence=sequence), self.ctx)
+            plugin.voice_reply._local.synthesize.assert_called_with("炫神", original)
+        self.assertEqual(self.backend.send_voice.call_count, 2)
+        self.assertEqual(self.backend.sent, [])
+        self.assertIsNone(self.store.room_state.get(ROOM, REPLY_FEATURE))
+        saved = self.store.recent_rows(ROOM, limit=1, include_bot=True)[0]
+        self.assertEqual((saved["text"], saved["context_kind"]), (original, "voice"))
+        provider.assert_not_called()
+        self.ctx._jev.noul.assert_not_called()
+        self.assertEqual(self.ctx._magpie.mock_calls, [])
+
+    def test_read_voice_command_reads_long_multiline_text_in_order(self):
+        plugin, provider = self.setup_fixed_voice()
+        text = "甲" * 80 + "\n" + "乙" * 80 + "丙" * 5
+        plugin.on_message(self.message("/语音\n" + text, sender=OTHER), self.ctx)
+        spoken = [call.args[1] for call in plugin.voice_reply._local.synthesize.call_args_list]
+        self.assertEqual(spoken, ["甲" * 80, "乙" * 80, "丙" * 5])
+        self.assertEqual(self.backend.send_voice.call_count, 3)
+        provider.assert_not_called()
+
+    def test_read_voice_command_usage_capability_and_message_scope(self):
+        plugin, provider = self.setup_fixed_voice()
+        for text in ("/语音", "/语音   \n"):
+            plugin.on_message(self.message(text, sender=OTHER), self.ctx)
+            self.assertIn("用法：/语音", self.backend.sent[-1][1])
+        self.assertIn("/语音", COMMANDS)
+        self.assertIn("/语音 原文", help_text(False))
+        before = len(self.backend.sent)
+        for message in (self.message("/语音测试 原文", sender=OTHER),
+                        self.message("/语音 原文", is_self=True),
+                        self.message("/语音 原文", room="999@chatroom"),
+                        self.message("/语音 原文", data={"bot_generated": True}),
+                        Message("/语音 原文", OTHER, sender_id=OTHER)):
+            plugin.on_message(message, self.ctx)
+        self.assertEqual(len(self.backend.sent), before)
+        self.ctx.capabilities = frozenset()
+        plugin.on_message(self.message("/语音 原文", sender=OTHER), self.ctx)
+        self.assertIn("不支持发送语音", self.backend.sent[-1][1])
+        plugin.voice_reply._local.synthesize.assert_not_called()
+        provider.assert_not_called()
+
+    def test_read_voice_command_failure_returns_only_unsent_text_with_byte_splitting(self):
+        plugin, provider = self.setup_fixed_voice()
+        plugin.voice_reply._local.synthesize.side_effect = [b"audio", OSError("合成失败")]
+        plugin.on_message(self.message("/语音 " + "甲" * 80 + "乙" * 400, sender=OTHER), self.ctx)
+        self.backend.send_voice.assert_called_once_with(ROOM, b"audio")
+        texts = [sent[1] for sent in self.backend.sent]
+        self.assertGreater(len(texts), 1)
+        self.assertTrue(all(len(text.encode("utf-8")) <= 1023 for text in texts))
+        self.assertEqual("".join(texts).replace(" ", ""), "乙" * 400)
+        provider.assert_not_called()
+
+    def test_read_voice_command_unknown_delivery_stops_without_resend(self):
+        plugin, provider = self.setup_fixed_voice()
+        self.backend.send_voice.side_effect = [VoiceSubmission("first"), False]
+        plugin.on_message(self.message("/语音 " + "甲" * 240, sender=OTHER), self.ctx)
+        self.assertEqual(self.backend.send_voice.call_count, 2)
+        self.assertEqual(self.backend.sent, [])
+        provider.assert_not_called()
+
+    def test_read_voice_command_cancels_when_voice_changes_during_synthesis(self):
+        plugin, provider = self.setup_fixed_voice()
+
+        def synthesize(*args):
+            self.store.room_state.put(ROOM, VOICE_FEATURE, {"voice": "炫神"})
+            return b"audio"
+
+        plugin.voice_reply._local.synthesize.side_effect = synthesize
+        plugin.on_message(self.message("/语音 原文", sender=OTHER), self.ctx)
+        self.backend.send_voice.assert_not_called()
+        self.assertEqual(self.backend.sent, [])
+        provider.assert_not_called()
+
+    def test_read_voice_command_uses_member_queue_without_blocking_other_members(self):
+        plugin, provider = self.setup_fixed_voice("普通文字。")
+        plugin._slow = SlowReplies(self.ctx.logger)
+        started, release, fast, finished = (threading.Event() for _ in range(4))
+        spoken = []
+
+        def synthesize(voice, text):
+            spoken.append(text)
+            if text == "第一条":
+                started.set()
+                release.wait(5)
+            return b"audio"
+
+        def send_voice(*args):
+            if len(spoken) == 2:
+                finished.set()
+            return VoiceSubmission(f"voice-{len(spoken)}")
+
+        send_text = self.backend.send_at_text
+
+        def send_at(*args):
+            result = send_text(*args)
+            fast.set()
+            return result
+
+        plugin.voice_reply._local.synthesize.side_effect = synthesize
+        self.backend.send_voice.side_effect = send_voice
+        self.backend.send_at_text = send_at
+        try:
+            plugin.on_message(self.message("/语音 第一条", sender=OTHER), self.ctx)
+            self.assertTrue(started.wait(2), "原文语音合成没有开始")
+            plugin.on_message(self.message("/语音 第二条", sender=OTHER), self.ctx)
+            plugin.on_message(self.chat("详细说说今天的安排"), self.ctx)
+            self.assertTrue(fast.wait(2), "其他成员的文字回复被语音阻塞")
+            self.assertEqual(spoken, ["第一条"])
+            release.set()
+            self.assertTrue(finished.wait(2), "同一成员的后续语音没有恢复")
+            self.assertEqual(spoken, ["第一条", "第二条"])
+            provider.assert_called_once()
+        finally:
+            release.set()
+            plugin._slow.close()
 
     def test_fixed_voice_command_targets_permissions_restart_and_disable(self):
         plugin, provider = self.setup_fixed_voice()

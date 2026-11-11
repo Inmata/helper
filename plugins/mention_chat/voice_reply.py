@@ -10,6 +10,7 @@ from wxbot_framework.integrations.voice_synth import synthesize_voice
 from wxbot_framework.integrations.voice_local import LocalVoice
 
 COMMAND = "/音色"
+READ_COMMAND = "/语音"
 REPLY_COMMAND = "/语音回复"
 REPLY_FEATURE = "mention_voice_reply"
 REPLY_USAGE = "用法：/语音回复 <@群友|M序号|昵称|微信ID> [开启|关闭]；省略目标查看本群设置。"
@@ -193,6 +194,6 @@ class VoiceReply:
                 voice = "Windows"
         submit = lambda: ctx.reply_voice(message, wav, transcript=reply, delivery_guard=guard)
         sent = dispatch(submit) if dispatch is not None else submit()
-        ctx.logger.info("艾特语音回复：%s，音色=%s，合成到回执 %.2f 秒",
+        ctx.logger.info("群聊语音回复：%s，音色=%s，合成到回执 %.2f 秒",
                         "已提交" if sent else "未确认", voice, monotonic() - now)
         return sent

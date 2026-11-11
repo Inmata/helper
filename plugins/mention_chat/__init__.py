@@ -10,7 +10,8 @@ from datetime import datetime, timedelta, timezone
 from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .slow_replies import SlowReplies
-from .voice_reply import (COMMAND as VOICE_COMMAND, REPLY_COMMAND as VOICE_REPLY_COMMAND, FIXED_VOICE_PROMPT,
+from .voice_reply import (COMMAND as VOICE_COMMAND, READ_COMMAND as VOICE_READ_COMMAND,
+                          REPLY_COMMAND as VOICE_REPLY_COMMAND, FIXED_VOICE_PROMPT,
                           VOICE_PROMPT, VoiceReply, voice_reply_format)
 
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue, resolve_reply_quote
@@ -312,10 +313,13 @@ class Plugin:
                 self.voice_reply.reply_command(message, ctx, args)
             elif parts[0] == COLD_COMMAND and self.cold is not None and not message.is_self:
                 self.cold.command(message, ctx, args)
-            return
-        turns = getattr(self.members, "turns", None) if message.dispatch_sequence else None
+            if parts[0] != VOICE_READ_COMMAND or message.is_self:
+                return
+            resume = lambda: self._read_voice_command(message, ctx, args)
+        else:
+            turns = getattr(self.members, "turns", None) if message.dispatch_sequence else None
+            resume = lambda: self._process_message(message, ctx, turns)
         key = turn_key(message)
-        resume = lambda: self._process_message(message, ctx, turns)
         if self._slow is None:
             for _ in resume():
                 pass
@@ -323,6 +327,33 @@ class Plugin:
             turn = resume()
             if not self._slow.handoff(key, turn):
                 turn.close()
+
+    def _read_voice_command(self, message, ctx, text):
+        self._ensure_running()
+        if not text:
+            ctx.reply(message, "用法：/语音 要念的原文；所有群友都能用，无需艾特。")
+            return
+        if "voice.send" not in getattr(ctx, "capabilities", ()):
+            ctx.reply(message, "当前微信连接不支持发送语音。")
+            return
+        personality = ctx.personality(message)
+
+        @contextmanager
+        def guard():
+            with ctx.personality_guard(personality):
+                self._ensure_running()
+                yield
+
+        try:
+            remaining = yield from self.voice_reply.deliver(
+                message, ctx, text, voice=personality.voice, guard=guard, split=True)
+            if remaining is not None:
+                result = speak(remaining, tier=QA, byte_budget=1023,
+                               send_at=lambda part: ctx.reply(message, part, delivery_guard=guard))
+                if result.failed:
+                    raise RuntimeError("原文语音回退文字发送未成功")
+        except SnapshotExpired as error:
+            ctx.logger.info("原文语音已取消：%s", error)
 
     def _process_message(self, message, ctx, turns):
         # 判断、模型生成和工具等待都在成员队列内，不占插件收消息的线程。

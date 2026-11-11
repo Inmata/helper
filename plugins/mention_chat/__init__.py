@@ -331,22 +331,29 @@ class Plugin:
     def _read_voice_command(self, message, ctx, text):
         self._ensure_running()
         if not text:
-            ctx.reply(message, "用法：/语音 要念的原文；所有群友都能用，无需艾特。")
+            ctx.reply(message, "用法：/语音 要念的原文，无需艾特。普通成员发送后判断内容；不当时全群普通成员停用一小时，管理员豁免。")
             return
         if "voice.send" not in getattr(ctx, "capabilities", ()):
             ctx.reply(message, "当前微信连接不支持发送语音。")
             return
+        paused = self.voice_reply.read_pause_seconds(message, ctx)
+        if paused:
+            ctx.reply(message, f"本群普通成员的 /语音 暂停中，约 {(paused + 59) // 60} 分钟后恢复。管理员仍可使用。")
+            return
         personality = ctx.personality(message)
+        sent_parts = []
 
         @contextmanager
         def guard():
             with ctx.personality_guard(personality):
                 self._ensure_running()
+                if self.voice_reply.read_pause_seconds(message, ctx):
+                    raise SnapshotExpired("本群 /语音 已暂停")
                 yield
 
         try:
             remaining = yield from self.voice_reply.deliver(
-                message, ctx, text, voice=personality.voice, guard=guard, split=True)
+                message, ctx, text, voice=personality.voice, guard=guard, split=True, on_sent=sent_parts.append)
             if remaining is not None:
                 result = speak(remaining, tier=QA, byte_budget=1023,
                                send_at=lambda part: ctx.reply(message, part, delivery_guard=guard))
@@ -354,6 +361,9 @@ class Plugin:
                     raise RuntimeError("原文语音回退文字发送未成功")
         except SnapshotExpired as error:
             ctx.logger.info("原文语音已取消：%s", error)
+        finally:
+            if sent_parts:
+                self.voice_reply.review_read(message, ctx, " ".join(sent_parts))
 
     def _process_message(self, message, ctx, turns):
         # 判断、模型生成和工具等待都在成员队列内，不占插件收消息的线程。

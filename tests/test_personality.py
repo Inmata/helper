@@ -9,10 +9,11 @@ from unittest.mock import Mock, patch
 import test_chat_summary as daily
 from plugins.mention_chat import Plugin as ChatPlugin
 from plugins.mention_chat.slow_replies import SlowReplies
-from plugins.mention_chat.voice_reply import REPLY_FEATURE
+from plugins.mention_chat.voice_reply import READ_PAUSE_FEATURE, READ_REVIEW_THRESHOLD, REPLY_FEATURE
 from plugins.personality import Plugin as PersonalityPlugin
 from wxbot_framework.conversation.members import MemberError, PersonaSuperseded
 from wxbot_framework.conversation.mention_tools import ToolOutcome, ToolResult
+from wxbot_framework.integrations.jev import JevError
 from wxbot_framework.messaging.mentions import (at_source, learned_aliases, parse_at_members, parse_quote,
                                                 reset_learned_aliases, strip_at_labels, typed_at)
 from wxbot_framework.conversation.dialogue import SYSTEM as CHAT_SYSTEM
@@ -242,10 +243,11 @@ class FixedPersonalityTests(unittest.TestCase):
         plugin.voice_reply._local.synthesize.return_value = b"audio"
         return plugin, provider
 
-    def test_read_voice_command_is_public_and_preserves_literal_text_without_models(self):
+    def test_read_voice_command_preserves_literal_text_and_reviews_after_sending(self):
         plugin, provider = self.setup_fixed_voice()
         provider.side_effect = AssertionError("原文朗读不应调用聊天模型")
         self.ctx._jev = Mock()
+        self.ctx._jev.noul.return_value = [0.01]
         self.ctx._magpie = Mock()
         plugin.voice_reply._voices = ("星瞳", "炫神")
         plugin.on_message(self.message("/音色 炫神"), self.ctx)
@@ -261,8 +263,121 @@ class FixedPersonalityTests(unittest.TestCase):
         saved = self.store.recent_rows(ROOM, limit=1, include_bot=True)[0]
         self.assertEqual((saved["text"], saved["context_kind"]), (original, "voice"))
         provider.assert_not_called()
-        self.ctx._jev.noul.assert_not_called()
+        self.assertEqual(self.ctx._jev.noul.call_count, 2)
         self.assertEqual(self.ctx._magpie.mock_calls, [])
+
+    def test_read_voice_review_waits_for_all_parts_then_pauses_group_and_exempts_admin(self):
+        plugin, provider = self.setup_fixed_voice()
+        self.ctx._jev = Mock()
+        text = "甲" * 80 + "乙" * 80 + "丙" * 5
+
+        def judge(state, questions, **options):
+            self.assertEqual(self.backend.send_voice.call_count, 3)
+            self.assertEqual(state["text"].replace(" ", ""), text)
+            self.assertEqual(options["timeout"], 10)
+            self.assertIsNone(self.store.room_state.get(ROOM, READ_PAUSE_FEATURE))
+            return [READ_REVIEW_THRESHOLD]
+
+        self.ctx._jev.noul.side_effect = judge
+        with patch("plugins.mention_chat.voice_reply.time", return_value=1000):
+            plugin.on_message(self.message("/语音 " + text, sender=OTHER), self.ctx)
+            self.assertEqual(self.store.room_state.get(ROOM, READ_PAUSE_FEATURE), {"until": 4600})
+            self.assertIn("暂停一小时", self.backend.sent[-1][1])
+            for sender in (OTHER, "wxid_another"):
+                plugin.on_message(self.message("/语音 还想念", sender=sender), self.ctx)
+                self.assertIn("暂停中", self.backend.sent[-1][1])
+            self.assertEqual(self.backend.send_voice.call_count, 3)
+            plugin.on_message(self.message("/语音 管理员照常使用", sender=CAT), self.ctx)
+            self.assertEqual(self.backend.send_voice.call_count, 4)
+            self.ctx._jev.noul.assert_called_once()
+            self.assertEqual(self.store.room_state.get(ROOM, READ_PAUSE_FEATURE), {"until": 4600})
+        provider.assert_not_called()
+
+    def test_read_voice_pause_survives_reopening_is_room_scoped_and_expires(self):
+        plugin, _ = self.setup_fixed_voice()
+        self.ctx._jev = Mock()
+        self.ctx._jev.noul.return_value = [0.01]
+        self.store.room_state.put(ROOM, READ_PAUSE_FEATURE, {"until": 4600})
+        reopened = self.new_store()
+        self.ctx._room_state = reopened.room_state
+        with patch("plugins.mention_chat.voice_reply.time", return_value=4599):
+            plugin.on_message(self.message("/语音 被暂停", sender=OTHER), self.ctx)
+            self.backend.send_voice.assert_not_called()
+            self.assertIn("1 分钟", self.backend.sent[-1][1])
+            plugin.on_message(self.message("/语音 其他群照常", sender=OTHER, room=daily.OTHER_ROOM), self.ctx)
+            self.backend.send_voice.assert_called_once_with(daily.OTHER_ROOM, b"audio")
+        with patch("plugins.mention_chat.voice_reply.time", return_value=4600):
+            plugin.on_message(self.message("/语音 到期恢复", sender=OTHER), self.ctx)
+            self.assertEqual(self.backend.send_voice.call_count, 2)
+        self.assertIsNone(self.new_store(account="wxid_second").room_state.get(ROOM, READ_PAUSE_FEATURE))
+
+    def test_admin_read_voice_does_not_trigger_review_or_group_pause(self):
+        plugin, _ = self.setup_fixed_voice()
+        self.ctx._jev = Mock()
+        self.ctx._jev.noul.return_value = [1.0]
+        plugin.on_message(self.message("/语音 管理员原文", sender=CAT), self.ctx)
+        self.backend.send_voice.assert_called_once()
+        self.ctx._jev.noul.assert_not_called()
+        self.assertIsNone(self.store.room_state.get(ROOM, READ_PAUSE_FEATURE))
+
+    def test_read_voice_failed_or_unknown_first_send_is_not_reviewed(self):
+        plugin, _ = self.setup_fixed_voice()
+        self.ctx._jev = Mock()
+        plugin.voice_reply._local.synthesize.return_value = None
+        plugin.on_message(self.message("/语音 合成失败", sender=OTHER), self.ctx)
+        self.backend.send_voice.assert_not_called()
+        self.ctx._jev.noul.assert_not_called()
+        plugin.voice_reply._local.synthesize.return_value = b"audio"
+        self.backend.send_voice.side_effect = None
+        self.backend.send_voice.return_value = False
+        plugin.on_message(self.message("/语音 回执不明", sender=OTHER), self.ctx)
+        self.ctx._jev.noul.assert_not_called()
+
+    def test_read_voice_partial_delivery_reviews_only_confirmed_voice(self):
+        plugin, _ = self.setup_fixed_voice()
+        self.ctx._jev = Mock()
+        self.ctx._jev.noul.return_value = [0.01]
+        self.backend.send_voice.side_effect = [VoiceSubmission("first"), False]
+        plugin.on_message(self.message("/语音 " + "甲" * 80 + "乙" * 160, sender=OTHER), self.ctx)
+        self.assertEqual(self.ctx._jev.noul.call_args.args[0], {"text": "甲" * 80})
+        self.assertEqual(self.backend.send_voice.call_count, 2)
+        self.assertEqual(self.backend.sent, [])
+
+    def test_read_voice_review_failure_or_uncertain_score_keeps_command_available(self):
+        plugin, _ = self.setup_fixed_voice()
+        self.ctx._jev = Mock()
+        self.ctx._jev.noul.side_effect = [JevError("超时"), [READ_REVIEW_THRESHOLD - 0.01], [0.01]]
+        for text in ("判断失败", "边界不清楚", "继续正常使用"):
+            plugin.on_message(self.message("/语音 " + text, sender=OTHER), self.ctx)
+            self.assertIsNone(self.store.room_state.get(ROOM, READ_PAUSE_FEATURE))
+        self.assertEqual(self.backend.send_voice.call_count, 3)
+
+    def test_read_voice_group_pause_cancels_voice_already_synthesizing(self):
+        plugin, _ = self.setup_fixed_voice()
+        self.ctx._jev = Mock()
+
+        def synthesize(*args):
+            self.store.room_state.put(ROOM, READ_PAUSE_FEATURE, {"until": 4600})
+            return b"audio"
+
+        plugin.voice_reply._local.synthesize.side_effect = synthesize
+        with patch("plugins.mention_chat.voice_reply.time", return_value=1000):
+            plugin.on_message(self.message("/语音 排队期间被暂停", sender=OTHER), self.ctx)
+        self.backend.send_voice.assert_not_called()
+        self.ctx._jev.noul.assert_not_called()
+
+    def test_read_voice_pause_leaves_ordinary_voice_replies_available(self):
+        plugin, provider = self.setup_fixed_voice("【语音】晚安。")
+        self.ctx._jev = Mock()
+        self.ctx._jev.noul.return_value = [0.01]
+        self.store.room_state.put(ROOM, READ_PAUSE_FEATURE, {"until": 4600})
+        with patch("plugins.mention_chat.voice_reply.time", return_value=1000):
+            plugin.on_message(self.chat("用语音念句晚安", sender=OTHER), self.ctx)
+        self.backend.send_voice.assert_called_once()
+        self.assertEqual(self.store.room_state.get(ROOM, READ_PAUSE_FEATURE), {"until": 4600})
+        provider.assert_called_once()
+        for call in self.ctx._jev.noul.call_args_list:
+            self.assertNotIn("text", call.args[0])
 
     def test_read_voice_command_reads_long_multiline_text_in_order(self):
         plugin, provider = self.setup_fixed_voice()

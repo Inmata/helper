@@ -35,8 +35,10 @@ class VoiceReply:
         self._next = {}
         self._voices = ()
         self._local = None
+        self._stopped = False
 
     def start(self, logger):
+        self._stopped = False
         self._voices = LocalVoice.available_voices()
         if self._voices:
             try:
@@ -45,6 +47,10 @@ class VoiceReply:
                 logger.warning("本地音色未启动：%s", type(error).__name__)
 
     def close(self):
+        self._stopped = True
+        self._close_local()
+
+    def _close_local(self):
         if self._local is not None:
             self._local.close()
             self._local = None
@@ -81,15 +87,20 @@ class VoiceReply:
 
     def send(self, message, ctx, reply, *, voice, guard, dispatch=None):
         """合成失败返回 None；已提交则返回微信发送结果。"""
+        if self._stopped:
+            return None
         now = monotonic()
         if self._voices:
-            if self._local is None or voice not in self._voices:
+            if voice not in self._voices:
                 return None
             try:
+                if self._local is None:
+                    ctx.logger.info("本地音色进程重新启动：%s", voice)
+                    self._local = LocalVoice(voice)
                 wav = self._local.synthesize(voice, reply)
             except (OSError, ValueError) as error:
-                ctx.logger.warning("%s语音合成失败，改发文字：%s", voice, type(error).__name__)
-                self.close()
+                ctx.logger.warning("%s语音合成失败，改发文字：%s（%s）", voice, type(error).__name__, error)
+                self._close_local()
                 return None
             if wav is None:
                 ctx.logger.info("%s语音重试后仍超长，改发文字", voice)

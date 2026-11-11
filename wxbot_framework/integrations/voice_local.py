@@ -5,9 +5,11 @@ from queue import Empty, Queue
 import struct
 import subprocess
 import sys
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 
 _LENGTH = struct.Struct("<I")
+_READY = b"READY\n"
+_WARMUP_TIMEOUT = 180
 _RUNTIME = Path(__file__).resolve().parents[2] / ".runtime/voice-xuanshen"
 _SPEAKERS = {"阿梓": "Azusa", "炫神": "XuanShen", "星瞳": "XingTong", "七海": "Nana7mi",
              "东雪莲": "Azuma", "永雏塔菲": "Taffy", "电棍": "otto", "孙笑川": "sun",
@@ -19,6 +21,8 @@ class LocalVoice:
     def __init__(self, voice):
         self._lock = Lock()
         self._responses = Queue()
+        self._ready = Event()
+        self._initialized = False
         self._process = subprocess.Popen(
             [str(_PYTHON), "-u", "-X", "utf8", __file__, voice],
             cwd=_RUNTIME, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -35,14 +39,30 @@ class LocalVoice:
             for file in ("config.json", "ref.wav", "gpt.ckpt", "sovits.pth")))
 
     def _read_responses(self):
-        with self._process.stdout as wire:
-            while header := wire.read(_LENGTH.size):
-                size, = _LENGTH.unpack(header)
-                self._responses.put(wire.read(size))
-        self._responses.put(None)
+        try:
+            with self._process.stdout as wire:
+                self._initialized = wire.read(len(_READY)) == _READY
+                self._ready.set()
+                if not self._initialized:
+                    return
+                while header := wire.read(_LENGTH.size):
+                    size, = _LENGTH.unpack(header)
+                    self._responses.put(wire.read(size))
+        finally:
+            self._ready.set()
+            self._responses.put(None)
+
+    def wait_ready(self):
+        """等待启动预热完成；这段等待不占单句合成的 50 秒预算。"""
+        if not self._ready.wait(timeout=_WARMUP_TIMEOUT):
+            self.close()
+            raise TimeoutError("本地音色预热超时")
+        if not self._initialized:
+            raise OSError("本地音色在预热完成前退出")
 
     def synthesize(self, voice, text):
         with self._lock:
+            self.wait_ready()
             try:
                 self._process.stdin.write(f"{voice}\t{text}\n".encode("utf-8"))
                 self._process.stdin.flush()
@@ -65,7 +85,7 @@ def _short_samples(model, text):
     import torch
 
     max_seconds = 2 + len(text) / 4
-    decode_seconds = max_seconds + 3  # 已测到星瞳在起音前生成约 2.6 秒静音。
+    decode_seconds = max_seconds + 10  # 已测到星瞳在起音前生成约 9.7 秒静音。
     rate = model.sampling_rate
     # 这些模型每秒解码 25 个 token；parrots 将 t2s_max_sec 乘 50 作为 token 上限。
     model.t2s_max_sec = decode_seconds / 2
@@ -120,6 +140,8 @@ def _worker():
     with torch.inference_mode():
         _short_samples(model, "大家好。")
     print(f"本地音色已预热：{current}，{time.perf_counter() - started:.2f} 秒", file=sys.stderr)
+    wire.write(_READY)
+    wire.flush()
     for line in sys.stdin.buffer:
         voice, text = line.decode("utf-8").split("\t", 1)
         if voice != current:

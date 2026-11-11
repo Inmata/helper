@@ -135,9 +135,9 @@ class Plugin:
         return self._slow is not None and self._slow.busy()
 
     def on_unload(self, ctx):
+        self.voice_reply.close()
         if self._slow is not None:
             self._slow.close()
-        self.voice_reply.close()
 
     def _ensure_running(self):
         if self._slow is not None and self._slow.stopped.is_set():

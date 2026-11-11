@@ -16,6 +16,7 @@ from wxbot_framework.conversation.personality import (FIXED_NAME, FIXED_PROMPT, 
                                                       prepare_switch, game_reply)
 from wxbot_framework.app.runtime import BotApplication
 from wxbot_framework.sdk import Message
+from wxbot_framework.messaging.message import VoiceSubmission
 
 ROOM, CAT, ROBOT, OTHER = daily.ROOM, daily.CAT, daily.ROBOT, daily.OTHER
 
@@ -87,8 +88,8 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertIn("篇幅按功能要求决定", FIXED_PROMPT)
 
     def test_sensitive_event_and_repeated_joke_rules_are_defined_once(self):
-        for phrase in ("无法确定是玩笑时按真实处理", "确认真实后后续回复也不再拿它玩梗",
-                       "自己近期回复里用过的梗和开头词不再重复", "不接力或放大诅咒、辱骂",
+        for phrase in ("日常拌嘴默认按玩笑接", "确认真实后后续回复也不再拿它玩梗",
+                       "自己近期回复里用过的梗和开头词不再重复", "对方明确表示不舒服或要求停止时收住",
                        "政治与时事争议不下确定结论", "不用加粗等Markdown标记"):
             with self.subTest(phrase=phrase):
                 self.assertEqual(FIXED_PROMPT.count(phrase), 1)
@@ -97,6 +98,36 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertEqual(FIXED_PROMPT.count("现实创伤"), 1)
         self.assertEqual(FIXED_PROMPT.count("机械复读梗"), 1)
         self.assertEqual(FIXED_PROMPT.count("Markdown"), 1)
+
+    def test_voice_banter_uses_relaxed_prompt_and_keeps_original_words(self):
+        provider = Mock()
+        plugin = self.setup_chat(provider)
+        self.ctx.capabilities = frozenset({"voice.send"})
+        self.backend.send_voice = Mock()
+        plugin.voice_reply._voices = ("星瞳",)
+        plugin.voice_reply._local = Mock()
+        plugin.voice_reply._local.synthesize.return_value = b"test-audio"
+        self.store.record_bot_reply(ROOM, "骂人的话一句都不带念的哈")
+        for sequence, original in enumerate(("你这个扎啤，真是笑死我了。", "卧槽，这波操作真牛逼。"), 100):
+            with self.subTest(original=original):
+                self.backend.send_voice.return_value = VoiceSubmission(f"test-voice-{sequence}")
+                provider.reset_mock()
+                provider.return_value = "【语音】" + original
+                question = "用语音念：" + original
+                message = self.chat(question, sequence=sequence)
+                for _ in plugin._reply_once(message, self.ctx, question, None):
+                    pass
+                self.assertEqual(provider.call_count, 1)
+                system = provider.call_args.args[0]
+                self.assertIn("日常拌嘴默认按玩笑接", system)
+                self.assertIn("轻度互损、粗口、谐音梗和略低俗的玩笑可以照念", system)
+                self.assertIn("历史里拒读过别的句子也不延续成一律禁念的规则", system)
+                self.assertIn("对方明确表示不舒服或要求停止时收住", system)
+                plugin.voice_reply._local.synthesize.assert_called_with("星瞳", original)
+                self.backend.send_voice.assert_called_with(ROOM, b"test-audio")
+                saved = self.store.recent_rows(ROOM, limit=1, include_bot=True)[0]
+                self.assertEqual((saved["text"], saved["context_kind"]), (original, "voice"))
+        self.assertEqual(self.backend.sent, [])
 
     def test_group_and_own_context_are_separate_and_keep_real_at(self):
         self.store.record(self.message("本人前文", sequence=1))

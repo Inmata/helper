@@ -10,6 +10,11 @@
       "wechat_version": "4.2.0.12",
       "size": 205932072,
       "sha256": "2b3677c3f932daaa4ef84c8b2acd0aee12cbe5a779ff9e740c370761e5c291ce"
+    },
+    {
+      "wechat_version": "4.2.0.13",
+      "size": 205943848,
+      "sha256": "afe3d02c58bada3c35009c0cd58ee1f57b2a00fe53237d0dce649107fddb9a20"
     }
   ]
 }

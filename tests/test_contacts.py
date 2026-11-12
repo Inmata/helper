@@ -15,9 +15,10 @@ PROVIDER, HEAD, NODE, CACHE, SENTINEL, BUCKETS, ENTRY, CONTACT, STRINGS = [
 
 
 class ContactMemory(AccountMemory):
-    def __init__(self, name='DemoUser', *, updated=False):
-        super().__init__(updated=updated)
+    def __init__(self, name='DemoUser', *, updated=False, patch13=False):
+        super().__init__(updated=updated, patch13=patch13)
         context_vtable, identity_getter, getter, provider_vtable, contact_vtable = (
+            (0x90D7FE8, 0x388030, 0x384EB0, 0x927FD08, 0x9286298) if patch13 else
             (0x90D5F68, 0x387920, 0x3847A0, 0x927B3F8, 0x9281968) if updated
             else (CONTEXT_VTABLE_RVA, IDENTITY_GETTER_RVA, CACHE_PROVIDER_GETTER_RVA,
                   CACHE_PROVIDER_VTABLE_RVA, CONTACT_CACHE_VTABLE_RVA))
@@ -129,12 +130,12 @@ class ContactTests(unittest.TestCase):
         self.assertEqual(read_contact_name(ram.read, BASE, LRU_PEER, expected_account=SELF), '群友昵称甲')
 
     def test_chatroom_cache_reads_group_member_wxids(self):
-        for version, updated in (('4.1.15.13', False), ('4.2.0.12', True)):
+        for version, updated in (('4.1.15.13', False), ('4.2.0.12', True), ('4.2.0.13', True)):
             with self.subTest(version=version):
                 self.check_chatroom_cache(version, updated)
 
     def check_chatroom_cache(self, version, updated):
-        ram = ContactMemory('FriendUser', updated=updated)
+        ram = ContactMemory('FriendUser', updated=updated, patch13=version == '4.2.0.13')
         room = '12345678@chatroom'
         room_node, room_cache, room_sentinel, room_buckets, room_entry, chatroom_obj, m_sentinel, m1, m2 = [
             0x600020000 + i * 0x1000 for i in range(9)]
@@ -146,7 +147,8 @@ class ContactTests(unittest.TestCase):
         ram.q(NODE, room_node)
         ram.q(room_node, HEAD)
         ram.q(room_node + 0x30, room_cache)
-        ram.q(room_cache, BASE + (0x927B688 if updated else CHATROOM_CACHE_VTABLE_RVA))
+        ram.q(room_cache, BASE + (0x927FF98 if version == '4.2.0.13' else
+                                 0x927B688 if updated else CHATROOM_CACHE_VTABLE_RVA))
         ram.q(room_cache + 0x50, room_sentinel)
         ram.q(room_cache + 0x58, 1)
         ram.q(room_cache + 0x60, room_buckets)

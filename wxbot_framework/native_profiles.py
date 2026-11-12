@@ -17,9 +17,23 @@ _UPDATED_RVAS = {
 }
 
 
+_PATCH13_RVAS = {
+    0xB912690: 0xBD0FDF0,
+    0x8D804E8: 0x9057B98,
+    0x8DFE2F8: 0x90D7FE8,
+    0x469A0: 0x469A0,
+    0x36F930: 0x388030,
+    0x36C7B0: 0x384EB0,
+    0x8F9BF98: 0x927FD08,
+    0x8FA2538: 0x9286298,
+    0x8F9C228: 0x927FF98,
+}
+
 def memory_rva(wechat_version, legacy_rva):
     if wechat_version == LEGACY_VERSION:
         return legacy_rva
-    if wechat_version != "4.2.0.12":
-        raise ValueError("微信版本没有可用的账号与联系人地址配置")
-    return _UPDATED_RVAS[legacy_rva]
+    if wechat_version == "4.2.0.12":
+        return _UPDATED_RVAS[legacy_rva]
+    if wechat_version == "4.2.0.13":
+        return _PATCH13_RVAS[legacy_rva]
+    raise ValueError("微信版本没有可用的账号与联系人地址配置")

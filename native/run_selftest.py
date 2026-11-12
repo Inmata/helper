@@ -277,16 +277,16 @@ def run(mode, *, pid=None, text="WXNATIVE_TEST_3", keep_loaded=False, preserve_r
             major, minor, build, patch = map(int, wechat_version.split("."))
             if (version.FileVersionMS, version.FileVersionLS) != ((major << 16) | minor, (build << 16) | patch):
                 raise RuntimeError("微信客户端版本与核心 DLL 指纹不一致，拒绝加载")
-        if wechat_version == "4.2.0.12" and (
+        if wechat_version in ("4.2.0.12", "4.2.0.13") and (
                 not generic or mode not in ("--listen", "--dispatch", "--download-image", "--remove")):
-            raise RuntimeError("微信 4.2.0.12 请使用 native_text 后端，旧自测与探针仅支持 4.1.15.13")
+            raise RuntimeError(f"微信 {wechat_version} 请使用 native_text 后端，旧自测与探针仅支持 4.1.15.13")
         other = DLL if generic else TEXT_DLL
         if mode != "--remove" and other.name.lower() in loaded_modules:
             raise RuntimeError("另一版本的桥接仍在运行，请先在旧 main.py 中输入 quit")
         pe = pefile.PE(str(dll))
-        if wechat_version == "4.2.0.12" and not any(
+        if wechat_version in ("4.2.0.12", "4.2.0.13") and not any(
                 item.name == b"WxInspectHelperCoreVersion" for item in pe.DIRECTORY_ENTRY_EXPORT.symbols):
-            raise RuntimeError("微信 4.2.0.12 需要配套的新文本桥接 DLL")
+            raise RuntimeError(f"微信 {wechat_version} 需要配套的新文本桥接 DLL")
         # 两种桥接的导出表不同，必须先按桥接类型选映射；图片下载只存在于通用桥接。
         if generic:
             name = {"--dispatch": b"WxSendText", "--listen": b"WxStartTextReceiver",

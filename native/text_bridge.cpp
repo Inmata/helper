@@ -280,7 +280,7 @@ static void sample_all_text(const uintptr_t* batch) {
             char text[8192]{};
             if (type == 34) {
                 // 有完整内联 SILK 时直接交付；缺音频时等客户端生成可下载的原消息对象。
-                if (core_profile_id != 4) continue;
+                if (core_profile_id != 4 && core_profile_id != 5) continue;
                 const char* audio = nullptr;
                 uint32_t audio_size = 0;
                 const auto buffer = *reinterpret_cast<const unsigned char* const*>(message + 0x30);
@@ -344,7 +344,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI WxStartTextReceiver(void* paramete
     void* target = reinterpret_cast<void*>(core_address(core_base, 0x17b9010));
     status = MH_CreateHook(target, reinterpret_cast<void*>(&text_receive), reinterpret_cast<void**>(&original_receive));
     if (status != MH_OK) { MH_Uninitialize(); return 600 + status; }
-    if (core_profile_id == 4 && !std::strncmp(config.base.text, "voice\n", 6)) {
+    if ((core_profile_id == 4 || core_profile_id == 5) && !std::strncmp(config.base.text, "voice\n", 6)) {
         status = install_voice_download(config.base.text + 6);
         if (status != MH_OK) { MH_Uninitialize(); return 600 + status; }
     }

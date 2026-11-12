@@ -17,9 +17,10 @@ SELF = "wxid_framework_current"
 
 
 class AccountMemory:
-    def __init__(self, account=SELF, *, updated=False):
+    def __init__(self, account=SELF, *, updated=False, patch13=False):
         self.regions = {}
         app_global, app_vtable, context_vtable, identity_getter = (
+            (0xBD0FDF0, 0x9057B98, 0x90D7FE8, 0x388030) if patch13 else
             (0xBD0CE30, 0x9055B98, 0x90D5F68, 0x387920) if updated
             else (APP_GLOBAL_RVA, APP_VTABLE_RVA, CONTEXT_VTABLE_RVA, IDENTITY_GETTER_RVA))
         self.add(BASE + app_global, 8)
@@ -70,10 +71,14 @@ class AccountMemory:
 
 class AccountTests(unittest.TestCase):
     def test_updated_account_layout_is_version_bound(self):
-        updated = AccountMemory(updated=True)
-        self.assertEqual(read_current_account(updated.read, BASE, wechat_version="4.2.0.12"), SELF)
-        self.assertIsNone(read_current_account(updated.read, BASE))
-        self.assertIsNone(read_current_account(AccountMemory().read, BASE, wechat_version="4.2.0.12"))
+        for version in ("4.2.0.12", "4.2.0.13"):
+            with self.subTest(version=version):
+                updated = AccountMemory(updated=True, patch13=version == "4.2.0.13")
+                self.assertEqual(read_current_account(updated.read, BASE, wechat_version=version), SELF)
+                self.assertIsNone(read_current_account(updated.read, BASE))
+                self.assertIsNone(read_current_account(AccountMemory().read, BASE, wechat_version=version))
+                other = "4.2.0.12" if version == "4.2.0.13" else "4.2.0.13"
+                self.assertIsNone(read_current_account(updated.read, BASE, wechat_version=other))
 
     def test_current_profile_reads_only_id_and_wechat_name(self):
         ram = AccountMemory()

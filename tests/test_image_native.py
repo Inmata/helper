@@ -346,6 +346,7 @@ class DownloadRunEntryTests(unittest.TestCase):
     """
 
     UUID_HEX = "0" * 32
+    VERSION = "4.2.0.12"
     EXPORTS = {b"WxDownloadImage": 0x100, b"WxWaitForTasks": 0x200,
                b"WxRemoveSelfTest": 0x300, b"WxSendText": 0x400,
                b"WxInspectHelperCoreVersion": 0x500}
@@ -359,7 +360,7 @@ class DownloadRunEntryTests(unittest.TestCase):
             (root / "native").mkdir()
             fixture = b"core"
             profiles = [{"size": len(fixture), "sha256": run_selftest.hashlib.sha256(fixture).hexdigest(),
-                         "wechat_version": "4.2.0.12"}]
+                         "wechat_version": self.VERSION}]
             (root / "native/compatibility.json").write_text(
                 json.dumps({"profiles": profiles}), encoding="utf-8")
             core = root / "weixin.dll"
@@ -376,7 +377,8 @@ class DownloadRunEntryTests(unittest.TestCase):
             addresses = []
 
             class FakePE:
-                VS_FIXEDFILEINFO = [SimpleNamespace(FileVersionMS=0x40002, FileVersionLS=0xC)]
+                VS_FIXEDFILEINFO = [SimpleNamespace(FileVersionMS=0x40002,
+                                                   FileVersionLS=int(self.VERSION.rsplit('.', 1)[1]))]
                 DIRECTORY_ENTRY_EXPORT = SimpleNamespace(
                     symbols=[SimpleNamespace(name=name, address=address)
                              for name, address in DownloadRunEntryTests.EXPORTS.items()])
@@ -420,6 +422,10 @@ class DownloadRunEntryTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "指纹不匹配"):
                     run_selftest.run("--download-image", **options)
                 core.write_bytes(fixture)
+                with self.assertRaisesRegex(RuntimeError, "请使用 native_text 后端"):
+                    run_selftest.run("--listen", pid=1, bridge_path=run_selftest.DLL)
+                with self.assertRaisesRegex(RuntimeError, "旧自测与探针仅支持"):
+                    run_selftest.run("--probe-at", pid=1, bridge_path=run_selftest.TEXT_DLL)
                 with mock.patch.object(FakePE, "VS_FIXEDFILEINFO", [
                         SimpleNamespace(FileVersionMS=0x40001, FileVersionLS=0xF000D)]):
                     with self.assertRaisesRegex(RuntimeError, "版本与核心 DLL 指纹不一致"):
@@ -432,11 +438,15 @@ class DownloadRunEntryTests(unittest.TestCase):
                 self.assertEqual(addresses, [])
                 result = run_selftest.run("--download-image", **options)
             self.assertEqual(result["mode"], "--download-image")
-            self.assertEqual(result["wechat_version"], "4.2.0.12")
+            self.assertEqual(result["wechat_version"], self.VERSION)
             self.assertEqual(addresses[0], 0x20000000 + self.EXPORTS[b"WxDownloadImage"])
             self.assertEqual(addresses[1], 0x20000000 + self.EXPORTS[b"WxWaitForTasks"])
             self.assertTrue(result["success"])
             self.assertEqual(result["report"]["image_path"], str(destination))
+
+
+class DownloadRunEntry42013Tests(DownloadRunEntryTests):
+    VERSION = "4.2.0.13"
 
 
 if __name__ == "__main__":

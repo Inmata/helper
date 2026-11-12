@@ -1,6 +1,6 @@
 #pragma once
 
-// 4.2.0.12: AddMsg 的服务器编号在入库后的 DTO 仍为 +0x148。
+// 4.2.0.12 / 4.2.0.13: AddMsg 的服务器编号在入库后的 DTO 仍为 +0x148。
 static constexpr uintptr_t voice_commit_rva = 0x17f7050;
 static constexpr uintptr_t voice_task_rva = 0x5d25550;
 using VoiceCommit = void (__fastcall*)(void*, const uintptr_t*, uint8_t);
@@ -96,16 +96,16 @@ static void request_voice(const VoiceRequest* request) {
     __try {
         using App = void (__fastcall*)(SharedMessage*);
         using Service = void (__fastcall*)(void*, SharedMessage*);
-        reinterpret_cast<App>(core_base + 0x47220)(&app);
-        if (app.object) reinterpret_cast<Service>(core_base + 0x384730)(app.object, &center);
-        if (center.object) reinterpret_cast<Service>(core_base + 0x71b380)(center.object, &manager);
+        reinterpret_cast<App>(core_address(core_base, 0x47220))(&app);
+        if (app.object) reinterpret_cast<Service>(core_address(core_base, 0x36c740))(app.object, &center);
+        if (center.object) reinterpret_cast<Service>(core_address(core_base, 0x6f4d90))(center.object, &manager);
         if (manager.object != request->manager) {
             finish_voice(request->id, nullptr, 0);
         } else {
             using Download = void (__fastcall*)(void*, void*, const SharedMessage*, int);
-            reinterpret_cast<Download>(core_base + 0x1844640)(manager.object, result, &request->message, 0);
+            reinterpret_cast<Download>(core_address(core_base, 0x1844640))(manager.object, result, &request->message, 0);
             const auto status = *reinterpret_cast<const int32_t*>(result + 4);
-            reinterpret_cast<void (__fastcall*)(void*)>(core_base + 0x5a590)(result);
+            reinterpret_cast<void (__fastcall*)(void*)>(core_address(core_base, 0x5a590))(result);
             if (status) finish_voice(request->id, nullptr, 0);
         }
     } __except (record_exception(GetExceptionInformation(), &error)) {
@@ -133,7 +133,7 @@ static void queue_voice_downloads(void* manager, const uintptr_t* messages) {
         if (!matched) continue;
         auto request = std::make_shared<VoiceRequest>(manager, id);
         using Copy = void (__fastcall*)(const void*, SharedMessage*);
-        reinterpret_cast<Copy>(core_base + 0xaa1870)(reinterpret_cast<const void*>(address), &request->message);
+        reinterpret_cast<Copy>(core_address(core_base, 0xaa1870))(reinterpret_cast<const void*>(address), &request->message);
         std::function<void()> task = [request]() { request_voice(request.get()); };
         if (schedule_task(TestConfig{}, &task)) finish_voice(id, nullptr, 0);
     }
@@ -151,10 +151,10 @@ static MH_STATUS install_voice_download(const char* rooms) {
     strcpy_s(voice_rooms, rooms);
     std::memset(pending_voices, 0, sizeof(pending_voices));
     next_voice = 0;
-    auto status = MH_CreateHook(reinterpret_cast<void*>(core_base + voice_commit_rva),
+    auto status = MH_CreateHook(reinterpret_cast<void*>(core_address(core_base, voice_commit_rva)),
                                 reinterpret_cast<void*>(&voice_commit), reinterpret_cast<void**>(&original_voice_commit));
     if (status == MH_OK)
-        status = MH_CreateHook(reinterpret_cast<void*>(core_base + voice_task_rva),
+        status = MH_CreateHook(reinterpret_cast<void*>(core_address(core_base, voice_task_rva)),
                                reinterpret_cast<void*>(&voice_task), reinterpret_cast<void**>(&original_voice_task));
     return status;
 }

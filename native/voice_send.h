@@ -98,7 +98,8 @@ static void send_voice_on_task(const VoiceSendLease& lease) {
         report.native_status_high = *reinterpret_cast<const uint32_t*>(result + 4);
         report.stage = 64;
         // 发送回执先给出客户端 UUID；引用卡片的 clientmsgid 末尾携带同一个 UUID。
-        if (core_profile_id == 4 && !report.native_status && !report.native_status_high && result_message.object) {
+        if ((core_profile_id == 4 || core_profile_id == 5) &&
+                !report.native_status && !report.native_status_high && result_message.object) {
             auto receipt = static_cast<const unsigned char*>(result_message.object);
             const auto id = reinterpret_cast<const SmallString*>(receipt + 0x30);
             if (receipt[0x50] == 1 && id->length == 36)

@@ -407,7 +407,7 @@ class Plugin:
                             yield
                     try:
                         remaining = yield from self.voice_reply.deliver(
-                            message, ctx, reply, voice=personality.voice, guard=guard, split=True)
+                            message, ctx, reply, voice=personality.voice, guard=guard, split=True, fixed=True)
                         if remaining is not None:
                             ctx.reply_at(message, remaining, delivery_guard=guard)
                     except SnapshotExpired:
@@ -513,7 +513,7 @@ class Plugin:
                             sent(part)
                     remaining = yield from self.voice_reply.deliver(
                         message, ctx, reply, voice=personality.voice, guard=guard, split=fixed_voice,
-                        dispatch=dispatch, on_sent=record_voice)
+                        dispatch=dispatch, on_sent=record_voice, fixed=fixed_voice)
                     if remaining is None:
                         return
                     reply = remaining

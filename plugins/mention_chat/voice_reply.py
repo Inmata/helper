@@ -32,6 +32,7 @@ READ_REVIEW_QUESTION = {
 REPLY_USAGE = "用法：/语音回复 <@群友|M序号|昵称|微信ID> [开启|关闭]；省略目标查看本群设置。"
 _AUTO_CHANCE = 0.35
 _INTERVAL_SECONDS = 30
+_FIXED_INTERVAL_SECONDS = 10
 _MAX_AUTO_CHARS = 80
 _MAX_REQUEST_CHARS = 80
 
@@ -75,6 +76,7 @@ def voice_reply_format(reply):
 class VoiceReply:
     def __init__(self):
         self._next = {}
+        self._fixed_next = {}
         self._voices = ()
         self._local = None
         self._stopped = False
@@ -185,9 +187,13 @@ class VoiceReply:
         self._next[room] = now + _INTERVAL_SECONDS
         return True
 
-    def deliver(self, message, ctx, reply, *, voice, guard, split=False, dispatch=None, on_sent=None):
+    def deliver(self, message, ctx, reply, *, voice, guard, split=False, dispatch=None, on_sent=None, fixed=False):
         """交给慢队列逐段发送；合成失败返回未发送正文，完成或回执不明返回 None。"""
         yield
+        member = (message.chat_id, message.sender_id)
+        if fixed and monotonic() < self._fixed_next.get(member, 0):
+            ctx.logger.info("固定语音间隔未到，改发文字：room=%s sender=%s", *member)
+            return reply
         parts = voice_parts(reply) if split else [reply]
         for index, part in enumerate(parts):
             submitted = self.send(message, ctx, part, voice=voice, guard=guard, dispatch=dispatch)
@@ -195,6 +201,8 @@ class VoiceReply:
                 return " ".join(parts[index:])
             if not submitted:
                 return None
+            if fixed:
+                self._fixed_next[member] = monotonic() + _FIXED_INTERVAL_SECONDS
             if on_sent is not None:
                 on_sent(part)
         return None

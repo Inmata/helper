@@ -542,16 +542,70 @@ class FixedPersonalityTests(unittest.TestCase):
         plugin.on_message(self.message(f"/语音回复 {code} 关闭"), self.ctx)
         self.assertIsNone(self.store.room_state.get(ROOM, REPLY_FEATURE))
 
-    def test_fixed_voice_bypasses_text_marker_random_and_cooldown(self):
+    def test_fixed_voice_bypasses_text_marker_and_automatic_voice_cooldown(self):
         plugin, provider = self.setup_fixed_voice("【文字】我在呢。")
         plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
         plugin.voice_reply._next[ROOM] = float("inf")
         for sequence in (100, 101):
-            with patch("plugins.mention_chat.voice_reply.random", return_value=0.99):
+            with patch("plugins.mention_chat.voice_reply.random", return_value=0.99), \
+                    patch("plugins.mention_chat.voice_reply.monotonic", return_value=sequence * 10):
                 plugin.on_message(self.chat("打字说你在吗", sequence=sequence), self.ctx)
         self.assertEqual(self.backend.send_voice.call_count, 2)
         self.assertIn("当前发言者已开启固定语音回复", provider.call_args.args[0])
         plugin.voice_reply._local.synthesize.assert_called_with("星瞳", "我在呢。")
+
+    def test_fixed_voice_replies_in_text_within_ten_seconds_for_mentions_and_quotes(self):
+        plugin, provider = self.setup_fixed_voice()
+        plugin.on_message(self.message("/语音回复 测试成员"), self.ctx)
+        for sequence, now, answer, quote in (
+                (100, 1000, "先整理文件。", False),
+                (101, 1005, "桌面可以保持原样。", False),
+                (102, 1009.9, "那就换个项目。", True),
+                (103, 1010, "做个素材搜索吧。", True)):
+            provider.return_value = answer
+            if quote:
+                message = self.message("继续说说", sequence=sequence,
+                    data={"quote": {"fromusr": ROBOT, "ref_type": "1", "text": "前一条回复"}})
+                self.store.record(message)
+            else:
+                message = self.chat("帮我想想项目", sequence=sequence)
+            with patch("plugins.mention_chat.voice_reply.monotonic", return_value=now):
+                plugin.on_message(message, self.ctx)
+        self.assertEqual(provider.call_count, 4)
+        self.assertEqual(self.backend.send_voice.call_count, 2)
+        self.assertEqual([call.args[1] for call in plugin.voice_reply._local.synthesize.call_args_list],
+                         ["先整理文件。", "做个素材搜索吧。"])
+        self.assertEqual([sent[1].split("\n", 1)[-1] for sent in self.backend.sent[1:]],
+                         ["桌面可以保持原样。", "那就换个项目。"])
+        with patch("plugins.mention_chat.voice_reply.monotonic", return_value=1011):
+            plugin.on_message(self.message("/语音 按原文念", sequence=104), self.ctx)
+        self.assertEqual(self.backend.send_voice.call_count, 3)
+
+    def test_fixed_voice_interval_is_per_member_and_failed_synthesis_does_not_start_it(self):
+        plugin, provider = self.setup_fixed_voice()
+        self.store.room_state.put(ROOM, REPLY_FEATURE, {CAT: True, OTHER: True})
+        self.store.room_state.put(daily.OTHER_ROOM, REPLY_FEATURE, {CAT: True})
+        with patch("plugins.mention_chat.voice_reply.monotonic", return_value=1000):
+            provider.return_value = "先吃饭吧。"
+            plugin.on_message(self.chat("在吗", sequence=100), self.ctx)
+            provider.return_value = "晚点聊游戏。"
+            plugin.on_message(self.chat("在吗", sequence=101, sender=OTHER), self.ctx)
+            provider.return_value = "这边讨论天气。"
+            message = self.message("@机器人\u2005在吗", sequence=102, room=daily.OTHER_ROOM,
+                data={"is_at_self": True, "at_members": (ROBOT,)})
+            self.store.record(message)
+            plugin.on_message(message, self.ctx)
+        self.assertEqual(self.backend.send_voice.call_count, 3)
+        with patch("plugins.mention_chat.voice_reply.monotonic", return_value=1010):
+            plugin.voice_reply._local.synthesize.side_effect = OSError("合成失败")
+            provider.return_value = "失败也先把文字发出。"
+            plugin.on_message(self.chat("继续", sequence=103), self.ctx)
+            with patch("plugins.mention_chat.voice_reply.LocalVoice") as local:
+                local.return_value.synthesize.return_value = b"audio"
+                provider.return_value = "这次可以正常说话。"
+                plugin.on_message(self.chat("再试一次", sequence=104), self.ctx)
+        self.assertEqual(self.backend.send_voice.call_count, 4)
+        self.assertIn("失败也先把文字发出。", self.backend.sent[-1][1])
 
     def test_fixed_voice_reads_full_multiline_detail_in_chunks_and_records_context(self):
         text = "第一部分讲清楚事情的来龙去脉。" * 7 + "\n" + "第二部分补充具体做法。" * 5
@@ -578,11 +632,14 @@ class FixedPersonalityTests(unittest.TestCase):
             def steps(*args, **kwargs):
                 yield from ()
                 return outcome
-            with patch.object(plugin, "_run_tools", side_effect=steps):
+            with patch.object(plugin, "_run_tools", side_effect=steps), \
+                    patch("plugins.mention_chat.voice_reply.monotonic", return_value=sequence * 10):
                 plugin.on_message(self.chat("这个有什么含义", sequence=sequence), self.ctx)
-        plugin.on_message(self.chat("这句什么意思", sequence=103,
-                                    quote={"ref_type": "34", "svrid": "missing", "fromusr": OTHER}), self.ctx)
-        plugin.on_message(self.chat("刚才最后定了啥", sequence=104), self.ctx)
+        with patch("plugins.mention_chat.voice_reply.monotonic", return_value=1030):
+            plugin.on_message(self.chat("这句什么意思", sequence=103,
+                                        quote={"ref_type": "34", "svrid": "missing", "fromusr": OTHER}), self.ctx)
+        with patch("plugins.mention_chat.voice_reply.monotonic", return_value=1040):
+            plugin.on_message(self.chat("刚才最后定了啥", sequence=104), self.ctx)
         self.assertEqual(self.backend.send_voice.call_count, 5)
         spoken = [call.args[1] for call in plugin.voice_reply._local.synthesize.call_args_list]
         self.assertIn("请引用那张图片。", spoken)

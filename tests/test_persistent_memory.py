@@ -406,6 +406,7 @@ class MemoryTests(unittest.TestCase):
         kb = self.kb()
         plugin = KnowledgePlugin()
         plugin.on_load(self.ctx)
+        self.addCleanup(plugin.on_unload, self.ctx)
         plugin.on_message(self.record("@机器人\u2005/help"), self.ctx)
         self.assertIn("/记忆", "".join(row[1] for row in self.backend.sent))
 
@@ -413,6 +414,7 @@ class MemoryTests(unittest.TestCase):
         kb = self.kb()
         plugin = KnowledgePlugin()
         plugin.on_load(self.ctx)
+        self.addCleanup(plugin.on_unload, self.ctx)
         plugin.on_message(self.record("@机器人\u2005/help", sender=OTHER), self.ctx)
         text = "".join(row[1] for row in self.backend.sent)
         self.assertIn("/记忆", text)
@@ -436,9 +438,12 @@ class MemoryTests(unittest.TestCase):
         kb = self.kb()
         plugin = KnowledgePlugin()
         plugin.on_load(self.ctx)
+        self.addCleanup(plugin.on_unload, self.ctx)
         person = kb.entity(ROOM, "朱宏旭", aliases=["小朱"], pinned=True)
         kb.add_memory(ROOM, person["id"], "身份", "人工确认", "群里的吉他手", CAT)
-        plugin.on_message(self.record("@机器人\u2005/档案 小朱"), self.ctx)
+        self.ctx._llm.complete_json = lambda *args, **kwargs: {
+            "overview": "群里的吉他手", "sections": []}
+        list(plugin._profile_turn(self.record("@机器人\u2005/档案 小朱"), self.ctx, "小朱"))
         text = "".join(row[1] for row in self.backend.sent)
         self.assertIn("朱宏旭", text)
         self.assertIn("群里的吉他手", text)

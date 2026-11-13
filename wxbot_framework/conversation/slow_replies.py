@@ -5,7 +5,7 @@ import threading
 
 
 class SlowReplies:
-    def __init__(self, logger, capacity=128):
+    def __init__(self, logger, capacity=128, *, name="MentionChat"):
         self.logger = logger
         self.capacity = capacity
         self.stopped = threading.Event()
@@ -13,7 +13,7 @@ class SlowReplies:
         self._ready = queue.Queue()
         self._following = {}
         self._count = 0
-        self._threads = [threading.Thread(target=self._run, name=f"MentionChat.slow.{index + 1}", daemon=True)
+        self._threads = [threading.Thread(target=self._run, name=f"{name}.slow.{index + 1}", daemon=True)
                          for index in range(4)]
         for thread in self._threads:
             thread.start()
@@ -44,7 +44,7 @@ class SlowReplies:
 
     def _reserve(self):
         if self._count >= self.capacity:
-            self.logger.warning("艾特慢回复队列已满，跳过本轮")
+            self.logger.warning("慢回复队列已满，跳过本轮")
             return False
         self._count += 1
         return True
@@ -60,7 +60,7 @@ class SlowReplies:
                     for _ in turn:
                         pass
             except Exception as error:
-                self.logger.warning("艾特慢回复处理失败：%s", type(error).__name__)
+                self.logger.warning("慢回复处理失败：%s", type(error).__name__)
             finally:
                 with self._lock:
                     self._count -= 1

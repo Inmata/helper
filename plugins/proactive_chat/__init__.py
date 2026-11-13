@@ -126,7 +126,8 @@ class Plugin:
 
     def on_message(self, message, ctx):
         if (not self.active or message.type != 1 or not message.is_group or not self._enabled_room(message.chat_id) or
-                message.data.get("bot_generated") or message.is_self or is_control(message.text)):
+                message.data.get("bot_generated") or message.data.get("profile_confirmation") or
+                message.is_self or is_control(message.text)):
             return
         room = message.chat_id
         # 艾特、手打 @ 机器人或引用机器人的消息都算叫它，交给艾特回复，这一轮不插话。

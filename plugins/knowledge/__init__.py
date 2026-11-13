@@ -1,20 +1,43 @@
 """知识查询与维护；权限始终由实际消息作者判断。"""
+from contextlib import contextmanager
+
 from wxbot_framework.commands import command_text, help_text
-from wxbot_framework.conversation.members import MemberError, parse_aliases
+from wxbot_framework.conversation.members import MemberError, SnapshotExpired, parse_aliases
+from wxbot_framework.conversation.profiles import profile_messages, suggest_people, write_profile
+from wxbot_framework.conversation.slow_replies import SlowReplies
 from wxbot_framework.conversation.summary import split_text
+from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.timeutil import format_local
 
 
 class Plugin:
     def on_load(self, ctx):
         self.members, self.knowledge = ctx.members, ctx.knowledge
+        ctx.llm
+        self._slow = SlowReplies(ctx.logger, name="Knowledge")
+
+    def has_pending_callbacks(self):
+        return self._slow.busy()
+
+    def on_unload(self, ctx):
+        self._slow.close()
+        self.members.profile_queries.clear()
 
     def on_message(self, message, ctx):
         if (not message.is_group or message.type != 1 or message.chat_id not in self.members.groups or
                 message.data.get("bot_generated")):
             return
         parts = command_text(message.text).split(maxsplit=1)
-        if not parts or parts[0] not in ("/档案", "/记忆", "/纠正", "/忘记", "/关联人物", "/help"):
+        if message.data.get("profile_confirmation") or (parts and parts[0] == "/档案"):
+            argument = parts[1].strip() if len(parts) == 2 else ""
+            resume = lambda: self._profile_turn(message, ctx, argument)
+            key = (message.session_id, message.chat_id, message.sender_id)
+            if not self._slow.queue_if_active(key, resume):
+                turn = resume()
+                if not self._slow.handoff(key, turn):
+                    turn.close()
+            return
+        if not parts or parts[0] not in ("/记忆", "/纠正", "/忘记", "/关联人物", "/help"):
             return
         command, argument = parts[0], parts[1].strip() if len(parts) == 2 else ""
         try:
@@ -23,6 +46,75 @@ class Plugin:
             text = str(error)
         for part in split_text(text):
             ctx.reply(message, part)
+
+    def _profile_turn(self, message, ctx, argument):
+        anchor = self.members.message_id(message) or self.members.latest_id(message.chat_id) + 1
+        snapshot = self.members.recent_snapshot(message.chat_id, limit=50, before_id=anchor, context=True)
+        personality = ctx.personality(message)
+
+        @contextmanager
+        def guard():
+            with ctx.response_guard(snapshot, personality):
+                if self._slow.stopped.is_set():
+                    raise SnapshotExpired("档案插件已停止")
+                yield
+
+        try:
+            with guard():
+                pass
+            blocks = None
+            confirmation = message.data.get("profile_confirmation")
+            if confirmation:
+                if confirmation["entity_id"] is None:
+                    ctx.reply(message, "好，先不查。可以重新发 /档案 名字，或 /档案 @群友。", delivery_guard=guard)
+                    return
+                entity_id = confirmation["entity_id"]
+            else:
+                targets = [wxid for wxid in message.data.get("at_members", ()) if wxid != self.members.account]
+                if len(targets) > 1:
+                    raise MemberError("一次查一位群友，请发 /档案 @群友。")
+                if targets or not argument:
+                    entity = self.knowledge.member_entity(message.chat_id, targets[0] if targets else message.sender_id)
+                else:
+                    try:
+                        entity = self.knowledge.find_entity(message.chat_id, argument)
+                    except MemberError:
+                        recent = [{"speaker": row["speaker_name"], "text": row["text"]} for row in snapshot.messages]
+                        choices = suggest_people(ctx.llm, argument,
+                                                 self.knowledge.profile_candidates(message.chat_id), recent)
+                        if not choices:
+                            question = "这个称呼我还没认出来。能补一个名字，或者发 /档案 @群友 吗？"
+                        elif len(choices) == 1:
+                            question = f"你说的是{choices[0]['name']}吗？回复“对”就查，认错了回“不是”。"
+                        else:
+                            question = "你想查哪一位？回复序号或名字：\n" + "\n".join(
+                                f"{index}. {choice['name']}" for index, choice in enumerate(choices, 1))
+                        if ctx.reply(message, question, delivery_guard=guard) and choices:
+                            self.members.profile_queries.offer(message, choices, snapshot, personality)
+                        return
+                if entity["entity_key"].startswith("group:"):
+                    items = self.knowledge.search(message.chat_id, "", entity_id=entity["id"])
+                    blocks = [self.format_profile(entity["name"], "本群公共记忆", entity, items, None,
+                                                  self.members.is_admin(message.sender_id))]
+                else:
+                    entity_id = entity["id"]
+            if blocks is None:
+                material = self.knowledge.profile_material(message.chat_id, entity_id)
+                blocks = write_profile(ctx.llm_for(message, personality=personality, for_reply=True), material)
+            for part in profile_messages(blocks):
+                if not ctx.reply(message, part, delivery_guard=guard):
+                    raise RuntimeError("档案文本发送未成功")
+                yield
+            ctx.logger.info("档案查询完成：room=%s sections=%d", message.chat_id, len(blocks) - 1)
+        except SnapshotExpired:
+            ctx.logger.info("档案查询已取消：上下文、人格或连接失效")
+        except (MemberError, LLMError) as error:
+            ctx.logger.warning("档案查询失败：%s", type(error).__name__)
+            try:
+                ctx.reply(message, str(error) if isinstance(error, MemberError) else
+                          "这次档案没整理好，请稍后再发 /档案 查询。", delivery_guard=guard)
+            except SnapshotExpired:
+                pass
 
     def handle(self, command, argument, message):
         room, sender = message.chat_id, message.sender_id
@@ -59,21 +151,6 @@ class Plugin:
             items = self.knowledge.search(room, argument)
             return (self.format_items(items, self.knowledge.display_timezone)
                     if items else "还没有找到相关的长期记忆。")
-        entity = (self.knowledge.find_entity(room, argument) if argument else
-                  self.knowledge.member_entity(room, sender))
-        items = self.knowledge.search(room, "", entity_id=entity["id"])
-        name = (self.members.display_name(entity["wxid"], room) if entity["wxid"] else None) or entity["name"]
-        if entity["entity_key"].startswith("group:"):
-            state = "本群公共记忆"
-        elif entity["wxid"]:
-            wechat = self.members.wechat_name(entity["wxid"])
-            state = f"已绑定微信成员（微信名：{wechat}）" if wechat else "已绑定微信成员"
-        else:
-            state = "人物资料，尚未绑定微信成员"
-        if not self.knowledge.visible(entity):
-            state += "；提及量尚未达到自动检索门槛"
-        style = self.knowledge.style(room, entity["wxid"]) if entity["wxid"] else None
-        return self.format_profile(name, state, entity, items, style, self.members.is_admin(sender))
 
     @staticmethod
     def format_profile(name, state, entity, items, style, is_admin=False):

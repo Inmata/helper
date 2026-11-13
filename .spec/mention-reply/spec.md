@@ -3,7 +3,7 @@ title: 艾特回复
 code:
   - plugins/mention_chat/__init__.py
   - plugins/mention_chat/cold_reply.py
-  - plugins/mention_chat/slow_replies.py
+  - wxbot_framework/conversation/slow_replies.py
   - plugins/mention_chat/voice_reply.py
   - wxbot_framework/conversation/dialogue.py
   - wxbot_framework/conversation/turns.py
@@ -85,6 +85,8 @@ related:
 | 23 | `/音色` 向群友显示当前音色、自称和可选音色；只有配置中的管理员可用 `/音色 名称` 切换。选择按群保存，重启保留，未设置时默认星瞳。文本和语音共享同一设置：男声音色自称 A哥，其余自称 A姐。手打艾特两个称呼都能识别。 | 非管理员或指定未安装音色时不改设置。切换前还没发出的旧回复由现有发送守卫取消。 |
 
 ## 群人格选择
+
+档案确认消息由接收入口标注 `profile_confirmation`，交给档案查询处理；艾特与主动发言插件跳过该消息，避免一句“对”得到两份回复。
 
 `/人格` 向所有群友显示本群当前人格和可选项；仅配置中的管理员可用 `/人格 损友`、`/人格 俏皮` 切换，完整名称“熟人损友”“俏皮损友”也可用。旧 `/切换人格` 与 `/人格` 同义。只接受已配置群的文本命令，不处理私聊、机器人自身或生成消息，不要求艾特。
 

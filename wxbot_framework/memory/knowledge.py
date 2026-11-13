@@ -265,6 +265,39 @@ class KnowledgeStore(KnowledgeAdminMixin):
                 raise MemberError("未找到唯一人物")
             return matches[0]
 
+    def profile_candidates(self, room):
+        """仅提供本群现有活动人物，供只读昵称消歧。"""
+        with self.lock:
+            self._room(room)
+            return [{"id": entity["id"], "name": entity["name"], "aliases": parse_aliases(entity["aliases"])}
+                    for entity in self._entities(room)
+                    if entity["status"] == "active" and not entity["entity_key"].startswith("group:")]
+
+    def profile_material(self, room, entity_id):
+        """档案使用较完整资料；保留类别和原始来源时间，模型在锁外整理主题。"""
+        with self.lock:
+            entity = self.admin_entity(room, entity_id)
+            if entity["status"] != "active":
+                raise MemberError("这份人物资料当前不可查询")
+            name = (self.members.display_name(entity["wxid"], room) if entity["wxid"] else None) or entity["name"]
+            material = {"name": name, "aliases": parse_aliases(entity["aliases"]),
+                        "as_of": self.now(), "memories": []}
+            if not self.visible(entity):
+                return material
+            rows = self.connection().execute("""SELECT i.id,i.slot,i.kind,i.content,i.updated_at,
+                       MIN(s.source_time) AS first_source_at,MAX(s.source_time) AS last_source_at
+                FROM knowledge_items i LEFT JOIN knowledge_sources s ON s.item_id=i.id
+                WHERE i.account=? AND i.room=? AND i.entity_id=? AND i.epoch=? AND i.status='active'
+                GROUP BY i.id ORDER BY i.manual DESC,i.updated_at DESC,i.id DESC LIMIT 200""",
+                (self.account, room, entity_id, entity["epoch"])).fetchall()
+            size = 0
+            for row in rows:
+                size += len(row["content"])
+                if size > 32000:
+                    break
+                material["memories"].append(dict(row))
+            return material
+
     def link(self, room, wxid, name, editor, *, create_if_missing=False, replace=False):
         if not self.members.is_admin(editor):
             raise MemberError("只有管理员可以关联人物")

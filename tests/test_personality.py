@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 import test_chat_summary as daily
 from plugins.mention_chat import Plugin as ChatPlugin
-from plugins.mention_chat.slow_replies import SlowReplies
+from wxbot_framework.conversation.slow_replies import SlowReplies
 from plugins.mention_chat.voice_reply import READ_PAUSE_FEATURE, READ_REVIEW_THRESHOLD, REPLY_FEATURE
 from plugins.personality import Plugin as PersonalityPlugin
 from wxbot_framework.conversation.members import MemberError, PersonaSuperseded

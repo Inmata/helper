@@ -6,7 +6,7 @@ related:
   - wxbot_framework/app/ingress.py
   - wxbot_framework/integrations/wechat.py
   - native/text_service.py
-  - plugins/mention_chat/slow_replies.py
+  - wxbot_framework/conversation/slow_replies.py
   - plugins/mention_chat/voice_reply.py
   - plugins/proactive_chat/__init__.py
   - tests/test_architecture.py
@@ -18,7 +18,7 @@ related:
 项目边界、目录职责、依赖方向、资源归属与扩展落点；具体行为见各功能 spec：
 [messages](../messages/spec.md)、[delivery](../delivery/spec.md)、[learning](../learning/spec.md)、
 [lifecycle](../lifecycle/spec.md)、[announcements](../announcements/spec.md)、
-[mention-reply](../mention-reply/spec.md)、[proactive-chat](../proactive-chat/spec.md)、[idiom-chain](../idiom-chain/spec.md)。
+[mention-reply](../mention-reply/spec.md)、[profiles](../profiles/spec.md)、[proactive-chat](../proactive-chat/spec.md)、[idiom-chain](../idiom-chain/spec.md)。
 
 ## 边界
 
@@ -45,7 +45,7 @@ related:
 | `memory/` | 知识库与维护、增量学习、人格习惯归纳、定时主动发言；事件驱动发言由 `plugins/proactive_chat/` 持有 |
 | `storage/` | 唯一连接与事务、集中迁移 |
 | `integrations/` | 原生微信适配、大模型与 Jev 客户端、Magpie 看图/联网及限时 HTTP；本地语音识别、合成子进程与 SILK 编码 |
-| `plugins/mention_chat/` | 艾特、定向接话、冷处理与语音命令；`slow_replies.py` 管理慢回复，`voice_reply.py` 管理语音回复与本地音色资源 |
+| `plugins/mention_chat/` | 艾特、定向接话、冷处理与语音命令；复用 `conversation/slow_replies.py` 管理慢回复，`voice_reply.py` 管理语音回复与本地音色资源 |
 | `plugins/proactive_chat/`、`plugins/personality/` | 事件驱动发言与群聊加一；群人格命令。共用框架的群状态、人格快照与发送接口 |
 | `plugins/_shared/` | 插件之间的只读数据契约 |
 | `plugins/_template/` | 插件模板 |
@@ -115,7 +115,7 @@ flowchart TD
 | `MemoryLearner`、`PersonaDeriver` | `memory/worker.py`：增量学习、独立的人格习惯归纳；归纳需配置启用且有 Jev | `MemoryWorker.close()` 等待两条线程；超时报告未完成 |
 | `HourlyChat` | `memory/hourly.py`：定时主动发言候选 | `bootstrap.release()` 调用 `close()` |
 | `ProactiveChat.timer` | `plugins/proactive_chat/`：停顿去抖、复判与事件驱动发言 | `on_unload` 置停止、最多等待 65 秒，发送守卫检查停止标志 |
-| `MentionChat.slow.1`–`.4` | `plugins/mention_chat/slow_replies.py`：按群与成员串行、不同成员并行；队列容量 128 | `on_unload` 关闭队列并等待；忙碌状态用于拒绝热重载 |
+| `MentionChat.slow.1`–`.4`、`Knowledge.slow.1`–`.4` | 各插件独立持有 `conversation/slow_replies.py` 队列：按群与成员串行、不同成员并行；每个队列容量 128 | 各自 `on_unload` 关闭队列并等待；忙碌状态用于拒绝热重载 |
 | `LocalVoice` | `integrations/voice_local.py`：读取合成子进程的音频响应 | `VoiceReply.close()` 终止并等待子进程，读取线程随输出管道关闭退出 |
 | `WxFileHelperReceiver` | `native/filehelper_service.py`：原生消息接收，通用文本服务继承此线程 | 原生 `stop()` 等待接收线程，再关闭通道与卸载桥接 |
 | `WxVoice_0` | `native/text_service.py`：单 worker 语音转写 | 原生 `stop()` 取消排队任务并等待当前转写 |
@@ -124,6 +124,8 @@ flowchart TD
 | `Plugin.<名称>` | `plugin_engine/manager.py`：插件消息队列，退出时执行 `on_unload` | `PluginManager.shutdown()` 等待主线程；未退出的记录保留供再次清理 |
 
 ## 扩展落点
+
+- 档案：`memory/knowledge.py` 提供本群候选和资料；`conversation/profiles.py` 处理模型消歧和章节生成；`MemberStore.profile_queries` 持有短期确认状态。消息入口在插件分发前标注确认归属，`plugins/knowledge/` 负责查询和发送。详见 [profiles](../profiles/spec.md)。
 
 - 普通插件：复制 `plugins/_template/`，目录名即插件名；`plugin.json` 声明 `api`、`requires`，需要模型时声明 `"services": ["llm"]`；实现 `Plugin.on_message(message, ctx)`，可选 `on_load`、`on_unload`；跨插件数据放 `plugins/_shared/`。
 - 持久状态：表结构加进 `storage/migrations.py`，保持既有表、主键与升级次序；归属某个功能包并使用注入的同一个 `Database`；补“写入失败不留半批状态”的离线测试。

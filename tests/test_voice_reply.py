@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from plugins.mention_chat import Plugin
-from plugins.mention_chat.slow_replies import SlowReplies
+from wxbot_framework.conversation.slow_replies import SlowReplies
 from plugins.mention_chat.voice_reply import VoiceReply, voice_parts
 from wxbot_framework.integrations import voice_local
 from wxbot_framework.messaging.message import Message, VoiceSubmission

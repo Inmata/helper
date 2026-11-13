@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
-from .slow_replies import SlowReplies
+from wxbot_framework.conversation.slow_replies import SlowReplies
 from .voice_reply import (COMMAND as VOICE_COMMAND, READ_COMMAND as VOICE_READ_COMMAND,
                           REPLY_COMMAND as VOICE_REPLY_COMMAND, FIXED_VOICE_PROMPT,
                           VOICE_PROMPT, VoiceReply, voice_reply_format)
@@ -302,7 +302,7 @@ class Plugin:
         # 图片事件（type 3）由原生服务记入 RECENT_IMAGES；这里处理艾特与定向续问。
         if (message.type != 1 or not message.is_group or message.chat_id not in self.members.groups or
                 "WXBOT_AT_CHAT_PROBE" in message.text or
-                message.data.get("bot_generated")):
+                message.data.get("bot_generated") or message.data.get("profile_confirmation")):
             return
         if is_control(message.text):
             parts = command_text(message.text).split(maxsplit=1)

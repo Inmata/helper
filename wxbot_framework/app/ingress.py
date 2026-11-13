@@ -52,4 +52,6 @@ class MessageIngress:
                     return
                 if app.plugins.is_active("personality"):
                     message = prepare_switch(message, app.members)
+                if app.members is not None:
+                    message = app.members.profile_queries.prepare(message)
                 app.plugins.dispatch(message)

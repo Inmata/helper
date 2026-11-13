@@ -205,9 +205,11 @@ class MemberStore:
         from .history import ConversationHistory
         from .room_state import RoomStateStore
         from .turns import ConversationTurns
+        from .profile_queries import ProfileQueries
         self.transcript = ConversationHistory(self)
         self.room_state = RoomStateStore(self)
         self.turns = ConversationTurns()
+        self.profile_queries = ProfileQueries(self)
 
     @classmethod
     def from_config(cls, config, directory):

@@ -3,7 +3,7 @@ import unittest
 
 from wxbot_framework.conversation.context_tools import (
     ContextToolError, OFFENSIVE_WORDS, build_default_tools, is_offensive, pick_speech_examples,
-    prefetch_mention_context, usable_example)
+    MentionContext, prefetch_mention_context, usable_example)
 
 
 class FakeKnowledge:
@@ -74,6 +74,20 @@ class RegistryTests(unittest.TestCase):
 
 
 class PrefetchEqualsOldBehaviorTests(unittest.TestCase):
+    def test_search_scope_uses_people_and_recent_human_context(self):
+        profile = {"bound": False, "wechat_name": "小明"}
+        people = [{"name": "小红", "aliases": ["红老板"], "bound": True}]
+        context = MentionContext([], None, profile, people, [])
+        history = [{"speaker_name": "小明", "text": str(i) + "字" * 250} for i in range(10)]
+        history += [{"text": "旧档案" * 100, "bot_generated": 1}, {"text": "回显", "is_self": 1},
+                    {"text": "转发内容", "context_kind": "forwarded"}]
+        scope = context.search_scope(history)
+        self.assertEqual(scope["提问者档案"], profile)
+        self.assertEqual(scope["本轮名字匹配的群内人物"], people)
+        self.assertEqual(len(scope["近期群友原话"]), 8)
+        self.assertTrue(scope["近期群友原话"][0]["内容"].startswith("2"))
+        self.assertTrue(all(len(row["内容"]) == 200 for row in scope["近期群友原话"]))
+
     def test_call_order_limits_and_dedupe_match_previous_inline_code(self):
         knowledge = FakeKnowledge()
         context = prefetch_mention_context(build_default_tools(knowledge), ROOM, "wxid_a", "今天吃什么")

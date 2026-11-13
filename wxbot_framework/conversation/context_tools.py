@@ -209,6 +209,17 @@ class MentionContext:
     people: list
     examples: list
 
+    def search_scope(self, history=()):
+        """给联网判断提供群内指代；旧机器人回复仍只经本轮接话语境传入。"""
+        recent = [row for row in history if not row.get("bot_generated") and not row.get("is_self")
+                  and row.get("context_kind") != "forwarded"][-8:]
+        return {
+            "提问者档案": self.speaker_profile,
+            "本轮名字匹配的群内人物": self.people,
+            "近期群友原话": [{"发言者": row.get("speaker_name", "群友"), "内容": row["text"][:200]}
+                         for row in recent],
+        }
+
 
 def prefetch_mention_context(tools, room, sender_id, query):
     """按固定顺序预取艾特回复需要的上下文；调用顺序、limit 与去重方式与重构前一致。"""

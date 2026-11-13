@@ -271,7 +271,8 @@ class MentionTools:
         return self._search(query, self.clock() + self.budget)
 
     def steps(self, *, question, room, sender, received_at, quote=None, context_question="", image_choices=(),
-              previous_search="", followup_topic=None, previous_subject="", focus=None, search_date=""):
+              previous_search="", followup_topic=None, previous_subject="", focus=None, search_date="",
+              group_context=None):
         """``context_question``：艾特没有正文时提问人上一条发言（见 ``previous_question``），只用来判断和调用工具。"""
         started = self.clock()
         deadline = started + self.budget
@@ -369,7 +370,9 @@ class MentionTools:
                 turn.record_vision(vision_text)
             search_reason = "explicit" if explicit_search else None
             if search_reason is None:
-                decision = self._judge(lambda *, timeout: turn.consider_search(context=context, timeout=timeout),
+                decision = self._judge(lambda *, timeout: turn.consider_search(context=context,
+                                                                                group_context=group_context,
+                                                                                timeout=timeout),
                                        deadline, "搜索")
                 search_reason = "jev" if decision is not None and decision.use else None
             if search_reason:

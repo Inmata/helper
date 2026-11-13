@@ -35,14 +35,19 @@ VISION_QUESTION = {
 }
 SEARCH_QUESTION = {
     "instructions": "判断可靠地答本轮这一问是否需要先核对公开事实。用语境理解短句，"
-                    "别把上轮答复或提问里的前提当成已经验证的资料。",
+                    "先结合群内语境识别提问对象和意图；人物档案、昵称及群友原话用于辨认群内指代，"
+                    "其中的公开说法和上轮答复都不算已验证的公开资料。只判断本轮要回答的内容。",
     "true": "回答取决于可查的近期或具体公开事实：当前价格、优惠、活动条款、库存、版本、是否已发布、赛程、赛果、"
             "队伍归属、天气、特定网页或公开人物与作品的来历。问法像吐槽或建议，但实际质疑一个可查的条件、结果、"
             "时间、出处或前提时，先查这个前提。例如商家办夺冠活动，接着问‘那他们不是不用退了？’是在核对退款条件。"
             "新补的日期、地区、平台或版本会改变结论时也查，例如问过商品好价后补‘双11’、问完哪个赛事后补‘S16’。"
-            "明确要求联网也查。",
+            "群友提到的产品、地区政策等，若本轮要核实其实际情况，仍需查公开资料。"
+            "仅名字匹配群内人物不足以排除搜索，明确指向同名公众人物时按公开对象判断。明确要求联网也查。",
     "false": "只道谢、感叹、调侃、重述、创作、稳定常识或群内私人话题；单纯询问意见、一般做法或按已知条件给建议，"
-             "不需要新事实。只问配件分开买还是凑单、去健身是不是自律、对已知结论怎么看，不因前文提到商品或赛事就查。",
+             "不需要新事实。问群友是谁、昵称指谁、个人经历、群梗来历或刚才谁说过什么，用群内资料；"
+             "群内资料缺失或指代不清时应澄清，不把人名自动当作公众人物去搜。"
+             "提到品牌、国家或模型来调侃群友，不因这些词就查；本轮确实要核实相关公开事实时才查。"
+             "只问配件分开买还是凑单、去健身是不是自律、对已知结论怎么看，不因前文提到商品或赛事就查。",
 }
 ANSWER_QUESTION = {
     "instructions": "核对拟发送回答里的具体公开事实有没有得到本轮搜索资料支持；不把用户原话或机器人的前文当证据。"
@@ -126,13 +131,15 @@ class JevToolRouter:
             state["补充语境"] = _summary(context)
         return self._decide(VISION, state, VISION_QUESTION, self.vision_threshold, timeout)
 
-    def decide_search(self, *, question, vision_text=None, context="", timeout=None):
+    def decide_search(self, *, question, vision_text=None, context="", group_context=None, timeout=None):
         question = _question(question)
         state = {"提问": question}
         if vision_text is not None:
             state["看图结果"] = _summary(vision_text)
         if context:
             state["补充语境"] = _summary(context)
+        if group_context:
+            state["群内语境"] = group_context
         return self._decide(SEARCH, state, SEARCH_QUESTION, self.search_threshold, timeout)
 
     def verify_answer(self, *, question, context, evidence, answer, vision=""):
@@ -208,11 +215,11 @@ class ToolTurn:
             raise ValueError("本轮已记录过识图结果")
         self._vision_summary = _summary(text)
 
-    def consider_search(self, *, context="", timeout=None):
+    def consider_search(self, *, context="", group_context=None, timeout=None):
         if self._search_decision is not None:
             return ToolDecision(SEARCH, False, BUDGET_EXHAUSTED, threshold=self.router.search_threshold)
         self._search_decision = self.router.decide_search(question=self.question, vision_text=self._vision_summary,
-                                                          context=context, timeout=timeout)
+                                                          context=context, group_context=group_context, timeout=timeout)
         return self._search_decision
 
     def record_search(self, text):

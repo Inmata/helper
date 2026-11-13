@@ -210,7 +210,8 @@ class Plugin:
                             images=RECENT_IMAGES, image_supported=IMAGE_CAPABILITY in getattr(ctx, "capabilities", ()),
                             logger=ctx.logger, stopped=self._slow.stopped if self._slow is not None else None)
 
-    def _run_tools(self, message, ctx, question, snapshot=None, *, resolved_quote=None, follow=False):
+    def _run_tools(self, message, ctx, question, snapshot=None, *, resolved_quote=None, follow=False,
+                   group_context=None):
         """本轮艾特的看图 / 联网；没开启时返回空结果。Jev 读不出来时只按明确说法执行。"""
         if self.tools is None:
             return ToolOutcome()
@@ -252,6 +253,7 @@ class Plugin:
                                          received_at=arrived, quote=message.data.get("quote"),
                                          image_choices=choices, previous_search=last_search, followup_topic=followup_topic,
                                          previous_subject=last_subject, focus=focus,
+                                         group_context=group_context,
                                          search_date=now.astimezone(BEIJING).date().isoformat())
         with self._followup_lock:
             if outcome.image_choices:
@@ -543,7 +545,8 @@ class Plugin:
             if missing_quote:
                 outcome = ToolOutcome(ask=missing_quote)
             else:
-                outcome = yield from self._run_tools(message, ctx, clean_query, snapshot, resolved_quote=quote, follow=plain)
+                outcome = yield from self._run_tools(message, ctx, clean_query, snapshot, resolved_quote=quote, follow=plain,
+                                                     group_context=context.search_scope(snapshot.history))
             self._ensure_running()
             if before_send is not None:
                 before_send()

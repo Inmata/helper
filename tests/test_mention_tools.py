@@ -673,6 +673,25 @@ class MentionChatToolTests(unittest.TestCase):
         self.assertIn("【联网搜索结果】", ctx.last_user)
         self.assertEqual(ctx.sent, [("reply_at", "3.14 已经发了。没错。")])
 
+    def test_group_identity_reaches_search_judge_without_bypassing_it(self):
+        for probability, expected_searches in ((0.03, 0), (0.95, 1)):
+            with self.subTest(probability=probability):
+                jev = FakeJev(search=probability)
+                plugin, ctx = self.build("小红就是红老板。", jev=jev)
+                people = [{"name": "小红", "aliases": ["红老板"], "bound": True}]
+                ctx.knowledge.lookup_people.return_value = people
+                base_snapshot = plugin.members.conversation_snapshot
+                history = ({"speaker_name": "小明", "text": "红老板刚才说要买鸡蛋"},)
+                plugin.members.conversation_snapshot = lambda msg: replace(base_snapshot(msg), history=history)
+                plugin.on_message(mention("红老板是谁"), ctx)
+                scope = jev.calls[0][1]["群内语境"]
+                self.assertEqual(scope["本轮名字匹配的群内人物"], people)
+                self.assertEqual(scope["近期群友原话"][0]["内容"], history[0]["text"])
+                self.assertEqual(len(ctx.magpie.queries), expected_searches)
+                self.assertTrue(ctx.sent)
+                if expected_searches:
+                    self.assertNotIn("买鸡蛋", ctx.magpie.queries[0])
+
     def test_quoted_price_update_searches_with_prior_product_but_thanks_does_not(self):
         class FollowupJev(FakeJev):
             def noul(self, state, questions, *, timeout=None):

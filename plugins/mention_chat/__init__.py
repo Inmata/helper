@@ -21,6 +21,7 @@ from wxbot_framework.conversation.mention_tools import (IMAGE_WINDOW_SECONDS,
                                                         previous_question, public_search_topic, read_tool_options,
                                                         strip_links)
 from wxbot_framework.conversation.repetition import too_similar
+from wxbot_framework.conversation.reply_review import reply_evidence, review_reply
 from wxbot_framework.conversation.turns import (COLLECT_SECONDS, TurnFocus, exchange_intent, judge_turn,
                                                 likely_incomplete, recent_exchange, turn_key)
 from wxbot_framework.conversation.tool_router import REJECTED, JevToolRouter
@@ -560,7 +561,7 @@ class Plugin:
                 if fixed_voice:
                     options["system"] += FIXED_VOICE_PROMPT
 
-            def generate(avoid=None, *, guidance=""):
+            def generate(avoid=None, *, guidance="", revision=None):
                 self._ensure_running()
                 prompt_options = options if not guidance else {
                     **options, "system": options.get("system", SYSTEM) + "\n" + guidance,
@@ -569,7 +570,7 @@ class Plugin:
                     snapshot, knowledge=context.knowledge, style=context.style,
                     speaker_profile=context.speaker_profile, people=context.people,
                     room_game=self.game_context(game) if game else None, quote=quote, avoid=avoid,
-                    question=clean_query, **prompt_options),
+                    question=clean_query, revision=revision, **prompt_options),
                     personality.name)
                 text, preference = voice_reply_format(text) if can_voice else (text, None)
                 if not text:
@@ -590,6 +591,52 @@ class Plugin:
                     reply, voice_preference = retried, retried_preference
                     if too_similar(reply, self._recent_bot_texts(message.chat_id)):
                         ctx.logger.info("艾特回复重说后仍相近，按原样发送：room=%s", message.chat_id)
+            if self.tools is not None and not any(item.tool == "search" and item.ok for item in outcome.results):
+                reviewer = self._tools(ctx).router.jev
+                raw_quote = message.data.get("quote") or {}
+                for attempt in range(3):
+                    evidence = reply_evidence(snapshot, context, quote=quote,
+                        quote_is_bot=self.members.account in (raw_quote.get("fromusr"), raw_quote.get("chatusr")),
+                        tools=outcome.payload(), room_game=self.game_context(game) if game else None,
+                        turn_context=outcome.context)
+                    decision = review_reply(reviewer, clean_query, reply, evidence)
+                    self._ensure_running()
+                    ctx.logger.info("普通回复依据核对：status=%s local=%s public=%s search=%s error=%s",
+                                    decision.status, decision.local, decision.public, decision.search, decision.error)
+                    if decision.status != REJECTED:
+                        break
+                    if attempt == 2:
+                        raise LLMError("普通回复两次修订后仍缺少依据")
+                    checked_search = None
+                    if decision.needs_search and not any(item.tool == "search" for item in outcome.results):
+                        query = Dialogue(ctx.llm_for(message, personality=personality)).search_followup(
+                            clean_query, context=outcome.context, evidence="", answer=reply)
+                        self._ensure_running()
+                        checked_search = self._tools(ctx).search(query)
+                        outcome.results.append(checked_search)
+                        outcome.search_query = outcome.search_subject = query
+                        options["tool_results"] = outcome.payload()
+                        can_voice = False
+                        options["system"] = SYSTEM + (FIXED_VOICE_PROMPT if fixed_voice else "")
+                        with self._followup_lock:
+                            _remember_tool_followup(self._last_searches,
+                                (message.session_id, message.chat_id, message.sender_id), message.received_at, (query, query))
+                        ctx.logger.info("普通回复查证：%s", "成功" if checked_search.ok else "失败")
+                    guidance = (
+                        "修订候选里的无依据说法。群内发言、人物和时间只按原文与档案核对；历史记忆不能写成刚发生。"
+                        "涉及公开事实时按本轮工具资料回答。删去没有依据的剧情细节、公众口碑与多余断言；"
+                        "主观评价可以直接表达，玩笑保留玩笑语气。缺少回答所需的具体内容时自然追问，"
+                        "不要汇报检查过程或输出审核套话。")
+                    if decision.local >= 0.7:
+                        guidance += ("候选中声称群友已经说过或做过的具体事情与原文对不上。"
+                                     "完全删去这些已发生的发言、符号和动作描述，不用同义句继续猜他的反应；"
+                                     "改为回应当前提问或使用资料明确记载的旧事，保留正确的时间归属。")
+                    if decision.public >= 0.7 and not (checked_search is not None and checked_search.ok):
+                        guidance += ("本轮没有支持候选中剧情或公众反应的资料。只接对方已经表达的感受，"
+                                     "或自然问他指哪一段；不要再替作品补写具体缺点、剧情或其他读者的态度。")
+                    reply, voice_preference = generate(revision=reply, guidance=guidance)
+                    if checked_search is not None and checked_search.ok:
+                        break
             search = next((item for item in outcome.results if item.tool == "search" and item.ok), None)
             if search is not None:
                 try:

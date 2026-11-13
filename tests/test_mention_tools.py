@@ -62,7 +62,7 @@ class FakeJev:
 
     def noul(self, state, questions, *, timeout=None):
         if "拟发送的回答" in state:
-            return [0.95]
+            return [0.05, 0.05, 0.05] if len(questions) == 3 else [0.95]
         kind = "vision" if "图片" in questions[0]["instructions"] else "search"
         self.calls.append((kind, state))
         self.timeouts.append(timeout)
@@ -696,7 +696,7 @@ class MentionChatToolTests(unittest.TestCase):
         class FollowupJev(FakeJev):
             def noul(self, state, questions, *, timeout=None):
                 if "拟发送的回答" in state:
-                    return [0.95]
+                    return [0.05, 0.05, 0.05] if len(questions) == 3 else [0.95]
                 self.calls.append(state)
                 context = state.get("补充语境", "")
                 return [0.96 if state["提问"] == "双11" and "9800X3D" in context else 0.02]

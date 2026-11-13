@@ -156,6 +156,8 @@ def _render(payload):
     lines.append(f"【当前提问】{payload['name']}：{payload['current'] or '（只艾特了机器人，没有正文）'}")
     if payload.get("turn_context"):
         lines.append("【本轮接话】\n" + payload["turn_context"])
+    if payload.get("revision"):
+        lines.append("【待修订候选（包含无依据说法，不作为事实）】\n" + payload["revision"])
     quote = payload.get("quote")
     if quote:
         lines.append("【引用】" + (f"{quote['name']}：{quote['text']}" if quote.get("name") else quote["text"]))
@@ -240,7 +242,8 @@ class Dialogue:
         return query
 
     def reply(self, snapshot, *, knowledge=(), style=None, speaker_profile=None, people=(), room_game=None,
-              detail=False, examples=(), system=None, quote=None, avoid=None, question=None, tool_results=(), turn_context=""):
+              detail=False, examples=(), system=None, quote=None, avoid=None, question=None, tool_results=(), turn_context="",
+              revision=None):
         """``quote`` 为本次提问引用的消息 ``{"name", "text"}``；``avoid`` 为刚说过、这次要换个角度的那句。
 
         ``question`` 是清理过手打 @ 标签的提问；缺省用快照里的原文。原文仍作为上下文锚点。
@@ -274,6 +277,8 @@ class Dialogue:
             payload["tools"] = [dict(item) for item in tool_results]
         if turn_context:
             payload["turn_context"] = turn_context
+        if revision:
+            payload["revision"] = revision
         options = {"history": self._history(snapshot, quote)}
         if detail:  # 只在详细请求时传，保持对不认识该参数的客户端的兼容。
             options["detail"] = True

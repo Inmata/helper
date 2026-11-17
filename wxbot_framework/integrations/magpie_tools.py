@@ -232,18 +232,25 @@ def _result_for(events, request_id):
     raise MagpieToolsFormatError("Magpie MCP 响应缺少对应请求的结果")
 
 
-def _tool_text(result):
-    """把 ``tools/call`` 的 content 数组拼成文本；``isError`` 抛可判别的工具错误。"""
+def _tool_result(result):
+    """校验工具结果外壳，保留图片和 Magpie 任务元数据。"""
     if not isinstance(result, dict):
         raise MagpieToolsFormatError("Magpie MCP 工具结果不是对象")
     content = result.get("content")
     if not isinstance(content, list):
         raise MagpieToolsFormatError("Magpie MCP 工具结果缺少 content")
-    parts = [item["text"] for item in content
-             if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str)]
-    text = "\n".join(parts)
     if result.get("isError") is True:
+        text = "\n".join(item["text"] for item in content
+                         if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str))
         raise MagpieToolsToolError(_clean_text(text, 500)[0] or "Magpie 工具执行失败")
+    return result
+
+
+def _tool_text(result):
+    """提取文字；媒体结果由各自的适配器处理。"""
+    content = _tool_result(result)["content"]
+    text = "\n".join(item["text"] for item in content
+                     if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str))
     if not text.strip():
         raise MagpieToolsFormatError("Magpie MCP 工具没有返回文本")
     return text
@@ -361,7 +368,10 @@ class _McpEndpoint:
             self._lock.release()
 
     def call(self, name, arguments, *, timeout=None):
-        """调用一个工具并返回文本；同一请求最多重试一次（仅会话过期时）。
+        return _tool_text(self.call_raw(name, arguments, timeout=timeout))
+
+    def call_raw(self, name, arguments, *, timeout=None):
+        """调用一个工具并返回原始结果；同一请求最多重试一次（仅会话过期时）。
 
         ``timeout`` 是调用方剩余的时间，只能缩短、不能超过配置的总超时。
         """
@@ -379,7 +389,7 @@ class _McpEndpoint:
                 self._reset(deadline)
                 self._initialize(deadline)
                 continue
-            return _tool_text(_result_for(events, request["id"]))
+            return _tool_result(_result_for(events, request["id"]))
         raise MagpieToolsUnavailableError("Magpie MCP 会话失效")  # pragma: no cover - 循环内必返回
 
 

@@ -121,6 +121,7 @@ flowchart TD
 | `WxVoice_0` | `native/text_service.py`：单 worker 语音转写 | 原生 `stop()` 取消排队任务并等待当前转写 |
 | `WechatImageReceiver` | `image_receiver.py`：账号专属图片下载 | 原生 `stop()` 等待；下载未结束时保留桥接并报告清理未完成 |
 | `mention-tool` | `conversation/mention_tools.py`：单次 Jev 或工具调用的限时守护线程 | 调用方在超时或停止后放弃结果，底层调用自行结束 |
+| `MentionChat.images` | `plugins/mention_chat/image_reply.py`：单 worker 生图任务，最多两个待处理任务 | 插件卸载停止受理、取消排队及调用等待，等待 worker 退出；底层 MCP 调用受 35 秒硬截止约束 |
 | `Plugin.<名称>` | `plugin_engine/manager.py`：插件消息队列，退出时执行 `on_unload` | `PluginManager.shutdown()` 等待主线程；未退出的记录保留供再次清理 |
 
 ## 扩展落点

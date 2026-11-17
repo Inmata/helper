@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
+from .image_reply import COMMAND as IMAGE_COMMAND, ImageReply
 from wxbot_framework.conversation.slow_replies import SlowReplies
 from .voice_reply import (COMMAND as VOICE_COMMAND, READ_COMMAND as VOICE_READ_COMMAND,
                           REPLY_COMMAND as VOICE_REPLY_COMMAND, FIXED_VOICE_PROMPT,
@@ -92,6 +93,7 @@ class Plugin:
         self._slow = None
         self.cold = None
         self.voice_reply = VoiceReply()
+        self.image_reply = ImageReply()
 
     def _claim(self, key, arrived_at):
         """认领本次生成；仍在生成中，或本次到达时首次回复尚未结束，返回 False。
@@ -131,13 +133,16 @@ class Plugin:
             raise ValueError("艾特上下文对话需要 history_enabled: true")
         ctx.llm  # 启动时核对配置，不请求接口。
         self._slow = SlowReplies(ctx.logger)
+        if "group.image.send" in getattr(ctx, "capabilities", ()):
+            self.image_reply.start(ctx)
         if "voice.send" in getattr(ctx, "capabilities", ()):
             self.voice_reply.start(ctx.logger)
 
     def has_pending_callbacks(self):
-        return self._slow is not None and self._slow.busy()
+        return (self._slow is not None and self._slow.busy()) or self.image_reply.busy()
 
     def on_unload(self, ctx):
+        self.image_reply.close()
         self.voice_reply.close()
         if self._slow is not None:
             self._slow.close()
@@ -290,6 +295,8 @@ class Plugin:
             if quote or (source is None and (incoming.data.get("at_members") or incoming.text.startswith("@"))):
                 continue
             text = self._clean_query(incoming, source)
+            if source in ("structural", "typed") and self.image_reply.intent(incoming, ctx, text):
+                continue
             if source and (not text or text == turn.question):
                 turns.merge(incoming)
             elif text and self._turn_judge(ctx, "merge", turn.question, new=text):
@@ -310,6 +317,9 @@ class Plugin:
         if is_control(message.text):
             parts = command_text(message.text).split(maxsplit=1)
             args = parts[1] if len(parts) == 2 else ""
+            if parts[0] == IMAGE_COMMAND:
+                self.image_reply.request(message, ctx, args, cold=self.cold)
+                return
             if parts[0] == VOICE_COMMAND:
                 self.voice_reply.command(message, ctx, args)
             elif parts[0] == VOICE_REPLY_COMMAND and not message.is_self:
@@ -375,6 +385,16 @@ class Plugin:
             return
         source = at_source(message, self.members, self.aliases)
         clean_query = self._clean_query(message, source)
+        game = self.room_game(message.chat_id, ctx, message=message)
+        if game and self.is_move(clean_query, game):
+            return
+        if not message.is_self and source in ("structural", "typed"):
+            image_mode = self.image_reply.intent(message, ctx, clean_query)
+            if image_mode:
+                if turns is not None:
+                    turns.claim(message)
+                self.image_reply.request(message, ctx, clean_query, mode=image_mode, cold=self.cold)
+                return
         depth = 0
         if source is None:
             if turns is None or not clean_query or turns.active(message) or addressed_elsewhere(message):
@@ -387,9 +407,6 @@ class Plugin:
         elif turns is not None and not clean_query and not message.data.get("quote") and turns.active(message):
             turns.merge(message)
             return
-        game = self.room_game(message.chat_id, ctx, message=message)
-        if game and self.is_move(clean_query, game):
-            return  # 答案由接龙插件判定。
         if turns is not None:
             turns.claim(message)
         yield from self._reply_turn(message, ctx, clean_query, game, turns=turns, source=source, depth=depth)

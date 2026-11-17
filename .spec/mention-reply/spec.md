@@ -5,6 +5,8 @@ code:
   - plugins/mention_chat/cold_reply.py
   - wxbot_framework/conversation/slow_replies.py
   - plugins/mention_chat/voice_reply.py
+  - plugins/mention_chat/image_reply.py
+  - wxbot_framework/integrations/magpie_images.py
   - wxbot_framework/conversation/dialogue.py
   - wxbot_framework/conversation/turns.py
   - wxbot_framework/conversation/utterance.py
@@ -22,6 +24,7 @@ code:
   - wxbot_framework/integrations/voice_local.py
   - wxbot_framework/recent_images.py
 related:
+  - tests/test_image_generation.py
   - tests/test_mention_tools.py
   - tests/test_tool_router.py
   - tests/test_reply_review.py
@@ -164,7 +167,20 @@ Jev 按这次答复是否依赖近期公开事实来判断搜索；现价、优�
 
 机器人刚追问缺哪个条件时，随后简短的艾特可以接回此前的群友问题，不限于原提问者，允许中间有其他群友发言。引用、续问、补条件和纠错共用本轮语境供看图、搜索和回复使用。没有对应证据时，旧回复和提问中的前提都按待核对的说法处理。
 
+## 群生图
+
+- `/生图` 直接受理；明确艾特（原生艾特或已识别手打称呼）的画图请求，经 Jev 单次双判断区分生成意图与参考图需求，阈值分别为 0.8、0.7。判断失败不提交生图。普通闲聊和单纯引用机器人消息不主动生图。
+- 当前群已启用、发言者非机器人本号、未被冷处理且具备群图片发送能力时才受理。提示词为 1–2000 字，一次一张，保留用户原文，模型、质量、尺寸沿用 Magpie 默认。
+- 引用图片按本群原消息编号或 MD5 取已收录图；未引用的改图请求只取本人前 120 秒内唯一可用图片。缺失或多张时提示引用/重发，下载未完成最多等 6 秒；不误取其他群友图片。
+- 生图消息在补话合并前取得独立归属；判断结果按接收消息复用。受理后不再生成本条普通聊天回复。独立去重覆盖排队至最终投递，按原始到达时刻过滤迟出队的重复请求。
+- `ImageReply` 持有一个后台 worker，活动及排队总容量为 3，同一连接同群同人同时最多一项；入队前确认受理。单次 MCP 请求最多 35 秒，受理起整项最多 300 秒。
+- 调用 `generate_image` 一次；`_meta.usemagpie.ai/pending` 返回任务 ID 后继续 `generation_result`。标准图片块直接解码，URL 结果仅从当前 Magpie 的文件地址下载；单图不超过 20 MiB，生图响应不超过 32 MiB。
+- 文件落在 `.runtime/generated_images/`，统一经 `ctx.reply_image` 发送；清空、人格变化、冷处理、连接变化及停止守卫生效。任务失败不自动重新生成；重启不恢复旧任务。群回复不含下载 URL、路径或原始接口报错。
+- 提交或查询结果明确返回安全审核拒绝时，提示该原因与未生成图片；不把此类拒绝提示为稍后重试。
+
 ## 验收
+
+- `tests/test_image_generation.py`：本机 HTTP 契约、大图、命令和艾特入口、独立轮次、引用图、去重、容量、清空、退出、发图失败及提交/查询阶段的安全审核拒绝。
 
 - `tests/test_personality_generation.py`、`tests/test_personality.py`：面向群友回复显式启用角色生成；俏皮人格移除同源通用风格段，保留事实、语音和详细回答约束，将历史发言作为资料；熟人损友和内部任务保留原输入结构。前后人格快照检查仍取消过期回复。
 - `tools/evaluate_personality.py`：开发与留出场景经正式生成模块重复回放，自动检查格式和事实，逐条审阅角色表达及多轮承接。范围与验收门槛见 [俏皮人格验收](../../docs/俏皮人格验收.md)。

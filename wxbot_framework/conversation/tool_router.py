@@ -131,6 +131,26 @@ class JevToolRouter:
             state["补充语境"] = _summary(context)
         return self._decide(VISION, state, VISION_QUESTION, self.vision_threshold, timeout)
 
+    def image_request(self, question, *, timeout=2):
+        """一次判断生图意图与是否依赖参考图，返回 create / edit / 空串。"""
+        if self.jev is None:
+            return ""
+        try:
+            values = self.jev.noul({"当前艾特正文": _question(question)}, [
+                {"instructions": "判断用户本条是否明确要求机器人现在生成或编辑一张实际图片。",
+                 "true": "明确要求画图、生成图、绘制插画、制作表情图片或修改图片。",
+                 "false": "问怎么画、索要绘画步骤或提示词、分析已有图片、夸图、讨论生图模型、否定或禁止画图、转述他人的画图要求，或只是提到画图。"},
+                {"instructions": "判断这个画图请求是否必须使用已有图片作为参考。",
+                 "true": "要修改这张照片、原图、已发图片，例如换背景、改画风、修改图中对象。",
+                 "false": "从文字描述画一张新图，不依赖已有图片。"},
+            ], timeout=timeout)
+        except Exception:
+            return ""
+        if (len(values) != 2 or any(type(value) not in (int, float) or not math.isfinite(value)
+                                    or not 0 <= value <= 1 for value in values) or values[0] < 0.8):
+            return ""
+        return "edit" if values[1] >= 0.7 else "create"
+
     def decide_search(self, *, question, vision_text=None, context="", group_context=None, timeout=None):
         question = _question(question)
         state = {"提问": question}

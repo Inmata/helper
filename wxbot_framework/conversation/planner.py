@@ -294,7 +294,7 @@ SPEAK_INTENT = {"reply_called": "接住对机器人说的话", "reply_unanswered
 
 
 def generate_proactive(model, lines, *, examples=(), recent_bot=(), local_time="", stickers=(),
-                       intent="", target=None, callback="", max_tokens=512):
+                       intent="", target=None, callback="", max_tokens=512, person_messages=()):
     """生成主动发言正文；不该说、为空或格式不合时返回空串（调用方视为 skip）。
 
     model 为带人格的模型（``PersonalityLLM``），它抛出的 ``LLMError`` / 人格过期原样传播。
@@ -316,6 +316,10 @@ def generate_proactive(model, lines, *, examples=(), recent_bot=(), local_time="
     if payload["examples"]:
         user += "\n【群友说话的样子】\n" + json.dumps(payload["examples"], ensure_ascii=False)
     system = PROACTIVE_SYSTEM
+    if person_messages:
+        from .person_context import PERSON_GUIDANCE
+        system += "\n" + PERSON_GUIDANCE
+        user += "\n【相关成员原话】" + json.dumps(person_messages, ensure_ascii=False)
     if target is not None:
         system += ("\n本轮只接【本轮想接的原话】和同一话题。群里已有人答上、原话说给别人、或话题已转开时，"
                    "就返回 speak=false。开口理由是提示，结合后面的聊天判断；旧梗仅在现在确实碰回同一件事时使用。")

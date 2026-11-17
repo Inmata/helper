@@ -11,6 +11,9 @@ from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .image_reply import COMMAND as IMAGE_COMMAND, ImageReply
 from wxbot_framework.conversation.slow_replies import SlowReplies
+from wxbot_framework.conversation.person_context import person_context
+from wxbot_framework.conversation.reply_wait import ReplyWait
+from wxbot_framework.integrations.reply_budget import CURRENT, ReplyExpired
 from .voice_reply import (COMMAND as VOICE_COMMAND, READ_COMMAND as VOICE_READ_COMMAND,
                           REPLY_COMMAND as VOICE_REPLY_COMMAND, FIXED_VOICE_PROMPT,
                           VOICE_PROMPT, VoiceReply, voice_reply_format)
@@ -94,6 +97,8 @@ class Plugin:
         self.cold = None
         self.voice_reply = VoiceReply()
         self.image_reply = ImageReply()
+        self._wait = None
+        self._retry = OrderedDict()
 
     def _claim(self, key, arrived_at):
         """认领本次生成；仍在生成中，或本次到达时首次回复尚未结束，返回 False。
@@ -133,6 +138,7 @@ class Plugin:
             raise ValueError("艾特上下文对话需要 history_enabled: true")
         ctx.llm  # 启动时核对配置，不请求接口。
         self._slow = SlowReplies(ctx.logger)
+        self._wait = ReplyWait()
         if "group.image.send" in getattr(ctx, "capabilities", ()):
             self.image_reply.start(ctx)
         if "voice.send" in getattr(ctx, "capabilities", ()):
@@ -142,6 +148,8 @@ class Plugin:
         return (self._slow is not None and self._slow.busy()) or self.image_reply.busy()
 
     def on_unload(self, ctx):
+        if self._wait is not None:
+            self._wait.close()
         self.image_reply.close()
         self.voice_reply.close()
         if self._slow is not None:
@@ -272,7 +280,7 @@ class Plugin:
         return outcome
 
     def _clean_query(self, message, source):
-        text = strip_at_labels(message.text)
+        text = strip_at_labels(message.data.get("retry_question", message.text))
         if source == "typed":
             label = typed_at(text, self._bot_names(message.chat_id))
             if label:
@@ -333,13 +341,33 @@ class Plugin:
             turns = getattr(self.members, "turns", None) if message.dispatch_sequence else None
             resume = lambda: self._process_message(message, ctx, turns)
         key = turn_key(message)
+        if not is_control(message.text) and at_source(message, self.members, self.aliases):
+            previous = self._retry.get(key)
+            clean = self._clean_query(message, at_source(message, self.members, self.aliases))
+            if clean in ("重试", "再试一次") and previous and message.received_at - previous[0] <= 300:
+                message = replace(message, data={**message.data, "retry_question": previous[1].text,
+                                                "quote": previous[1].data.get("quote")})
+            else:
+                self._retry[key] = (message.received_at, message)
+                if len(self._retry) > 64:
+                    self._retry.popitem(last=False)
+            if self._wait is not None:
+                try:
+                    waiting = self._wait.accept(message, ctx, 120 if wants_detail(message.text) else 90)
+                except SnapshotExpired:
+                    return
+                original = resume
+                resume = lambda: self._wait.wrap(original(), waiting)
         if self._slow is None:
             for _ in resume():
                 pass
-        elif not self._slow.queue_if_active(key, resume):
+        elif not self._slow.queue_if_active(key, resume, on_full=lambda: self._wait.finish(waiting, "回复队列已满，请稍后重试。")
+                                            if self._wait is not None and not is_control(message.text) and
+                                            at_source(message, self.members, self.aliases) else None):
             turn = resume()
             if not self._slow.handoff(key, turn):
                 turn.close()
+                ctx.reply_at(message, "回复队列已满，请稍后重试。")
 
     def _read_voice_command(self, message, ctx, text):
         self._ensure_running()
@@ -389,6 +417,8 @@ class Plugin:
         if game and self.is_move(clean_query, game):
             return
         if not message.is_self and source in ("structural", "typed"):
+            if self.image_reply.status(message, ctx, clean_query):
+                return
             image_mode = self.image_reply.intent(message, ctx, clean_query)
             if image_mode:
                 if turns is not None:
@@ -409,6 +439,14 @@ class Plugin:
             return
         if turns is not None:
             turns.claim(message)
+        if CURRENT.get() is None and self._wait is not None:
+            try:
+                waiting = self._wait.accept(message, ctx, 120 if wants_detail(clean_query) else 90)
+            except SnapshotExpired:
+                return
+            yield from self._wait.wrap(self._reply_turn(message, ctx, clean_query, game, turns=turns,
+                                                       source=source, depth=depth), waiting)
+            return
         yield from self._reply_turn(message, ctx, clean_query, game, turns=turns, source=source, depth=depth)
 
     def _reply_turn(self, message, ctx, clean_query, game, *, turns=None, source=None, depth=0):
@@ -500,9 +538,16 @@ class Plugin:
             @contextmanager
             def guard():
                 with self._delivery_guard(message, ctx.response_guard, snapshot, personality):
+                    active_budget = CURRENT.get()
+                    if active_budget is not None:
+                        active_budget.remaining(1)
                     if needs_review is not None and needs_review():
                         raise TurnNeedsReview
-                    yield
+                    if active_budget is None:
+                        yield
+                    else:
+                        with active_budget.delivery():
+                            yield
             quote, missing_quote = resolve_reply_quote(
                 message.data.get("quote"), lambda message_id: self.members.context_text(message.chat_id, message_id))
             display = self.members.at_display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
@@ -522,8 +567,11 @@ class Plugin:
 
             voice_supported = "voice.send" in getattr(ctx, "capabilities", ())
             fixed_voice = voice_supported and self.voice_reply.fixed(message, self.room_state)
+            turn_voice = False
 
             def respond(reply, tier, *, preference=False):
+                if self.voice_reply.text_only(message, self.room_state) and not turn_voice:
+                    preference = False
                 use_voice = fixed_voice or (voice_supported and self.voice_reply.reserve(
                     message, reply, preference, automatic=tier == CHAT))
                 if use_voice:
@@ -559,7 +607,18 @@ class Plugin:
             detail = wants_detail(clean_query)
             tools = build_default_tools(ctx.knowledge, self.members)
             context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
+            reviewer = self._tools(ctx).router.jev if self.tools is not None else None
+            material = person_context(self.members, ctx.knowledge, reviewer, message.chat_id, clean_query,
+                                      history=snapshot.history, before_id=self.members.message_id(message), quote=quote,
+                                      sender_id=message.sender_id)
+            context = replace(context, person_messages=material)
+            turn_voice = self.voice_reply.update_preference(message, ctx, clean_query, reviewer)
+            RECENT_IMAGES.restore_sent(self.members, message.chat_id, quote=message.data.get("quote"),
+                                       source_id=self.members.message_id(message))
             options = {"detail": True} if detail else {"examples": context.examples}
+            if self.voice_reply.text_only(message, self.room_state):
+                options["turn_context"] = ("本人持续文字偏好已保存。" +
+                    ("管理员固定语音仍生效，须说明该冲突，不能承诺本轮只发文字。" if fixed_voice else "后续默认文字回复。"))
             if missing_quote:
                 outcome = ToolOutcome(ask=missing_quote)
             else:
@@ -571,7 +630,7 @@ class Plugin:
             if outcome.used:
                 options["tool_results"] = outcome.payload()
             if outcome.context or outcome.ask:
-                options["turn_context"] = "\n".join(filter(None, (outcome.context, outcome.ask)))
+                options["turn_context"] = "\n".join(filter(None, (options.get("turn_context"), outcome.context, outcome.ask)))
             can_voice = fixed_voice or (not detail and not outcome.used and voice_supported)
             if can_voice:
                 options["system"] = SYSTEM + VOICE_PROMPT
@@ -585,7 +644,7 @@ class Plugin:
                 }
                 text = personality_text(Dialogue(ctx.llm_for(message, personality=personality, for_reply=True)).reply(
                     snapshot, knowledge=context.knowledge, style=context.style,
-                    speaker_profile=context.speaker_profile, people=context.people,
+                    speaker_profile=context.speaker_profile, people=context.people, person_messages=context.person_messages,
                     room_game=self.game_context(game) if game else None, quote=quote, avoid=avoid,
                     question=clean_query, revision=revision, **prompt_options),
                     personality.name)
@@ -596,105 +655,52 @@ class Plugin:
 
             reply, voice_preference = generate()
             self._ensure_running()
-            repeated = voice_preference is not True and too_similar(reply, self._recent_bot_texts(message.chat_id))
-            if repeated:
-                ctx.logger.info("艾特回复与最近发言相近，换角度重说一次：room=%s", message.chat_id)
+            recent_bot = self._recent_bot_texts(message.chat_id)
+            raw_quote = message.data.get("quote") or {}
+            for attempt in range(2):
+                evidence = reply_evidence(snapshot, context, quote=quote,
+                    quote_is_bot=self.members.account in (raw_quote.get("fromusr"), raw_quote.get("chatusr")),
+                    tools=outcome.payload(), room_game=self.game_context(game) if game else None,
+                    turn_context=outcome.context)
+                decision = review_reply(reviewer, clean_query, reply, evidence)
+                self._ensure_running()
+                ctx.logger.info("回复依据核对：status=%s local=%s public=%s search=%s error=%s",
+                                decision.status, decision.local, decision.public, decision.search, decision.error)
+                search_needed = decision.needs_search and not any(item.tool == "search" for item in outcome.results)
+                repeated = voice_preference is not True and too_similar(reply, recent_bot)
+                if decision.status != REJECTED and not search_needed and (not repeated or attempt == 1):
+                    if reviewer is not None and decision.error:
+                        raise LLMError("本轮未能完成依据核对")
+                    break
+                if attempt == 1:
+                    raise LLMError("回复修订后仍未满足问题与依据要求")
+                if search_needed and self.tools is not None:
+                    query = Dialogue(ctx.llm_for(message, personality=personality)).search_followup(
+                        clean_query, context=outcome.context, evidence="", answer=reply)
+                    checked = self._tools(ctx).search(query)
+                    outcome.results.append(checked)
+                    outcome.search_query = outcome.search_subject = query
+                    options["tool_results"] = outcome.payload()
+                    with self._followup_lock:
+                        _remember_tool_followup(self._last_searches,
+                            (message.session_id, message.chat_id, message.sender_id), message.received_at, (query, query))
                 try:
-                    retried, retried_preference = generate(avoid=repeated)
-                except LLMError as error:
-                    # 重说失败不能把已经拿到的首次结果丢掉，更不能改发错误提示。
-                    ctx.logger.warning("艾特回复重说失败，按首次结果发送：%s", error)
-                else:
-                    reply, voice_preference = retried, retried_preference
-                    if too_similar(reply, self._recent_bot_texts(message.chat_id)):
-                        ctx.logger.info("艾特回复重说后仍相近，按原样发送：room=%s", message.chat_id)
-            if self.tools is not None and not any(item.tool == "search" and item.ok for item in outcome.results):
-                reviewer = self._tools(ctx).router.jev
-                raw_quote = message.data.get("quote") or {}
-                for attempt in range(3):
-                    evidence = reply_evidence(snapshot, context, quote=quote,
-                        quote_is_bot=self.members.account in (raw_quote.get("fromusr"), raw_quote.get("chatusr")),
-                        tools=outcome.payload(), room_game=self.game_context(game) if game else None,
-                        turn_context=outcome.context)
-                    decision = review_reply(reviewer, clean_query, reply, evidence)
-                    self._ensure_running()
-                    ctx.logger.info("普通回复依据核对：status=%s local=%s public=%s search=%s error=%s",
-                                    decision.status, decision.local, decision.public, decision.search, decision.error)
-                    if decision.status != REJECTED:
+                    reply, voice_preference = generate(avoid=repeated, revision=reply, guidance=(
+                        "按当前问题与资料修订。先回答具体内容，人物话题用相关成员原话归纳，避免空泛接梗。"
+                        "删掉没有对应来源的具体发言、动作、剧情、公众反应和病因；保留时间及说话者。"
+                        "缺少必要条件时只问一个关键问题。不要描述核对流程。"))
+                except LLMError:
+                    if repeated and decision.status != REJECTED and not search_needed:
                         break
-                    if attempt == 2:
-                        raise LLMError("普通回复两次修订后仍缺少依据")
-                    checked_search = None
-                    if decision.needs_search and not any(item.tool == "search" for item in outcome.results):
-                        query = Dialogue(ctx.llm_for(message, personality=personality)).search_followup(
-                            clean_query, context=outcome.context, evidence="", answer=reply)
-                        self._ensure_running()
-                        checked_search = self._tools(ctx).search(query)
-                        outcome.results.append(checked_search)
-                        outcome.search_query = outcome.search_subject = query
-                        options["tool_results"] = outcome.payload()
-                        can_voice = False
-                        options["system"] = SYSTEM + (FIXED_VOICE_PROMPT if fixed_voice else "")
-                        with self._followup_lock:
-                            _remember_tool_followup(self._last_searches,
-                                (message.session_id, message.chat_id, message.sender_id), message.received_at, (query, query))
-                        ctx.logger.info("普通回复查证：%s", "成功" if checked_search.ok else "失败")
-                    guidance = (
-                        "修订候选里的无依据说法。群内发言、人物和时间只按原文与档案核对；历史记忆不能写成刚发生。"
-                        "涉及公开事实时按本轮工具资料回答。删去没有依据的剧情细节、公众口碑与多余断言；"
-                        "主观评价可以直接表达，玩笑保留玩笑语气。缺少回答所需的具体内容时自然追问，"
-                        "不要汇报检查过程或输出审核套话。")
-                    if decision.local >= 0.7:
-                        guidance += ("候选中声称群友已经说过或做过的具体事情与原文对不上。"
-                                     "完全删去这些已发生的发言、符号和动作描述，不用同义句继续猜他的反应；"
-                                     "改为回应当前提问或使用资料明确记载的旧事，保留正确的时间归属。")
-                    if decision.public >= 0.7 and not (checked_search is not None and checked_search.ok):
-                        guidance += ("本轮没有支持候选中剧情或公众反应的资料。只接对方已经表达的感受，"
-                                     "或自然问他指哪一段；不要再替作品补写具体缺点、剧情或其他读者的态度。")
-                    reply, voice_preference = generate(revision=reply, guidance=guidance)
-                    if checked_search is not None and checked_search.ok:
-                        break
-            search = next((item for item in outcome.results if item.tool == "search" and item.ok), None)
-            if search is not None:
-                try:
-                    verifier = JevToolRouter(ctx.jev)
-                except ValueError:
-                    verifier = JevToolRouter(None)
-                evidence = strip_links(search.text)
-                vision = "\n".join(item.text for item in outcome.results if item.tool == "vision" and item.ok)
-
-                def rejected(text):
-                    decision = verifier.verify_answer(question=clean_query, context=outcome.context,
-                                                      evidence=evidence, answer=text, vision=vision)
-                    ctx.logger.info("艾特回复证据核对：status=%s p=%s", decision.status, decision.probability)
-                    return decision.status == REJECTED
-                if rejected(reply):
-                    reply, _ = generate(guidance="刚才的回答包含资料未支持的说法。只保留能回答本轮问题的已知内容，"
-                                                 "删掉无关的额外断言；直接说具体内容，不汇报核对流程。")
-                    if rejected(reply):
-                        query = Dialogue(ctx.llm_for(message, personality=personality)).search_followup(
-                            clean_query, context=outcome.context, evidence=evidence, answer=reply)
-                        self._ensure_running()
-                        followup = self._tools(ctx).search(query)
-                        outcome.results.append(followup)
-                        options["tool_results"] = outcome.payload()
-                        evidence = "\n".join(strip_links(item.text) for item in outcome.results
-                                             if item.tool == "search" and item.ok)
-                        with self._followup_lock:
-                            _remember_tool_followup(self._last_searches,
-                                (message.session_id, message.chat_id, message.sender_id), message.received_at,
-                                (query, outcome.search_subject or clean_query))
-                        ctx.logger.info("艾特回复补充搜索：%s room=%s", "成功" if followup.ok else "失败", message.chat_id)
-                        reply, _ = generate(guidance="结合新增搜索资料重新回答当前问题，纠正先前没有依据的说法。"
-                                                     "有可靠的部分就直接答，缺口要具体到对象或比较口径，不用流程式结语。")
-                        if rejected(reply):
-                            reply, _ = generate(guidance="现有资料仍不足以支持刚才的具体断言，请完全放弃那些断言。"
-                                "围绕当前问题，用群友的语气说清具体卡在哪里，必要时只问一个能继续查的关键条件。"
-                                "不要添加新的数字、排名或其他事实结论，不说未核实、暂不下结论这类审核话术。")
+                    raise
             # 用了工具的回复按问答单条发出；带网址的消息容易触发微信风控，模型照抄了网址也在这里去掉。
             if outcome.used:
                 reply = strip_links(reply) or reply
-            tier = (DETAIL if detail else QA) if outcome.used or outcome.ask else classify_tier(clean_query, detail=detail)
+            tier = (DETAIL if detail else QA) if outcome.used or outcome.ask or material else classify_tier(clean_query, detail=detail)
+            active_budget = CURRENT.get()
+            if active_budget is not None:
+                with active_budget.lock:
+                    active_budget.ready = reply
             yield from respond(reply, tier, preference=voice_preference if can_voice else False)
             ctx.logger.info("艾特对话完成：room=%s persona=%s context=%d", message.chat_id,
                             personality.name, len(snapshot.messages))
@@ -702,6 +708,9 @@ class Plugin:
             ctx.logger.info("艾特对话已取消：%s", error)
         except LLMError as error:
             ctx.logger.warning("艾特对话失败：%s", error)
+            active_budget = CURRENT.get()
+            if self._wait is not None and active_budget is not None:
+                self._wait.finish(active_budget, "这次没能完成可靠回答；回复‘重试’可重新处理原问题。")
         finally:
             # 已发出至少一条（含守卫或异常发生在首条之后）就保留去重记录，避免排队中的同一提问重发。
             self._release(key, delivered=bool(result.sent))

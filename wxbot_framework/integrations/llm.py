@@ -104,6 +104,8 @@ class LLMClient:
         return messages
 
     def _post(self, messages, budget, *, json_mode, timeout, reasoning_effort=None):
+        from .reply_budget import remaining
+        timeout = remaining(timeout, kind="llm")
         payload = {"model": self.model, "messages": messages, "max_tokens": budget,
                    "thinking": {"type": "disabled"}, "stream": False}
         if reasoning_effort is not None:
@@ -143,6 +145,8 @@ class LLMClient:
             raise LLMFormatError("大模型响应缺少必要字段，请重试") from None
         if not isinstance(content, str) or not content.strip():
             raise LLMFormatError("大模型返回了空结果")
+        if "Your previous response was blocked by content safety filters" in content:
+            raise LLMError("上游返回内容过滤控制信息，未作为正文发送")
         return content
 
     def complete_json(self, system, user, *, history=(), max_tokens=None):

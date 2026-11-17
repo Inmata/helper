@@ -54,7 +54,8 @@ class LocalVoice:
 
     def wait_ready(self):
         """等待启动预热完成；这段等待不占单句合成的 50 秒预算。"""
-        if not self._ready.wait(timeout=_WARMUP_TIMEOUT):
+        from .reply_budget import remaining
+        if not self._ready.wait(timeout=remaining(_WARMUP_TIMEOUT)):
             self.close()
             raise TimeoutError("本地音色预热超时")
         if not self._initialized:
@@ -66,7 +67,8 @@ class LocalVoice:
             try:
                 self._process.stdin.write(f"{voice}\t{text}\n".encode("utf-8"))
                 self._process.stdin.flush()
-                audio = self._responses.get(timeout=50)
+                from .reply_budget import remaining
+                audio = self._responses.get(timeout=remaining(50))
             except Empty:
                 self.close()
                 raise TimeoutError("本地语音合成超时") from None

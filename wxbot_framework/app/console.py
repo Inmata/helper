@@ -53,6 +53,11 @@ class ConsoleCommands:
                 raise ValueError('用法：send-voice 会话ID "语音路径"')
             sent = app.service.send_voice(words[1], words[2])
             logger.info("语音条发送：%s", "微信已接受提交" if sent else "未确认发送，不重试")
+        elif action == "send-image":
+            if len(words) != 3:
+                raise ValueError('用法：send-image 会话ID "图片路径"')
+            sent = app.service.send_image(words[1], words[2])
+            logger.info("图片发送：%s", "微信已接受提交" if sent else "未确认发送，不重试")
         elif action == "members" and len(words) in (1, 2):
             if app.members is None:
                 raise ValueError("尚未配置成员目录")

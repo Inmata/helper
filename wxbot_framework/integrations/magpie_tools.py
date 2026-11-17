@@ -375,7 +375,9 @@ class _McpEndpoint:
 
         ``timeout`` 是调用方剩余的时间，只能缩短、不能超过配置的总超时。
         """
-        deadline = time.monotonic() + (self.timeout if timeout is None else min(self.timeout, timeout))
+        from .reply_budget import remaining
+        seconds = self.timeout if timeout is None else min(self.timeout, timeout)
+        deadline = time.monotonic() + remaining(seconds, kind="search" if name == "web_search" else None)
         self._initialize(deadline)
         request = {"jsonrpc": "2.0", "method": "tools/call",
                    "params": {"name": name, "arguments": arguments}}

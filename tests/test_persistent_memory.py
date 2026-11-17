@@ -613,7 +613,7 @@ class HourlyTests(unittest.TestCase):
         self.assertNotIn(CAT, scheduler.model.client.complete_json.call_args.args[1])
         self.assertNotIn("@", self.backend.sent[0][1])
         result = json.loads(scheduler.model.client.complete_json.call_args.args[1])
-        self.assertEqual(set(result), {"recent", "knowledge", "recent_topics"})
+        self.assertEqual(set(result), {"recent", "knowledge", "recent_topics", "相关成员原话"})
         self.assertEqual(scheduler.model.client.complete_json.call_count, 1)
         self.assertEqual(self.candidate_statuses(scheduler), ["sent"])
 

@@ -107,6 +107,34 @@ class VoiceReply:
         state = room_state.get(message.chat_id, REPLY_FEATURE) if room_state is not None else None
         return bool(state and state.get(message.sender_id))
 
+    def update_preference(self, message, ctx, text, jev):
+        if ctx.room_state is None or jev is None or not any(word in text for word in ("文字", "语音", "打字")):
+            return False
+        questions = [{"instructions": "当前发言者是否明确要求以后持续只用文字回复自己？引用别人、第三人要求、否定和单次要求不算。",
+                      "true": "本人明确要求持续文字回复。", "false": "其他情况。"},
+                     {"instructions": "当前发言者是否明确撤销此前只用文字的持续要求，恢复自动文字或语音？",
+                      "true": "本人明确恢复自动发送形式。", "false": "其他情况。"},
+                     {"instructions": "当前本人是否明确要求这一轮用语音说，而非转述、否定或只问语音功能？",
+                      "true": "明确的本轮语音发送要求。", "false": "其他情况。"}]
+        try:
+            text_only, reset, one_voice = jev.noul({"当前原话": text}, questions, timeout=2)
+        except Exception:
+            return False
+        if max(text_only, reset) < 0.85:
+            return one_voice >= 0.85
+        with ctx.members.transaction():
+            state = ctx.room_state.get(message.chat_id, "reply_preference") or {}
+            if text_only >= 0.85:
+                state[message.sender_id] = "text"
+            else:
+                state.pop(message.sender_id, None)
+            ctx.room_state.put(message.chat_id, "reply_preference", state)
+        return False
+
+    def text_only(self, message, room_state):
+        state = room_state.get(message.chat_id, "reply_preference") if room_state is not None else None
+        return bool(state and state.get(message.sender_id) == "text")
+
     def read_pause_seconds(self, message, ctx):
         if ctx.members.is_admin(message.sender_id):
             return 0

@@ -328,9 +328,9 @@ class NativeTextService(NativeFileHelperService):
                 self.mention_messages += 1
             if quote is not None:
                 # 引用图片时原文里有 aeskey 和 CDN 地址，只记结构字段，不记原始 XML。
-                logger.info("引用消息：room=%s sender=%s ref_type=%s ref_app_type=%s name=%s svrid=%s is_at_self=%s at=%s",
+                logger.info("引用消息：room=%s sender=%s ref_type=%s ref_app_type=%s name=%s svrid=%s is_at_self=%s at=%s image_md5=%s",
                             data["chat_id"], data["sender_id"], quote["ref_type"], quote["ref_app_type"], quote["name"],
-                            quote["svrid"], data["is_at_self"], data["at_members"])
+                            quote["svrid"], data["is_at_self"], data["at_members"], quote["image_md5"])
             if data["is_self"] and any(chat == data["chat_id"] and text == data["msg"] and
                                        time.monotonic() - sent_at < 120
                                        for chat, text, sent_at in tuple(self._sent_texts)):
@@ -388,6 +388,17 @@ class NativeTextService(NativeFileHelperService):
         # router.convert 已剥离群成员前缀。raw_content 只是交给接收器解析的内部字段，
         # ImageReceiver 在解析后立即移除，插件事件里不会出现 XML、CDN 地址或密钥。
         data["raw_content"] = data.get("msg") or body
+        if data.get("is_self"):
+            try:
+                md5 = parse_image_metadata(data["raw_content"]).md5
+                record = RECENT_IMAGES.quoted(data["chat_id"], md5=md5)
+            except ValueError:
+                record = None
+            if record is not None and record.path:
+                RECENT_IMAGES.sent(data["chat_id"], data["sender_id"], record.path, md5=md5,
+                                   svrid=data.get("native_message_id") or "")
+                logger.info("自己发送图片已关联：svrid=%s md5=%s", data.get("native_message_id"), md5)
+                return None
         data["wx_type"] = 3
         data["msg"] = data["content"] = ""
         data["image_status"] = "pending"
@@ -439,6 +450,8 @@ class NativeTextService(NativeFileHelperService):
             self._check_account(force=True)
             self.last_result = self._run("--dispatch", pid=self.pid, target=to_wxid, image_path=path,
                                         keep_loaded=True, preserve_report=self.preserve_reports)
+            if self.last_result["success"]:
+                RECENT_IMAGES.sent(to_wxid, self.self_wxid, path)
             return self.last_result["success"]
 
     def send_voice(self, to_wxid, path):

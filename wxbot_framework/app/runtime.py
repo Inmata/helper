@@ -169,7 +169,7 @@ class BotApplication:
             from ..memory.hourly import HourlyScheduler
             options = {key: value for key, value in self.hourly_options.items() if key != "enabled"}
             self.hourly_scheduler = HourlyScheduler(
-                self.knowledge, self.service, client, **options,
+                self.knowledge, self.service, client, jev=self._jev_client(), **options,
                 allowlist=self.config.get("chat_allowlist", []),
                 stale_minutes=lambda: self.hourly_options["stale_candidate_minutes"],
                 ready=lambda: self._connection_ready)

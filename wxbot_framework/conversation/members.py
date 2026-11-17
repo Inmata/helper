@@ -342,6 +342,21 @@ class MemberStore:
     def recent_rows(self, room, **options):
         return self.transcript.recent_rows(room, **options)
 
+    def record_sent_image(self, room, path, md5, source_id=0):
+        with self.transaction() as db:
+            db.execute("""INSERT INTO sent_images(account,room,md5,path,created_at,source_id) VALUES(?,?,?,?,?,?)
+                ON CONFLICT(account,room,md5) DO UPDATE SET path=excluded.path,
+                created_at=excluded.created_at,source_id=excluded.source_id""",
+                (self.account, room, md5, str(path), self.now().isoformat(), source_id or 0))
+
+    def sent_images(self, room):
+        with self.database.lock:
+            return [dict(row) for row in self.connection().execute(
+                """SELECT * FROM sent_images WHERE account=? AND room=? AND source_id > COALESCE(
+                    (SELECT context_floor FROM chat_buffers WHERE account=sent_images.account AND room=sent_images.room),0)
+                    ORDER BY created_at DESC LIMIT 64""",
+                (self.account, room))]
+
     def label_speakers(self, rows, room):
         return self.transcript.label_speakers(rows, room)
 

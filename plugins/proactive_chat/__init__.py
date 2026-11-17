@@ -357,11 +357,16 @@ class Plugin:
             target = args.get("target", len(context.lines) - 1)
             intent = args.get("intent", "")
             ctx.logger.info("群聊接话：来源=主动 意图=%s 目标=%s", intent, rows[-len(context.lines) + target]["id"])
+            from wxbot_framework.conversation.person_context import person_context
+            material = person_context(self.members, ctx.knowledge, ctx.jev, room,
+                                      rows[-len(context.lines) + target]["text"], history=rows,
+                                      before_id=rows[-1]["id"] + 1)
             text = personality_text(generate_proactive(model, context.lines, local_time=context.local_time,
                                                        recent_bot=self._recent_bot_texts(room),
                                                        stickers=stickers,
                                                        intent=intent, target=target, callback=callback,
-                                                       examples=pick_speech_examples(self.members, room)))
+                                                       examples=pick_speech_examples(self.members, room),
+                                                       person_messages=material))
             sticker_name = text.removeprefix("表情:") if text.startswith("表情:") else ""
             sticker = stickers.get(sticker_name)
             if text.startswith("表情:") and sticker is None:

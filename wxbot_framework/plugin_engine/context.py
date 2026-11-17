@@ -124,8 +124,14 @@ class PluginContext:
     def reply_image(self, message, path, *, delivery_guard=None):
         if "group.image.send" not in self.capabilities:
             raise CapabilityError("当前后端尚未开放群图片发送")
-        return self._service.send_image(message.chat_id, path, expected_session=message.session_id,
-                                        delivery_guard=delivery_guard)
+        sent = self._service.send_image(message.chat_id, path, expected_session=message.session_id,
+                                         delivery_guard=delivery_guard)
+        if sent:
+            from ..recent_images import RECENT_IMAGES
+            record = RECENT_IMAGES.sent(message.chat_id, self.members.account, path)
+            self.members.record_sent_image(message.chat_id, record.path, record.md5,
+                                           self.members.message_id(message))
+        return sent
 
     def reply_voice(self, message, path, *, transcript="", delivery_guard=None):
         if "voice.send" not in self.capabilities:

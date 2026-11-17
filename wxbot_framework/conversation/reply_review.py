@@ -6,20 +6,22 @@ from .tool_router import ACCEPTED, REJECTED, UNAVAILABLE
 
 UNSUPPORTED_LOCAL = {
     "instructions": "候选回复是否把资料无法对应的具体发言、动作或经历，说成某个群友已经实际说过或做过？"
-                    "只检查群内归因及时间，不检查公开作品知识或主观好恶。逐一对照原文的说话者和内容。",
+                    "检查群内归因、时间与是否使用已有的人物材料回答当前问题。逐一对照原文的说话者和内容。",
     "true": "候选声称某人已经发过某句话、某种符号或做过具体动作，但原文没有对应记录或说话者不符。"
             "尤其‘刚才已经’之类说法必须有对应的近期群友原文，不能凭旧记忆、性格和机器人之前的话推断；"
-            "即使整句在开玩笑，插入的已发生事件仍需有依据。不同的原话不能替换成另一个具体说法或数量。",
+            "即使整句在开玩笑，插入的已发生事件仍需有依据。不同的原话不能替换成另一个具体说法或数量。"
+            "当前请求需要归纳人物偏好或行为，资料中已有直接相关原话，回复却只说不了解或泛泛接梗，也为true。",
     "false": "正常调侃、反问、主观看法、对当前互动的概括、稳定常识和澄清不算无依据事实。"
              "夸张频次、文学比喻、假想婚姻或未来情景，以及‘你又挖坑让我得罪人’等互动评价，无需逐字证据。"
              "不把玩笑里的‘全群就你’之类夸张当成真实统计。真实断言已由对应人物档案、群友原文、"
              "保留时间和类别的历史记忆或工具资料支持时，也为 false；允许概括原意。"
-             "没有陈述群友已经实际说过或做过某件具体事情时也为 false。",
+             "正常的有依据归纳、对其要求的概括和主观看法为false，不要求逐字重复原话。",
 }
 UNSUPPORTED_PUBLIC = {
     "instructions": "候选是否新增了缺少依据的具体公开事实，或替其他读者、观众概括未经提供的实际反应？"
-                    "只检查候选中的公众反应、特定作品内容、评分数字及当前状况，不检查群内玩笑和发言归因。",
+                    "检查公众反应、特定作品内容、机制、评分数字、当前状况与个体病因，不检查群内玩笑。",
     "true": "提供的资料没有对应依据，候选却肯定某个具体剧情、评分、现价或群外公众反应。"
+            "特定游戏机制、个体病因或治疗结论也需对应依据，不能从一条群聊描述补出诊断。"
             "把提问者一个人的好恶升级为很多人同意、读者弃书或观众被劝退，属于新增公众反应；"
             "即使使用口语、夸张和调侃来表达，也需要依据。机器人旧回复和群友个人观点不能证实公众反应。",
     "false": "仅表达自己的偏好、观感、反问，或概括对方刚刚表达的好恶；没有替其他读者和观众发言，"
@@ -49,7 +51,7 @@ class ReplyReview:
 
     @property
     def needs_search(self):
-        return self.public is not None and self.public >= 0.7 and self.search >= 0.7
+        return self.search is not None and self.search >= 0.7
 
 
 def reply_evidence(snapshot, context, *, quote=None, quote_is_bot=False, tools=(), room_game=None,
@@ -68,6 +70,7 @@ def reply_evidence(snapshot, context, *, quote=None, quote_is_bot=False, tools=(
         "当前发言者": {"编号": snapshot.speaker_tag, "名称": snapshot.speaker_name},
         "已确认成员称呼": snapshot.participants,
         "提问者档案": context.speaker_profile, "相关人物档案": context.people,
+        "相关成员原话": context.person_messages,
         "聊天原文": sorted(rows.values(), key=lambda row: row["时间"]),
         "历史记忆": [{key: item[key] for key in ("name", "kind", "content", "updated_at") if key in item}
                  for item in context.knowledge],

@@ -216,11 +216,15 @@ def _error_note(error, tool):
 
 def _within(work, timeout, stopped=None):
     """在单独线程里执行 ``work``，最多等 ``timeout`` 秒；超时抛 ``TimeoutError``，迟到的结果丢弃。"""
+    from contextvars import copy_context
+    from ..integrations.reply_budget import remaining
+    timeout = remaining(timeout)
+    context = copy_context()
     box = {}
 
     def target():
         try:
-            box["value"] = work()
+            box["value"] = context.run(work)
         except BaseException as error:  # 交回调用线程按原类型处理
             box["error"] = error
 

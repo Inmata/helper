@@ -247,5 +247,5 @@ class ImageGenerationTests(unittest.TestCase):
         self.backend.image_success = False
         self.plugin.on_message(self.message(), self.ctx)
         self.wait_done()
-        self.assertTrue(any("图片没发成功" in text for _, text in self.backend.texts))
+        self.assertTrue(any("提交结果未确认" in text for _, text in self.backend.texts))
         self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)

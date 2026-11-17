@@ -64,3 +64,6 @@ related:
 - `tests/test_utterance.py`：`interjection_probe(baseline=...)` 显式水位覆盖 `latest_id`。
 - `tools/evaluate_proactive_jev.py report`：holdout 误发言率 ≤5%、召回 ≥60%。
 - 群内实测：`tools/humanlike_metrics.py --since <开始时刻>` 与日志 `主动发言判断` 行，10 分钟主动发言不超过 5 次。
+
+
+人物话题在原发言决策通过后、生成前读取同一 `person_context` 材料，保留源ID、作者和时间；事件驱动和定时候选均接入。原有频率与发言预算继续生效，主动分支不发送等待通知。

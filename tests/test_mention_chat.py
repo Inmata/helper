@@ -405,6 +405,12 @@ class FakeMembers:
     def context_text(self, room, message_id):
         return ""
 
+    def message_id(self, message):
+        return 10
+
+    def sent_images(self, room):
+        return []
+
     def latest_id(self, room):
         return 10
 
@@ -432,6 +438,8 @@ class FakeCtx:
         self.knowledge.speaker_profile.return_value = None
         self.knowledge.search.return_value = []
         self.knowledge.lookup_people.return_value = []
+        self.knowledge.conversation_people.return_value = []
+        self.room_state = None
         self.knowledge.style.return_value = None
         ctx = self
 
@@ -478,8 +486,8 @@ class FakeCtx:
         return self._send("reply", text, delivery_guard)
 
 
-def mention(text, received_at=1.0):
-    return Message("@机器人 " + text, ROOM, sender_id="wxid_player", is_group=True, received_at=received_at,
+def mention(text, received_at=None):
+    return Message("@机器人 " + text, ROOM, sender_id="wxid_player", is_group=True, received_at=time.monotonic() if received_at is None else received_at,
                    data={"is_at_self": True, "at_members": ("wxid_robot",)})
 
 

@@ -288,7 +288,7 @@ class ConversationHistory:
                 (members.account, room)).fetchone()[0]
 
     def recent_rows(self, room, *, limit=200, sender_id=None, before_id=None, since=None, until=None,
-                    context=False, include_bot=False, continuity_seconds=None):
+                    context=False, include_bot=False, continuity_seconds=None, include_commands=False):
         members = self.members
         if room not in members.groups or type(limit) is not int or not 1 <= limit <= 5000:
             raise MemberError("查询需要已启用的群，条数应为 1—5000")
@@ -328,7 +328,7 @@ class ConversationHistory:
                         break
                     if stamp is not None:
                         newest = stamp
-                if effective_text(row["text"]):
+                if effective_text(row["text"]) or (include_commands and row["text"].strip()):
                     rows.append(dict(row))
                     if len(rows) >= limit:
                         break

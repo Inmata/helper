@@ -4,6 +4,10 @@ from __future__ import annotations
 from .database import backup_before_migration, backup_database
 
 BASE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS sent_images (
+        account TEXT NOT NULL, room TEXT NOT NULL, md5 TEXT NOT NULL, path TEXT NOT NULL,
+        created_at TEXT NOT NULL, source_id INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(account,room,md5));
     CREATE TABLE IF NOT EXISTS people (
         account TEXT NOT NULL, room TEXT NOT NULL, person_key TEXT NOT NULL,
         name TEXT NOT NULL, display_name TEXT NOT NULL, wxid TEXT,

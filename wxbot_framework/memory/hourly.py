@@ -47,8 +47,9 @@ class HourlyScheduler:
                  daily_limit=6, cooldown_minutes=45, stale_candidate_minutes=15,
                  min_messages=2, min_speakers=2, quiet_minutes=0,
                  context_limit=200, allowlist=(), now=None, ready=None, random_source=None,
-                 run_id=None, stale_minutes=None):
+                 run_id=None, stale_minutes=None, jev=None):
         self.knowledge, self.members, self.service = knowledge, knowledge.members, service
+        self.jev = jev
         self.model = PersonalityLLM(client, PersonalityState(""), current=lambda: True)
         self.start_hour, self.end_hour, self.evening_start_hour = start_hour, end_hour, evening_start_hour
         self.active_min_minutes, self.active_max_minutes = active_min_minutes, active_max_minutes
@@ -235,6 +236,9 @@ class HourlyScheduler:
             recent = [{"time": iso_utc(row["received_at"]), "name": row["speaker_name"],
                        "speaker": row["speaker"], "text": row["text"]} for row in recent_rows]
             payload = {"recent": recent, "knowledge": memories, "recent_topics": topics}
+            from ..conversation.person_context import person_context
+            payload["相关成员原话"] = person_context(self.members, self.knowledge, self.jev, room,
+                                                      query[-2000:], history=list(snapshot.messages), before_id=anchor)
             if len(json.dumps(payload, ensure_ascii=False)) > 16000:
                 payload.pop("recent")
                 payload["recent_summary"] = ChatSummarizer(model).summarize(

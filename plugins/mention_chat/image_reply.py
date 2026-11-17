@@ -34,6 +34,7 @@ class ImageJob:
     deadline: float
     task_id: str = ""
     stage: str = "queued"
+    path: str = ""
 
 
 class ImageReply:
@@ -47,6 +48,38 @@ class ImageReply:
         self._queue = queue.Queue()
         self._thread = None
         self._client = None
+        self._jobs = OrderedDict()
+
+    def status(self, message, ctx, text):
+        member = message.session_id, message.chat_id, message.sender_id
+        with self._lock:
+            job = self._jobs.get(member)
+        if job is None:
+            return False
+        question = {"instructions": "当前发言是否在询问、催促或重试自己已有的生图任务？新的独立画图描述不算。",
+                    "true": "询问已有图片在哪、是否完成、任务进度或重试原任务。", "false": "其他聊天或新的生图要求。"}
+        try:
+            related = _within(lambda: ctx.jev.noul({"当前话语": text, "原生图要求": job.prompt}, [question], timeout=2)[0],
+                              2, self.stopped) >= 0.8
+        except (ValueError, TimeoutError, SnapshotExpired):
+            related = text.strip() in ("图呢", "画好了吗", "好了没", "重试")
+        if not related:
+            return False
+        stages = {"queued": "正在排队", "reference": "正在读取参考图", "submitting": "正在提交生成",
+                  "waiting": "还在生成", "sending": "正在发送图片", "complete": "图片已经发出",
+                  "failed": "上次任务失败", "expired": "上次等待超时", "cancelled": "上次任务已取消",
+                  "delivery_unknown": "图片提交结果未确认，已停止补发"}
+        if "重试" in text and job.stage in ("failed", "expired") and job.task_id:
+            with self._lock:
+                if member not in self._members and len(self._members) < 3:
+                    job.deadline = time.monotonic() + TASK_SECONDS
+                    job.stage = "queued"
+                    self._members.add(member)
+                    self._queue.put(job)
+                    ctx.reply_at(message, "继续查询上一张图，不重新提交生成。")
+                    return True
+        ctx.reply_at(message, stages.get(job.stage, "正在处理") + "。")
+        return True
 
     def start(self, ctx):
         self._client = MagpieImages(ctx.magpie, OUTPUT_DIR)
@@ -94,6 +127,7 @@ class ImageReply:
         wants_reference = quoted or mode == "edit" or (mode == "command" and REFERENCE_HINT.search(prompt))
         reference = None
         if wants_reference:
+            RECENT_IMAGES.restore_sent(ctx.members, message.chat_id, quote=quote, source_id=ctx.members.message_id(message))
             if "group.image.receive" not in ctx.capabilities:
                 ctx.reply(message, "当前连接收不到参考图，请先用文字描述要画的内容。")
                 return
@@ -138,6 +172,11 @@ class ImageReply:
             return
         job = ImageJob(message, ctx, prompt.strip(), reference, guard, key, uuid4().hex,
                        time.monotonic() + TASK_SECONDS)
+        with self._lock:
+            self._jobs[member] = job
+            self._jobs.move_to_end(member)
+            if len(self._jobs) > 64:
+                self._jobs.popitem(last=False)
         try:
             if not ctx.reply_at(message, "已排队，画好后发给你。" if queued else "收到，画好后发给你。",
                                 delivery_guard=guard):
@@ -165,11 +204,12 @@ class ImageReply:
                 self._generate(job)
             except SnapshotExpired:
                 job.ctx.logger.info("生图任务已取消：task=%s stage=%s", job.filename, job.stage)
+                job.stage = "cancelled"
             except (MagpieToolsError, OSError, ValueError, TimeoutError, RuntimeError) as error:
                 job.ctx.logger.warning("生图失败：task=%s stage=%s remote=%s error=%s",
                                        job.filename, job.stage, job.task_id, type(error).__name__)
                 if job.stage == "sending":
-                    text = "图已经画好，但这次图片没发成功。"
+                    text = "图已经画好，但图片提交结果未确认，这次停止补发。"
                 elif isinstance(error, MagpieImageRejectedError):
                     text = "这次请求被生图服务的安全审核拒绝，未生成图片。请调整图片内容后再试。"
                 elif isinstance(error, TimeoutError):
@@ -178,6 +218,8 @@ class ImageReply:
                     text = "参考图没能下载完成，请重新发送原图后再试。"
                 else:
                     text = "这次没能取得生成图片，请稍后再试。"
+                job.stage = ("delivery_unknown" if job.stage == "sending" else
+                             "expired" if isinstance(error, TimeoutError) else "failed")
                 try:
                     job.ctx.reply_at(job.message, text, delivery_guard=job.guard)
                 except (SnapshotExpired, RuntimeError):
@@ -209,11 +251,12 @@ class ImageReply:
                                                                     reference=reference, timeout=timeout),
                              timeout, self.stopped)
             if result.path is not None:
+                job.path = str(result.path)
                 job.stage = "sending"
-                if not job.ctx.reply_at(job.message, "画好了。", delivery_guard=job.guard):
-                    raise RuntimeError("发图提示未提交")
                 if not job.ctx.reply_image(job.message, str(result.path), delivery_guard=job.guard):
                     raise RuntimeError("图片未提交")
+                job.stage = "complete"
+                job.ctx.reply_at(job.message, "画好了，图片已发出。", delivery_guard=job.guard)
                 job.ctx.logger.info("生图已发送：task=%s remote=%s", job.filename, job.task_id)
                 return
             job.task_id = result.task_id

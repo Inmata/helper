@@ -273,6 +273,27 @@ class KnowledgeStore(KnowledgeAdminMixin):
                     for entity in self._entities(room)
                     if entity["status"] == "active" and not entity["entity_key"].startswith("group:")]
 
+    def conversation_people(self, room):
+        """只供本地检索的已绑定人物；身份字段不进入群回复。"""
+        with self.lock:
+            self._room(room)
+            entities = {e["wxid"]: e for e in self._entities(room) if e["status"] == "active" and e["wxid"]}
+            seen = self.connection().execute("SELECT wxid FROM room_members WHERE account=? AND room=?",
+                                             (self.account, room)).fetchall()
+            result = []
+            for row in seen:
+                wxid = row["wxid"]
+                if wxid == self.account:
+                    continue
+                entity = entities.get(wxid)
+                name = self.members.display_name(wxid, room) or (entity["name"] if entity else "")
+                if not name or name == "未绑定成员":
+                    continue
+                aliases = parse_aliases(entity["aliases"]) if entity else []
+                result.append({"id": entity["id"] if entity else "member:" + wxid,
+                               "name": name, "aliases": aliases, "wxid": wxid})
+            return result
+
     def profile_material(self, room, entity_id):
         """档案使用较完整资料；保留类别和原始来源时间，模型在锁外整理主题。"""
         with self.lock:

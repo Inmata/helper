@@ -22,7 +22,7 @@ class SlowReplies:
         with self._lock:
             return bool(self._following)
 
-    def queue_if_active(self, key, resume):
+    def queue_if_active(self, key, resume, *, on_full=None):
         """同一人已有慢回复时保留后续任务；其他人仍走插件原来的线程。"""
         with self._lock:
             if self.stopped.is_set():
@@ -31,7 +31,10 @@ class SlowReplies:
                 return False
             if self._reserve():
                 self._following[key].append(resume)
-            return True
+                return True
+        if on_full is not None:
+            on_full()
+        return True
 
     def handoff(self, key, turn):
         """接手该发言者的新一轮回复。"""

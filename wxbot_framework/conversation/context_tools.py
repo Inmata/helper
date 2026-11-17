@@ -16,7 +16,7 @@ from __future__ import annotations
 import copy
 import logging
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -208,6 +208,7 @@ class MentionContext:
     speaker_profile: Any
     people: list
     examples: list
+    person_messages: list = field(default_factory=list)
 
     def search_scope(self, history=()):
         """给联网判断提供群内指代；旧机器人回复仍只经本轮接话语境传入。"""

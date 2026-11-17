@@ -318,7 +318,7 @@ class FixedPersonalityTests(unittest.TestCase):
     def test_read_voice_pause_survives_reopening_is_room_scoped_and_expires(self):
         plugin, _ = self.setup_fixed_voice()
         self.ctx._jev = Mock()
-        self.ctx._jev.noul.return_value = [0.01]
+        self.ctx._jev.noul.return_value = [0.01, 0.01, 0.01]
         self.store.room_state.put(ROOM, READ_PAUSE_FEATURE, {"until": 4600})
         reopened = self.new_store()
         self.ctx._room_state = reopened.room_state
@@ -391,7 +391,7 @@ class FixedPersonalityTests(unittest.TestCase):
     def test_read_voice_pause_leaves_ordinary_voice_replies_available(self):
         plugin, provider = self.setup_fixed_voice("【语音】晚安。")
         self.ctx._jev = Mock()
-        self.ctx._jev.noul.return_value = [0.01]
+        self.ctx._jev.noul.return_value = [0.01, 0.01, 0.01]
         self.store.room_state.put(ROOM, READ_PAUSE_FEATURE, {"until": 4600})
         with patch("plugins.mention_chat.voice_reply.time", return_value=1000):
             plugin.on_message(self.chat("用语音念句晚安", sender=OTHER), self.ctx)
@@ -888,7 +888,8 @@ class FixedPersonalityTests(unittest.TestCase):
     def test_invalid_model_reply_preserves_context(self):
         plugin = self.setup_chat(Mock(return_value=""))
         plugin.on_message(self.chat(), self.ctx)
-        self.assertEqual(self.backend.sent, [])
+        self.assertEqual(len(self.backend.sent), 1)
+        self.assertIn("没能完成可靠回答", self.backend.sent[0][1])
         self.assertTrue(self.store.history("测试成员", ROOM))
 
     def test_game_reply_preserves_next_word_and_rule(self):

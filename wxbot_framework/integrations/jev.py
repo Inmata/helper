@@ -129,7 +129,7 @@ class JevClient:
             result.append(float(value))
         return result
 
-    def choice(self, state, instructions, criteria):
+    def choice(self, state, instructions, criteria, *, timeout=None):
         """单道 choice 题：criteria 为 {选项 id: 判据}；返回 {选项 id: 概率}，只含已声明的选项。
 
         已声明的选项必须全部给出且概率之和约为 1，否则视为格式错误。
@@ -143,7 +143,7 @@ class JevClient:
                         for key, value in criteria.items())):
             raise ValueError(f"Jev choice 选项应为 2–{MAX_QUESTIONS} 个非空判据")
         answers = self._post({"model": self.model, "state": state, "questions": {
-            "q0": {"type": "choice", "instructions": instructions, "criteria": dict(criteria)}}})
+            "q0": {"type": "choice", "instructions": instructions, "criteria": dict(criteria)}}}, timeout=timeout)
         try:
             probabilities = answers["q0"]["probabilities"]
         except (KeyError, TypeError):
@@ -162,6 +162,8 @@ class JevClient:
 
     def _post(self, payload, *, timeout=None):
         timeout = self.timeout if timeout is None else timeout
+        from .reply_budget import remaining
+        timeout = remaining(timeout, kind="jev")
         deadline = time.monotonic() + timeout
         request = Request(self.base_url + "/systemone",
                           data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),

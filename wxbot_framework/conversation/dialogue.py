@@ -188,6 +188,9 @@ def _render(payload):
     if profile:
         lines.append(f"【当前发言者档案】{_profile_text(profile)}")
     people = payload.get("people") or []
+    if payload.get("相关成员原话"):
+        import json
+        lines.append("【相关成员原话】\n" + json.dumps(payload["相关成员原话"], ensure_ascii=False))
     if people:
         lines.append("【相关人物档案】")
         lines.extend(f"- {_profile_text(person)}" for person in people)
@@ -243,7 +246,7 @@ class Dialogue:
 
     def reply(self, snapshot, *, knowledge=(), style=None, speaker_profile=None, people=(), room_game=None,
               detail=False, examples=(), system=None, quote=None, avoid=None, question=None, tool_results=(), turn_context="",
-              revision=None):
+              revision=None, person_messages=()):
         """``quote`` 为本次提问引用的消息 ``{"name", "text"}``；``avoid`` 为刚说过、这次要换个角度的那句。
 
         ``question`` 是清理过手打 @ 标签的提问；缺省用快照里的原文。原文仍作为上下文锚点。
@@ -269,6 +272,10 @@ class Dialogue:
             payload["speaker_profile"] = speaker_profile
         if people:
             payload["people"] = list(people)
+        if person_messages:
+            payload["相关成员原话"] = list(person_messages)
+            from .person_context import PERSON_GUIDANCE
+            system = (system or SYSTEM) + "\n" + PERSON_GUIDANCE
         if room_game is not None:
             payload["room_game"] = room_game
         if examples:

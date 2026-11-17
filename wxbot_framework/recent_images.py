@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import threading
 import time
+import hashlib
+from pathlib import Path
 from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
 
@@ -16,6 +18,7 @@ PENDING, READY, FAILED, SKIPPED = "pending", "ready", "failed", "skipped"
 STATUSES = (PENDING, READY, FAILED, SKIPPED)
 MAX_PER_ROOM = 64
 MAX_ROOMS = 256
+GENERATED_IMAGES = Path(__file__).resolve().parents[1] / ".runtime" / "generated_images"
 # 文本与图片分属不同轮询批次，允许图片比提问晚一点被看到。
 ARRIVAL_SLACK_SECONDS = 1.0
 
@@ -38,6 +41,8 @@ def _key(data):
     native = str(data.get("native_message_id") or "")
     if native and native != "0":
         return "id:" + native
+    if data.get("sent_md5"):
+        return "sent:" + data["sent_md5"]
     sequence = data.get("sequence")
     return f"seq:{sequence}" if type(sequence) is int else ""
 
@@ -90,6 +95,37 @@ class RecentImages:
     def _records(self, room):
         with self._changed:
             return tuple(self._rooms.get(room, ()))
+
+    def sent(self, room, sender, path, *, md5="", svrid=""):
+        path = Path(path).resolve()
+        md5 = md5 or hashlib.md5(path.read_bytes()).hexdigest()
+        record = self.note({"chat_id": room, "sender_id": sender, "sent_md5": md5,
+                          "native_message_id": svrid, "image_status": READY, "image_path": str(path),
+                          "image_metadata": {"md5": md5}})
+        return self.mark_used(record)
+
+    def restore_sent(self, members, room, *, quote=None, source_id=0):
+        rows = members.sent_images(room)
+        allowed = {row["md5"] for row in rows}
+        with self._changed:
+            records = self._rooms.get(room)
+            if records is not None:
+                self._rooms[room] = deque((r for r in records if r.sender != members.account or r.md5 in allowed),
+                                          maxlen=self.per_room)
+        for row in reversed(rows):
+            if Path(row["path"]).is_file():
+                self.sent(room, members.account, row["path"], md5=row["md5"])
+        if (quote and quote.get("ref_type") == "3" and quote.get("image_md5") and
+                members.account in (quote.get("fromusr"), quote.get("chatusr")) and
+                self.quoted(room, svrid=quote.get("svrid", ""), md5=quote["image_md5"]) is None):
+            # 旧版本没有登记产物；真实引用明确来自本账号，且原图摘要完全相同时才能回填。
+            for path in GENERATED_IMAGES.iterdir() if GENERATED_IMAGES.is_dir() else ():
+                if path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+                    continue
+                if hashlib.md5(path.read_bytes()).hexdigest() == quote["image_md5"].lower():
+                    record = self.sent(room, members.account, path, md5=quote["image_md5"], svrid=quote.get("svrid", ""))
+                    members.record_sent_image(room, record.path, record.md5, source_id)
+                    break
 
     def quoted(self, room, *, svrid="", md5=""):
         """按引用里的原消息编号找图，找不到再按 md5 找本群最近一张。"""

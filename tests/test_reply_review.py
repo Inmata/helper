@@ -57,10 +57,10 @@ class ReplyReviewTests(unittest.TestCase):
         result = review_reply(ReviewJev([TimeoutError()]), "你好", "你好", {})
         self.assertEqual((result.status, result.error), (UNAVAILABLE, "TimeoutError"))
 
-    def test_local_error_does_not_trigger_search_for_an_unrelated_public_need(self):
+    def test_search_need_is_independent_of_candidate_public_assertions(self):
         result = review_reply(ReviewJev([[0.98, 0.01, 0.99]]), "这价格多少，小红刚才说啥", "小红刚才报价了", {})
         self.assertEqual(result.status, REJECTED)
-        self.assertFalse(result.needs_search)
+        self.assertTrue(result.needs_search)
 
 
 class OrdinaryReplyTests(unittest.TestCase):
@@ -83,7 +83,7 @@ class OrdinaryReplyTests(unittest.TestCase):
         self.assertEqual(ctx.sent, [("reply_at", "你觉得最拉的是哪一段？")])
 
     def test_missing_essential_public_fact_triggers_search_and_existing_verification(self):
-        jev = ReviewJev([[0.01, 0.98, 0.98]])
+        jev = ReviewJev([[0.01, 0.98, 0.98], [0.01, 0.02, 0.01]])
         plugin, ctx = self.build(["这书评分9.8。", "这本书 官方评分 最新数据", "这个站显示是7.2分。"],
                                  jev=jev, magpie=FakeMagpie(search="官网本书评分7.2分。"))
         plugin.on_message(mention("这本书评分多少"), ctx)
@@ -105,14 +105,14 @@ class OrdinaryReplyTests(unittest.TestCase):
         plugin, ctx = self.build("小红刚才回了俩问号。", jev=jev)
         with self.assertLogs("MentionTests", level="WARNING") as logs:
             plugin.on_message(mention("谁刚才急眼了"), ctx)
-        self.assertIn("两次修订后仍缺少依据", logs.output[0])
+        self.assertIn("修订后仍未满足", logs.output[0])
         self.assertEqual(ctx.sent, [])
-        self.assertEqual(ctx.completions, 3)
+        self.assertEqual(ctx.completions, 2)
 
-    def test_unavailable_review_keeps_normal_reply_and_does_not_start_a_search(self):
+    def test_unavailable_review_does_not_release_unverified_reply(self):
         plugin, ctx = self.build("你好呀。", jev=ReviewJev([TimeoutError()]))
         plugin.on_message(mention("你好"), ctx)
-        self.assertEqual(ctx.sent, [("reply_at", "你好呀。")])
+        self.assertEqual(ctx.sent, [])
         self.assertEqual(ctx.magpie.queries, [])
 
 

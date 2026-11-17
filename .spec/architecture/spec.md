@@ -102,7 +102,7 @@ flowchart TD
 - 图片保存目录由 `image_directory` 配置（默认 `.runtime/images`），原生服务按账号隔离后交给 `ImageStore`；原始图片 XML、CDN 地址与密钥只存在于解析和下载请求内部，不进入插件消息。
 - 原生加载只接受已知客户端版本和核心文件指纹。账号、联系人和原生调用按同一构建选择地址；4.2.0.12 / 4.2.0.13 使用本项目配套的 `native_text` 桥接。
 - 图片能力只按已编译桥接的实际导出声明：同时存在 V4 媒体队列与 `WxDownloadImage` 时才把 `image.receive` 等加入后端能力；旧 V3/V2 DLL 不声明，依赖图片能力的插件不会加载。`mention_chat` 不把图片能力写进 `requires`，按运行时能力决定能否看图，旧 DLL 下仍可联网搜索。
-- 最近图片索引 `recent_images.RECENT_IMAGES` 是进程内单例：原生服务写、艾特回复读，按群有界、服务启动时清空，不落库。
+- 最近图片索引 `recent_images.RECENT_IMAGES` 是进程内单例：原生服务写、艾特回复读，按群有界、服务启动时清空；已发送产物经共享数据库 `sent_images` 恢复明确引用。
 - `MemberStore` 持有会话轮次 `turns` 和主动发言预算 `speak_budget`，事件驱动与定时发言共用预算。群人格、音色及固定语音设置经 `RoomStateStore` 持久化；清空上下文、人格切换与连接变化分别使对应的待发回复失效。
 - 面向群友的模型生成显式使用 `PersonalityLLM(for_reply=True)`：人格模块持有角色表达与历史资料组织；对话、主动发言等模块持有事实和功能约束。搜索词、成语判定、记忆提取等内部任务沿用默认入口。俏皮人格将旧机器人发言作为资料理解，熟人损友保留原 API 历史结构。
 - 语音识别在原生服务的单 worker 执行器中运行，完整音频在内存中转写，再进入普通消息链路；合并转发只记录为资料，通过 `dispatch_to_plugins=False` 停在落库之后。详见 [messages](../messages/spec.md)。
@@ -121,6 +121,7 @@ flowchart TD
 | `WxVoice_0` | `native/text_service.py`：单 worker 语音转写 | 原生 `stop()` 取消排队任务并等待当前转写 |
 | `WechatImageReceiver` | `image_receiver.py`：账号专属图片下载 | 原生 `stop()` 等待；下载未结束时保留桥接并报告清理未完成 |
 | `mention-tool` | `conversation/mention_tools.py`：单次 Jev 或工具调用的限时守护线程 | 调用方在超时或停止后放弃结果，底层调用自行结束 |
+| `MentionChat.wait` | 艾特插件的回复进度与截止时间检查 | 插件卸载先关闭，关闭旧任务发送资格并等待线程退出 |
 | `MentionChat.images` | `plugins/mention_chat/image_reply.py`：单 worker 生图任务，最多两个待处理任务 | 插件卸载停止受理、取消排队及调用等待，等待 worker 退出；底层 MCP 调用受 35 秒硬截止约束 |
 | `Plugin.<名称>` | `plugin_engine/manager.py`：插件消息队列，退出时执行 `on_unload` | `PluginManager.shutdown()` 等待主线程；未退出的记录保留供再次清理 |
 

@@ -63,6 +63,12 @@ class TricklingServer:
 
 
 class LLMTests(unittest.TestCase):
+    def test_upstream_filter_control_text_is_not_released_as_a_reply(self):
+        response = self.response("⚠ Your previous response was blocked by content safety filters\nRetries remaining: 3\n混入的正文")
+        with patch("wxbot_framework.integrations.llm.urlopen", return_value=response):
+            with self.assertRaisesRegex(LLMError, "过滤控制信息"):
+                self.client.complete_text("测试", "测试")
+
     def setUp(self):
         self.options = {"api_key": "dummy-test-key", "model": "deepseek-flash"}
         self.client = LLMClient(self.options)

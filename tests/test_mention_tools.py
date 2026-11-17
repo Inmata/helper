@@ -737,7 +737,9 @@ class MentionChatToolTests(unittest.TestCase):
     def test_rewrites_search_reply_with_an_unsupported_extra_claim(self):
         class EvidenceJev(FakeJev):
             def noul(self, state, questions, *, timeout=None):
-                return [0.03 if "FLY" in state.get("拟发送的回答", "") else 0.95]
+                if "拟发送的回答" in state:
+                    return [0.01, 0.97 if "FLY" in state["拟发送的回答"] else 0.02, 0.01]
+                return [0.95] * len(questions)
 
         magpie = FakeMagpie(search="当届官方赛果：BLG 3比1 战胜 T1。")
         plugin, ctx = self.build(["T1输了，GEN也被FLY淘汰了。", "T1半决赛1比3输给BLG了。"],
@@ -914,17 +916,18 @@ class MentionChatToolTests(unittest.TestCase):
             release.set()
             plugin.on_unload(ctx)
 
-    def test_rejected_evidence_triggers_followup_search_and_model_written_reply(self):
+    def test_rejected_evidence_uses_one_revision_and_asks_for_missing_scope(self):
         class RejectingJev(FakeJev):
             def noul(self, state, questions, *, timeout=None):
-                return [0.05] if "拟发送的回答" in state else super().noul(state, questions, timeout=timeout)
+                if "拟发送的回答" in state:
+                    return [0.01, 0.98 if "肯定" in state["拟发送的回答"] else 0.01, 0.01]
+                return super().noul(state, questions, timeout=timeout)
         plugin, ctx = self.build([
-            "东京湾所有地方都比上海贵。", "东京湾的地价肯定更高。", "东京湾住宅地价 上海住宅地价 同口径 2026",
-            "东京湾的平均地价更高。", "东京湾范围太大了，你想比住宅还是商业用地？",
+            "东京湾的地价肯定更高。", "东京湾范围太大了，你想比住宅还是商业用地？",
         ], jev=RejectingJev(), magpie=FakeMagpie(search="只有个别地块报价，缺少统一口径的均价。"))
         plugin.on_message(mention("搜一下东京湾地价比上海还贵吗"), ctx)
-        self.assertEqual(len(ctx.magpie.queries), 2)
-        self.assertIn("住宅地价", ctx.magpie.queries[1])
+        self.assertEqual(len(ctx.magpie.queries), 1)
+        self.assertEqual(ctx.completions, 2)
         self.assertEqual(ctx.sent, [("reply_at", "东京湾范围太大了，你想比住宅还是商业用地？")])
 
     def test_slow_model_generation_does_not_hold_another_member(self):

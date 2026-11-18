@@ -833,6 +833,8 @@ class MentionChatToolTests(unittest.TestCase):
                 record.join()
 
     def test_voice_synthesis_does_not_block_another_members_text(self):
+        from wxbot_framework.integrations.reply_budget import CURRENT
+
         started, release, fast, followed = (threading.Event() for _ in range(4))
         spoken = "这是语音测试，蓝色纸飞机在二楼窗台，绿色书包放在门边，橙色雨伞就在楼梯旁边，最后一件是白色水杯。"
         plugin, ctx = self.build([f"[语音] {spoken}", "普通文字。"])
@@ -840,9 +842,11 @@ class MentionChatToolTests(unittest.TestCase):
         plugin.on_load(ctx)
         ctx.capabilities |= {"voice.send"}
         sent = []
+        stages = []
 
         def synthesize(text):
             self.assertEqual(text, spoken)
+            stages.append(CURRENT.get().stage)
             started.set()
             release.wait(5)
             return b"voice"
@@ -868,6 +872,7 @@ class MentionChatToolTests(unittest.TestCase):
             try:
                 record.enqueue(mention("念给我听：" + spoken))
                 self.assertTrue(started.wait(2), "语音合成没有开始")
+                self.assertEqual(stages, ["合成语音"])
                 record.enqueue(mention("详细说说前一句"))
                 record.enqueue(replace(mention("详细说说另一件事"), sender_id=OTHER))
                 self.assertTrue(fast.wait(1), "另一位群友仍在等语音合成")

@@ -886,10 +886,23 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertEqual(history[1]["content"], "[机器人发言] 机器人说过乙")
 
     def test_invalid_model_reply_preserves_context(self):
-        plugin = self.setup_chat(Mock(return_value=""))
+        status = "这回没答好，你再喊我一下。"
+        provider = Mock(side_effect=["", status])
+        plugin = self.setup_chat(provider)
+        delivered = threading.Event()
+        send = self.backend.send_at_text
+
+        def send_at_text(room, text, ids):
+            result = send(room, text, ids)
+            delivered.set()
+            return result
+
+        self.backend.send_at_text = send_at_text
         plugin.on_message(self.chat(), self.ctx)
+        self.assertTrue(delivered.wait(2))
         self.assertEqual(len(self.backend.sent), 1)
-        self.assertIn("没能完成可靠回答", self.backend.sent[0][1])
+        self.assertTrue(self.backend.sent[0][1].endswith(status))
+        self.assertEqual(provider.call_count, 2)
         self.assertTrue(self.store.history("测试成员", ROOM))
 
     def test_game_reply_preserves_next_word_and_rule(self):

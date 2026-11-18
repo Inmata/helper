@@ -13,6 +13,7 @@ from .image_reply import COMMAND as IMAGE_COMMAND, ImageReply
 from wxbot_framework.conversation.slow_replies import SlowReplies
 from wxbot_framework.conversation.person_context import person_context
 from wxbot_framework.conversation.reply_wait import ReplyWait
+from wxbot_framework.conversation.status_replies import StatusReplies
 from wxbot_framework.integrations.reply_budget import CURRENT, ReplyExpired
 from .voice_reply import (COMMAND as VOICE_COMMAND, READ_COMMAND as VOICE_READ_COMMAND,
                           REPLY_COMMAND as VOICE_REPLY_COMMAND, FIXED_VOICE_PROMPT,
@@ -98,6 +99,7 @@ class Plugin:
         self.voice_reply = VoiceReply()
         self.image_reply = ImageReply()
         self._wait = None
+        self._status = None
         self._retry = OrderedDict()
 
     def _claim(self, key, arrived_at):
@@ -138,14 +140,15 @@ class Plugin:
             raise ValueError("艾特上下文对话需要 history_enabled: true")
         ctx.llm  # 启动时核对配置，不请求接口。
         self._slow = SlowReplies(ctx.logger)
-        self._wait = ReplyWait()
-        if "group.image.send" in getattr(ctx, "capabilities", ()):
-            self.image_reply.start(ctx)
+        self._status = StatusReplies(ctx.logger)
+        self._wait = ReplyWait(self._status)
+        self.image_reply.start(ctx, self._status)
         if "voice.send" in getattr(ctx, "capabilities", ()):
             self.voice_reply.start(ctx.logger)
 
     def has_pending_callbacks(self):
-        return (self._slow is not None and self._slow.busy()) or self.image_reply.busy()
+        return ((self._slow is not None and self._slow.busy()) or self.image_reply.busy() or
+                (self._status is not None and self._status.busy()))
 
     def on_unload(self, ctx):
         if self._wait is not None:
@@ -154,6 +157,8 @@ class Plugin:
         self.voice_reply.close()
         if self._slow is not None:
             self._slow.close()
+        if self._status is not None:
+            self._status.close()
 
     def _ensure_running(self):
         if self._slow is not None and self._slow.stopped.is_set():
@@ -341,6 +346,7 @@ class Plugin:
             turns = getattr(self.members, "turns", None) if message.dispatch_sequence else None
             resume = lambda: self._process_message(message, ctx, turns)
         key = turn_key(message)
+        waiting = None
         if not is_control(message.text) and at_source(message, self.members, self.aliases):
             previous = self._retry.get(key)
             clean = self._clean_query(message, at_source(message, self.members, self.aliases))
@@ -353,21 +359,23 @@ class Plugin:
                     self._retry.popitem(last=False)
             if self._wait is not None:
                 try:
-                    waiting = self._wait.accept(message, ctx, 120 if wants_detail(message.text) else 90)
+                    waiting = self._wait.accept(message, ctx, 120 if wants_detail(message.text) else 90, retryable=True)
                 except SnapshotExpired:
                     return
                 original = resume
                 resume = lambda: self._wait.wrap(original(), waiting)
+        def queue_full():
+            if waiting is not None:
+                self._wait.finish(waiting, "普通回复队列已满，本轮未开始")
+
         if self._slow is None:
             for _ in resume():
                 pass
-        elif not self._slow.queue_if_active(key, resume, on_full=lambda: self._wait.finish(waiting, "回复队列已满，请稍后重试。")
-                                            if self._wait is not None and not is_control(message.text) and
-                                            at_source(message, self.members, self.aliases) else None):
+        elif not self._slow.queue_if_active(key, resume, on_full=queue_full):
             turn = resume()
             if not self._slow.handoff(key, turn):
+                queue_full()
                 turn.close()
-                ctx.reply_at(message, "回复队列已满，请稍后重试。")
 
     def _read_voice_command(self, message, ctx, text):
         self._ensure_running()
@@ -409,6 +417,10 @@ class Plugin:
     def _process_message(self, message, ctx, turns):
         # 判断、模型生成和工具等待都在成员队列内，不占插件收消息的线程。
         self._ensure_running()
+        active_budget = CURRENT.get()
+        if active_budget is not None:
+            with active_budget.lock:
+                active_budget.stage = "理解问题"
         if turns is not None and turns.merged(message):
             return
         source = at_source(message, self.members, self.aliases)
@@ -574,7 +586,11 @@ class Plugin:
                     preference = False
                 use_voice = fixed_voice or (voice_supported and self.voice_reply.reserve(
                     message, reply, preference, automatic=tier == CHAT))
+                active_budget = CURRENT.get()
                 if use_voice:
+                    if active_budget is not None:
+                        with active_budget.lock:
+                            active_budget.stage = "合成语音"
                     def record_voice(part):
                         result.sent.append(part)
                         if sent is not None:
@@ -585,6 +601,9 @@ class Plugin:
                     if remaining is None:
                         return
                     reply = remaining
+                if active_budget is not None:
+                    with active_budget.lock:
+                        active_budget.stage = "准备发送文字"
                 gate = InterjectionGate(interjection_probe(self.members, message.chat_id)) if tier == CHAT else None
                 send_guard = gate.wrap(guard) if gate is not None else guard
                 speak(reply, tier=tier, byte_budget=budget, result=result,
@@ -710,7 +729,7 @@ class Plugin:
             ctx.logger.warning("艾特对话失败：%s", error)
             active_budget = CURRENT.get()
             if self._wait is not None and active_budget is not None:
-                self._wait.finish(active_budget, "这次没能完成可靠回答；回复‘重试’可重新处理原问题。")
+                self._wait.finish(active_budget, "本轮未能完成可信的回答")
         finally:
             # 已发出至少一条（含守卫或异常发生在首条之后）就保留去重记录，避免排队中的同一提问重发。
             self._release(key, delivered=bool(result.sent))

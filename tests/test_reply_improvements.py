@@ -1,5 +1,6 @@
 """真实成员库、图片持久记录、跨线程预算和到期收口。"""
 import hashlib
+import json
 import threading
 import time
 import unittest
@@ -9,6 +10,7 @@ from unittest.mock import Mock
 import test_chat_summary as daily
 from wxbot_framework.conversation.person_context import person_context
 from wxbot_framework.conversation.reply_wait import ReplyWait
+from wxbot_framework.conversation.status_replies import StatusReplies
 from wxbot_framework.conversation.mention_tools import _within
 from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget, ReplyExpired, remaining
 from wxbot_framework.memory.knowledge import KnowledgeStore
@@ -77,23 +79,30 @@ class ReplyImprovements(unittest.TestCase):
         ctx.members = self.store
         ctx.personality.return_value = self.store.personality(daily.ROOM)
         ctx.response_guard = lambda snapshot, persona: self.store.delivery_guard(snapshot)
+        ctx.llm_for.return_value.complete_text.return_value = "这回没弄完，再喊我一声试试。"
         sent = threading.Event()
         def reply(*args, **kwargs):
             with kwargs['delivery_guard']():
                 sent.set()
             return True
         ctx.reply_at.side_effect = reply
-        wait = ReplyWait()
+        status = StatusReplies(ctx.logger)
+        wait = ReplyWait(status)
         try:
-            budget = wait.accept(message, ctx, 90)
+            budget = wait.accept(message, ctx, 90, retryable=True)
             budget.deadline = time.monotonic() - 1
             self.assertTrue(sent.wait(2))
             wait.finish(budget, '重复结果')
             self.assertEqual(ctx.reply_at.call_count, 1)
+            self.assertEqual(ctx.reply_at.call_args.args[1], "这回没弄完，再喊我一声试试。")
+            payload = json.loads(ctx.llm_for.return_value.complete_text.call_args.args[1])
+            self.assertIn("等待超时", payload["实际状态"]["结果"])
+            self.assertIn("重试", payload["实际状态"]["可用操作"])
             with self.assertRaises(ReplyExpired), budget.delivery():
                 pass
         finally:
             wait.close()
+            status.close()
 
 
 class ReplyBudgetTests(unittest.TestCase):

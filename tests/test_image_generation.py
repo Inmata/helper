@@ -13,6 +13,9 @@ from unittest.mock import patch
 from support.recyclable_tempdir import RecyclableTemporaryDirectory
 from plugins.mention_chat import Plugin
 from wxbot_framework.conversation.members import MemberStore
+from wxbot_framework.conversation.status_replies import StatusReplies
+from wxbot_framework.integrations.jev import JevError
+from wxbot_framework.integrations.llm import LLMError
 from wxbot_framework.integrations.magpie_images import MagpieImages
 from wxbot_framework.integrations.magpie_tools import MagpieTools, MagpieToolsToolError
 from wxbot_framework.recent_images import RECENT_IMAGES
@@ -47,6 +50,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = {"_meta": {"usemagpie.ai/pending": "img_contract"},
                           "content": [{"type": "text", "text": "still being made"}], "isError": False}
             else:
+                self.server.waiting.set()
                 self.server.release.wait(5)
                 result = ({"content": [{"type": "text", "text": "generation failed"}], "isError": True}
                           if self.server.fail else
@@ -90,6 +94,16 @@ class Jev:
         return [0.99, 0.01]
 
 
+class StatusModel:
+    def __init__(self):
+        self.calls = []
+
+    def complete_text(self, system, user, **options):
+        payload, _ = json.JSONDecoder().raw_decode(user)
+        self.calls.append(payload)
+        return "，".join(payload["实际状态"].values())
+
+
 class ImageGenerationTests(unittest.TestCase):
     def setUp(self):
         self.directory = RecyclableTemporaryDirectory()
@@ -98,6 +112,7 @@ class ImageGenerationTests(unittest.TestCase):
         self.server.calls, self.server.image, self.server.fail = [], PNG, False
         self.server.errors = {}
         self.server.submitted, self.server.release = threading.Event(), threading.Event()
+        self.server.waiting = threading.Event()
         self.server.release.set()
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
@@ -115,17 +130,20 @@ class ImageGenerationTests(unittest.TestCase):
                                  {"group.image.send", "group.image.receive", "group.text.mention"},
                                  member_store=self.members)
         self.ctx._magpie, self.ctx._jev = self.magpie, Jev()
+        self.ctx._llm = StatusModel()
         self.plugin = Plugin()
         self.plugin.members, self.plugin.room_state = self.members, None
+        self.plugin._status = StatusReplies(self.ctx.logger)
         self.output_patch = patch("plugins.mention_chat.image_reply.OUTPUT_DIR", self.root / "output")
         self.output_patch.start()
-        self.plugin.image_reply.start(self.ctx)
+        self.plugin.image_reply.start(self.ctx, self.plugin._status)
         self.sequence = 0
         RECENT_IMAGES.clear()
 
     def tearDown(self):
         self.server.release.set()
         self.plugin.image_reply.close()
+        self.plugin._status.close()
         self.output_patch.stop()
         self.service.close()
         self.members.close()
@@ -143,10 +161,13 @@ class ImageGenerationTests(unittest.TestCase):
         return message
 
     def wait_done(self):
+        self.wait_for(lambda: not self.plugin.has_pending_callbacks())
+
+    def wait_for(self, done):
         deadline = time.monotonic() + 5
-        while self.plugin.has_pending_callbacks() and time.monotonic() < deadline:
+        while not done() and time.monotonic() < deadline:
             time.sleep(0.02)
-        self.assertFalse(self.plugin.has_pending_callbacks())
+        self.assertTrue(done())
 
     def test_mcp_pending_then_large_image_keeps_binary_and_one_submission(self):
         self.server.image = PNG + b"\0" * (2 * 1024 * 1024)
@@ -192,6 +213,69 @@ class ImageGenerationTests(unittest.TestCase):
         self.plugin.on_message(duplicate, self.ctx)
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
         self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)
+        self.assertFalse(any("图片已发出" in text for _, text in self.backend.texts))
+
+    def test_followup_uses_original_question_and_real_stage_even_if_jev_is_down(self):
+        self.server.release.clear()
+        self.plugin.on_message(self.message(), self.ctx)
+        self.assertTrue(self.server.waiting.wait(2))
+        model = self.ctx._llm
+        complete_text = model.complete_text
+        outputs = {"画不出来？": "图还没回来，我再等等。", "图呢？": "这张还没到我手上呢。"}
+
+        def render(system, user, **options):
+            reply = complete_text(system, user, **options)
+            question = json.JSONDecoder().raw_decode(user)[0]["群友原话"]
+            return outputs.get(question, reply)
+
+        with (patch.object(model, "complete_text", side_effect=render),
+              patch.object(self.ctx._jev, "noul", wraps=self.ctx._jev.noul) as judge):
+            for question, expected in outputs.items():
+                if question == "图呢？":
+                    judge.side_effect = JevError("本机测试识别服务不可用")
+                self.plugin.on_message(self.message("@机器人\u2005" + question,
+                    data={"is_at_self": True, "at_members": ["wxid_robot"]}), self.ctx)
+                self.wait_for(lambda: any(text.endswith(expected) for _, text in self.backend.texts))
+                self.assertIn({"群友原话": question, "实际状态": {"当前任务阶段": "等待生成服务返回图片"}}, model.calls)
+        self.server.release.set()
+        self.wait_done()
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)
+
+    def test_followup_generated_during_delivery_drops_old_stage(self):
+        self.server.release.clear()
+        self.plugin.on_message(self.message(), self.ctx)
+        self.assertTrue(self.server.waiting.wait(2))
+        model = self.ctx._llm
+        complete_text = model.complete_text
+        started, allow_reply = threading.Event(), threading.Event()
+
+        def render(system, user, **options):
+            if json.JSONDecoder().raw_decode(user)[0]["群友原话"] == "画好了吗？":
+                started.set()
+                allow_reply.wait(3)
+                return "这张还没回来呢。"
+            return complete_text(system, user, **options)
+
+        with patch.object(model, "complete_text", side_effect=render):
+            self.plugin.on_message(self.message("@机器人\u2005画好了吗？",
+                data={"is_at_self": True, "at_members": ["wxid_robot"]}), self.ctx)
+            self.assertTrue(started.wait(2))
+            try:
+                self.server.release.set()
+                self.wait_for(lambda: not self.plugin.image_reply.busy())
+            finally:
+                allow_reply.set()
+            self.wait_done()
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        self.assertFalse(any(text.endswith("这张还没回来呢。") for _, text in self.backend.texts))
+
+    def test_status_model_outage_does_not_prevent_image_delivery(self):
+        with patch.object(self.ctx._llm, "complete_text", side_effect=LLMError("本机测试模型不可用")):
+            self.plugin.on_message(self.message(), self.ctx)
+            self.wait_done()
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        self.assertEqual(self.backend.texts, [])
 
     def test_explicit_mention_is_owned_once_and_not_merged_into_previous_turn(self):
         previous = self.message("@机器人\u2005前一个问题", dispatch_sequence=1, dispatch_epoch="epoch")
@@ -221,8 +305,9 @@ class ImageGenerationTests(unittest.TestCase):
     def test_missing_reference_and_self_message_do_not_submit(self):
         self.plugin.on_message(self.message("/生图 修改这张图"), self.ctx)
         self.plugin.on_message(replace(self.message(), is_self=True), self.ctx)
+        self.wait_done()
         self.assertEqual(self.server.calls, [])
-        self.assertIn("请引用", self.backend.texts[0][1])
+        self.assertIn("引用目标图片", self.backend.texts[0][1])
 
     def test_clear_during_generation_prevents_delivery(self):
         self.server.release.clear()
@@ -238,7 +323,7 @@ class ImageGenerationTests(unittest.TestCase):
         for n in range(4):
             self.plugin.on_message(self.message(sender=f"wxid_member{n}"), self.ctx)
         self.assertTrue(self.server.submitted.wait(2))
-        self.assertTrue(any("队列满" in text for _, text in self.backend.texts))
+        self.wait_for(lambda: any("队列满" in text for _, text in self.backend.texts))
         self.plugin.image_reply.close()
         self.assertEqual(self.backend.images, [])
         self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)

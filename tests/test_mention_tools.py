@@ -1,5 +1,6 @@
 """艾特回复的看图 / 联网：图片索引、引用图片解析、工具编排、模型输入与端到端发送（不连网）。"""
 import io
+import hashlib
 import json
 import logging
 import sys
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from plugins.mention_chat import Plugin
+from tests.support.recyclable_tempdir import RecyclableTemporaryDirectory
 from tests.test_mention_chat import ROOM, FakeCtx, FakeMembers, mention
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
 from wxbot_framework.conversation.members import ConversationSnapshot
@@ -23,6 +25,8 @@ from wxbot_framework.conversation.tool_router import MAX_QUESTION_CHARS, JevTool
 from wxbot_framework.integrations.jev import JevClient
 from wxbot_framework.integrations.magpie_tools import (MagpieResult, MagpieTools, MagpieToolsUnavailableError,
                                                        _McpEndpoint)
+from wxbot_framework.image_metadata import ImageStore
+from wxbot_framework.image_receiver import ImageReceiver
 from wxbot_framework.messaging.mentions import parse_quote
 from wxbot_framework.plugin_engine.manager import PluginRecord
 from wxbot_framework.recent_images import RECENT_IMAGES, RecentImages
@@ -46,10 +50,10 @@ class Clock:
         return self.now
 
 
-def image(index, *, room=ROOM, sender=SENDER, status="ready", message_id=None, md5="", path=None, error=""):
+def image(index, *, room=ROOM, sender=SENDER, status="ready", message_id=None, md5="", path=None, error="", wx_type=3):
     data = {"chat_id": room, "sender_id": sender, "image_status": status, "sequence": message_id or 1,
             "native_message_id": str(message_id or ""), "image_metadata": {"md5": md5} if md5 else {},
-            "image_path": path or f"C:/images/{message_id or 1}.png", "image_error": error}
+            "image_path": path or f"C:/images/{message_id or 1}.png", "image_error": error, "wx_type": wx_type}
     return index.note(data)
 
 
@@ -207,8 +211,16 @@ class NativeIndexTests(unittest.TestCase):
         self.addCleanup(RECENT_IMAGES.clear)
 
     def test_submitted_image_is_pending_then_updated_on_delivery(self):
-        submitted = []
-        self.service._ensure_image_receiver = lambda: type("R", (), {"submit": lambda _, data: submitted.append(data)})()
+        download = threading.Event()
+
+        def image_response(_metadata, destination):
+            if not download.wait(3):
+                return False
+            destination.write_bytes(b"\x89PNG\r\n\x1a\nreceiver-test")
+            return True
+
+        self.receiver(image_response)
+        self.addCleanup(download.set)
         xml = f'<msg><img aeskey="{AESKEY}" cdnmidimgurl="https://cdn/mid" md5="{MD5}" /></msg>'
         message = self.message_type(type=3, sender=ROOM.encode(), receiver=ROBOT.encode(),
                                     image_xml=(SENDER + ":\n" + xml).encode(), sequence=7, native_message_id=4242)
@@ -217,13 +229,46 @@ class NativeIndexTests(unittest.TestCase):
         self.assertEqual((record.status, record.sender), ("pending", SENDER))
         # 下载中的图也能按 md5 找到：引用里的编号对不上时不至于报“没收到”。
         self.assertIs(RECENT_IMAGES.quoted(ROOM, svrid="1", md5=MD5), record)
-        data = dict(submitted[0], image_status="ready", image_path="C:/images/x.png", image_metadata={"md5": MD5})
-        data.pop("raw_content")
         with self.assertLogs("NativeText", "INFO") as logs:
-            self.service._deliver_image(data)
-        record = RECENT_IMAGES.quoted(ROOM, md5=MD5)
-        self.assertEqual((record.status, record.path), ("ready", "C:/images/x.png"))
-        self.assertFalse(any("C:/images" in line for line in logs.output))
+            download.set()
+            ready = RECENT_IMAGES.wait(record, 3)
+        self.assertEqual(ready.status, "ready")
+        self.assertTrue(Path(ready.path).is_file())
+        self.assertFalse(any(ready.path in line for line in logs.output))
+
+    def receiver(self, image_response):
+        temporary = RecyclableTemporaryDirectory(prefix="wxbot-sticker-receive-")
+        self.addCleanup(temporary.cleanup)
+        receiver = ImageReceiver(ImageStore(Path(temporary.name) / "images", ROBOT), image_response,
+                                 self.service._deliver_image, lambda: True, note_pending=RECENT_IMAGES.note)
+        self.addCleanup(receiver.close)
+        self.service._image_receiver = receiver
+
+    def test_sticker_quote_reuses_local_image_vision(self):
+        gif = bytes.fromhex("47494638396101000100800000000000ffffff21f90401000000002c000000000100010000020144003b")
+        md5 = hashlib.md5(gif).hexdigest()
+        cdn = "https://emoji.qpic.cn/sample?token=test-only"
+        xml = f'<msg><emoji md5="{md5}" len="{len(gif)}" cdnurl="{cdn}" /></msg>'
+        self.receiver(lambda *_: self.fail("表情没有使用普通图片原生下载接口"))
+        message = self.message_type(type=47, sender=ROOM.encode(), receiver=ROBOT.encode(),
+                                    image_xml=(SENDER + ":\n" + xml).encode(), sequence=7, native_message_id=4243)
+        with patch("wxbot_framework.sticker_download.build_opener", return_value=SimpleNamespace(
+                open=lambda request, timeout: io.BytesIO(gif))):
+            self.assertIsNone(self.service._map_message(message))
+            record = RECENT_IMAGES.quoted(ROOM, svrid="4243", wx_type=47)
+            record = RECENT_IMAGES.wait(record, 3)
+        self.assertEqual((record.status, record.md5), ("ready", md5))
+        self.assertEqual(Path(record.path).read_bytes(), gif)
+        self.assertIsNone(RECENT_IMAGES.quoted(ROOM, svrid="4243"))
+        encoded = xml.replace("<", "&lt;").replace(">", "&gt;")
+        quote = parse_quote(f"<msg><appmsg><title>什么意思</title><refermsg><type>47</type>"
+                            f"<svrid>4243</svrid><content>{encoded}</content></refermsg></appmsg></msg>")
+        self.assertEqual((quote["ref_type"], quote["image_md5"]), ("47", md5))
+        self.assertNotIn(cdn, repr(quote))
+        runner, magpie = tools(RECENT_IMAGES)
+        result = runner.run(question="什么意思", room=ROOM, sender=SENDER, received_at=time.monotonic(), quote=quote)
+        self.assertTrue(result.used)
+        self.assertEqual([path for path, _prompt in magpie.images], [record.path])
 
 
 class MentionToolsTests(unittest.TestCase):
@@ -239,6 +284,17 @@ class MentionToolsTests(unittest.TestCase):
         self.assertIsNone(outcome.ask)
         self.assertEqual([kind for kind, _ in jev.calls], ["search"])  # 没有图片就不问看图
         self.assertEqual((magpie.images, magpie.queries), ([], []))
+
+    def test_recent_sticker_only_used_for_sticker_questions(self):
+        index = RecentImages(clock=Clock())
+        image(index, message_id=8, wx_type=47, path="C:/images/8.gif")
+        image(index, message_id=9)
+        outcome, magpie = self.run_tools("这个表情什么意思", index=index)
+        self.assertTrue(outcome.used)
+        self.assertEqual([path for path, _prompt in magpie.images], ["C:/images/8.gif"])
+        outcome, magpie = self.run_tools("看看这张图", index=index)
+        self.assertTrue(outcome.used)
+        self.assertEqual([path for path, _prompt in magpie.images], ["C:/images/9.png"])
 
     def test_explicit_search_runs_without_jev(self):
         outcome, magpie = self.run_tools("帮我搜一下 Python 最新版本", jev=None)

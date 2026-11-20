@@ -4,11 +4,13 @@ code:
   - wxbot_framework/app/ingress.py
   - wxbot_framework/image_receiver.py
   - wxbot_framework/image_metadata.py
+  - wxbot_framework/sticker_download.py
   - wxbot_framework/images.py
   - wxbot_framework/integrations/wechat.py
   - wxbot_framework/integrations/voice_asr.py
   - wxbot_framework/messaging/forwarded.py
   - native/text_service.py
+  - native/text_bridge.cpp
   - native/voice_download.h
 related:
   - wxbot_framework/plugin_engine/manager.py
@@ -122,6 +124,11 @@ sequenceDiagram
 - 只保存会话、发送者、状态、本地路径、md5 与原消息编号，不保存 XML、CDN 地址或密钥；进程内按群有界（每群 64 条、至多 256 个群），服务启动时清空，插件热重载不影响。
 - 记录带“已看过”标记：艾特回复看图成功后标记，之后不再按“刚发的图”选中，按引用仍能找到。按“刚发的图”查找时可选自己发的或别人发的（`from_others`）。
 - 引用消息解析出的 `quote` 在被引用的是图片（`ref_type=3`）时额外带 `svrid` 与 `image_md5`，供艾特回复对上索引；不带缩略图 md5、密钥或 CDN 地址。
+
+## 群自定义表情（微信类型 47）
+
+- 原生桥接保留表情 XML 和服务器消息编号。Python 复用图片接收队列、会话范围及账号专属保存目录，按表情自己的 CDN 引用下载。校验大小、文件格式和消息给出的 MD5 后登记为可识别。只有加密引用、专用容器或下载失败时给出不可用状态。
+- 表情单独参与最近媒体匹配。图片的候选和容量照常；表情不触发回复、不作为聊天正文入库。引用只公开原消息编号、MD5 等关联字段，原始 XML、CDN 地址和凭据不进入模型或日志。
 
 ## 群语音（微信类型 34）
 

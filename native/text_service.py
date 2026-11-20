@@ -145,7 +145,8 @@ class NativeTextService(NativeFileHelperService):
                 from wxbot_framework.image_receiver import ImageReceiver
                 self._image_receiver = ImageReceiver(
                     ImageStore(self.media_directory, account), self._download_image, self._deliver_image,
-                    lambda: not self._stop.is_set() and self._owns_bridge and self.self_wxid == account)
+                    lambda: not self._stop.is_set() and self._owns_bridge and self.self_wxid == account,
+                    note_pending=RECENT_IMAGES.note)
         return self._image_receiver
 
     def _download_image(self, metadata, destination):
@@ -178,9 +179,12 @@ class NativeTextService(NativeFileHelperService):
         if self._stop.is_set():
             return
         # 本机路径、XML、URL 与密钥不写日志。
-        logger.info("图片接收 | 会话=%s | 状态=%s | 画质=%s", data.get("chat_id"),
+        sticker = data.get("wx_type") == 47
+        logger.info("%s接收 | 会话=%s | 状态=%s | 画质=%s", "表情" if sticker else "图片", data.get("chat_id"),
                     data.get("image_status"), data.get("image_quality"))
         RECENT_IMAGES.note(data)
+        if sticker:
+            return
         for handler in list(self.msg_handlers):
             try:
                 handler(self.pid, 11046, data, self)
@@ -272,9 +276,9 @@ class NativeTextService(NativeFileHelperService):
 
     def _map_message(self, message):
         # 49 只接收引用与合并转发。
-        if message.type not in (1, 3, 34, 49):
+        if message.type not in (1, 3, 34, 47, 49):
             return None
-        body = (getattr(message, "image_xml", b"") if message.type == 3 else
+        body = (getattr(message, "image_xml", b"") if message.type in (3, 47) else
                 getattr(message, "text", b"")).decode("utf-8", errors="replace")
         quote, forwarded = None, ""
         if message.type == 49:
@@ -293,6 +297,10 @@ class NativeTextService(NativeFileHelperService):
             logger.info("当前账号已识别；好友和群聊文本已就绪")
         if data:
             data["native_message_id"] = str(getattr(message, "native_message_id", 0) or "")
+            if message.type == 47:
+                if data["room_wxid"]:
+                    self._map_image(data, body, wx_type=47)
+                return None
             if message.type == 34:
                 if data["chat_id"] in self.voice_rooms and not data["is_self"]:
                     with self._calls:
@@ -383,12 +391,12 @@ class NativeTextService(NativeFileHelperService):
             data["sender_wechat_name"] = name
         self._publish_message(data)
 
-    def _map_image(self, data, body):
-        """图片事件进入异步队列；下载完成后才以 type=3 投递给插件。"""
+    def _map_image(self, data, body, *, wx_type=3):
+        """媒体进入异步下载队列；普通图片下载完成后投递给插件。"""
         # router.convert 已剥离群成员前缀。raw_content 只是交给接收器解析的内部字段，
         # ImageReceiver 在解析后立即移除，插件事件里不会出现 XML、CDN 地址或密钥。
         data["raw_content"] = data.get("msg") or body
-        if data.get("is_self"):
+        if wx_type == 3 and data.get("is_self"):
             try:
                 md5 = parse_image_metadata(data["raw_content"]).md5
                 record = RECENT_IMAGES.quoted(data["chat_id"], md5=md5)
@@ -399,7 +407,7 @@ class NativeTextService(NativeFileHelperService):
                                    svrid=data.get("native_message_id") or "")
                 logger.info("自己发送图片已关联：svrid=%s md5=%s", data.get("native_message_id"), md5)
                 return None
-        data["wx_type"] = 3
+        data["wx_type"] = wx_type
         data["msg"] = data["content"] = ""
         data["image_status"] = "pending"
         data["image_path"] = ""
@@ -424,15 +432,6 @@ class NativeTextService(NativeFileHelperService):
                 data[field] = ""
             RECENT_IMAGES.note(data)
             return data
-        # 先记 pending：群友发图后立刻艾特时，回复方能知道图还在下载并稍等。
-        # 公开的 md5 也先写上，引用对不上消息编号时仍能按 md5 找到下载中的这张。
-        pending = {key: data.get(key) for key in ("chat_id", "sender_id", "native_message_id",
-                                                  "sequence", "image_status")}
-        try:
-            pending["image_metadata"] = {"md5": parse_image_metadata(data["raw_content"]).md5}
-        except Exception:
-            pass  # XML 有问题时接收器会给出 failed，这里不提前判断
-        RECENT_IMAGES.note(pending)
         receiver.submit(dict(data))
         return None
 

@@ -140,6 +140,8 @@ def resolve_reply_quote(raw, find_context_text):
             return None, "我没读到你引用的那条消息。可以把原话发来。"
     elif ref_type == "3" and not text:
         text = "[图片]"
+    elif ref_type == "47" and not text:
+        text = "[表情]"
     quote = {"name": name, "text": text, "kind": kind, "context_id": context_id} if name or text else None
     return quote, ""
 

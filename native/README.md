@@ -6,13 +6,14 @@
 
 运行需要的组件：
 
-- `text_service.py`：文件传输助手、好友、群聊的原生文本服务，以及图片事件的异步接收与投递。
+- `text_service.py`：文件传输助手、好友、群聊的原生文本服务，以及图片事件与群表情的异步接收。
 - `filehelper_service.py`：接收通道和服务公共实现。
 - `run_selftest.py`：进程、版本、远程调用与桥接生命周期封装。
 - `core_version.h`：原生调用、接收与卸载共用的构建地址配置；`wxbot_framework/native_profiles.py` 记录 Python 读取账号和群成员缓存的对应地址。
 - `image_download.h`：V4 图片 CDN 下载实现与 `WxDownloadImage` 导出，由 `text_bridge.cpp` 包含；旧 V3/V2 DLL 不含该能力。
 - `image_send.h`：本地图片发送实现与 `WxSendImage` 导出，用于在群聊发送表情包小图。
 - `WxPollMediaMessageWithVoice`：在 V4 字段之后追加媒体载荷，用于微信 4.2.0.12 / 4.2.0.13 的内联 SILK 和大于旧正文缓冲区的聊天卡片。
+- 新版 `text_bridge.cpp` 将类型 `47` 的表情 XML 放进 V4 媒体结构，沿用现有结构布局和消息编号字段。
 - `build_text/text_bridge.dll`：当前文本收发和真实艾特桥接；重编后同时导出 `WxPollMediaMessageV4` 与 `WxDownloadImage`，前端才会声明图片接收能力。
 - `build/selftest_bridge.dll`：兼容文件传输助手后端。
 

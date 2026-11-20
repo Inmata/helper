@@ -267,7 +267,7 @@ static void sample_all_text(const uintptr_t* batch) {
             const auto message = reinterpret_cast<const unsigned char*>(address);
             const uint32_t type = *reinterpret_cast<const uint32_t*>(message + 0x14);
             // 49 仅放行引用和合并转发，普通链接与文件不进入聊天。
-            if (type != 1 && type != 3 && type != 34 && type != 49) continue;
+            if (type != 1 && type != 3 && type != 34 && type != 47 && type != 49) continue;
             char sender[128]{}, receiver[128]{};
             if (!read_pb_string(message, 8, sender, sizeof(sender)) || !valid_target(sender) ||
                 !read_pb_string(message, 0x18, receiver, sizeof(receiver)) || !valid_target(receiver)) continue;
@@ -299,11 +299,11 @@ static void sample_all_text(const uintptr_t* batch) {
                 enqueue_received(sender, receiver, text, source, 34, nullptr, message_id, audio, audio_size);
                 continue;
             }
-            if (type == 3) {
-                // 群图片正文同样是“成员 ID:\n<msg><img .../></msg>”，由 Python 路由剥离前缀。
+            if (type == 3 || type == 47) {
+                // 图片与表情的媒体 XML 均由 Python 路由剥离群成员前缀。
                 char image_xml[16384]{};
                 if (!read_pb_string(message, 0x20, image_xml, sizeof(image_xml))) continue;
-                enqueue_received(sender, receiver, "", source, 3, image_xml, message_id);
+                enqueue_received(sender, receiver, "", source, type, image_xml, message_id);
                 continue;
             }
             if (!read_pb_string(message, 0x20, text, sizeof(text))) {

@@ -56,9 +56,12 @@ class ImageMetadata:
     aeskey: str = field(default="", repr=False)
     cdnthumbaeskey: str = field(default="", repr=False)
     filekey: str = field(default="", repr=False)
+    sticker_url: str = field(default="", repr=False)
 
 
 def image_download_reference(metadata: ImageMetadata) -> tuple[str, int, str]:
+    if metadata.sticker_url:
+        return metadata.sticker_url, 0, "original"
     if metadata.cdnbigimgurl:
         return metadata.cdnbigimgurl, 1, "original"
     filekey = metadata.cdnmidimgurl or metadata.filekey
@@ -83,12 +86,7 @@ def _opaque(attributes, name, maximum):
     return value
 
 
-def parse_image_metadata(content: str) -> ImageMetadata:
-    """解析一个 msg/img XML，失败抛 ImageMetadataError。
-
-    群成员前缀应由会话路由先行剥离。本函数不猜测前缀，不解析 DTD、
-    自定义实体或本地文件引用；标准 XML 转义（如 &amp;）仍可正常解析。
-    """
+def _media_attributes(content, element_name):
     if not isinstance(content, str):
         raise ImageMetadataError("图片 XML 必须是非空字符串")
     if len(content) > MAX_IMAGE_XML_BYTES:
@@ -109,11 +107,9 @@ def parse_image_metadata(content: str) -> ImageMetadata:
         root = ET.fromstring(content)
     except (ET.ParseError, ValueError):
         raise ImageMetadataError("图片 XML 格式不合法") from None
-    if root.tag != "msg":
-        raise ImageMetadataError("图片 XML 必须具有 msg/img 结构")
-    images = list(root.iter("img"))
-    if len(images) != 1 or images[0] not in list(root):
-        raise ImageMetadataError("图片 XML 必须恰好包含一个直接的 img 子元素")
+    images = list(root.iter(element_name))
+    if root.tag != "msg" or len(images) != 1 or images[0] not in list(root):
+        raise ImageMetadataError(f"图片 XML 必须恰好包含一个直接的 {element_name} 子元素")
     # 输入已经有字节上限，再限制结构以拒绝无用的深层嵌套。
     pending, count = [(root, 1)], 0
     while pending:
@@ -125,9 +121,19 @@ def parse_image_metadata(content: str) -> ImageMetadata:
     attributes = images[0].attrib
     if len(attributes) > 64:
         raise ImageMetadataError("图片 XML 属性过多")
+    return attributes
+
+
+def parse_image_metadata(content: str, *, wx_type: int = 3) -> ImageMetadata:
+    """解析剥离群成员前缀后的图片或表情 XML，只返回已校验的属性。"""
+    attributes = _media_attributes(content, "emoji" if wx_type == 47 else "img")
     md5 = attributes.get("md5", "")
     if "md5" in attributes and not _MD5.fullmatch(md5):
         raise ImageMetadataError("图片 md5 必须为 32 位十六进制字符串")
+    if wx_type == 47:
+        length = _number(attributes, "len", MAX_IMAGE_BYTES) if attributes.get("len") else None
+        return ImageMetadata(md5=md5.lower(), length=length,
+                             sticker_url=_opaque(attributes, "cdnurl", 4096))
     numbers = {
         name: _number(attributes, name, MAX_IMAGE_DIMENSION)
         for name in ("width", "height", "cdnthumbwidth", "cdnthumbheight", "cdnmidwidth", "cdnmidheight")

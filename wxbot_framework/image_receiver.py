@@ -15,6 +15,7 @@ import threading
 
 from .image_metadata import (ImageMetadata, ImageMetadataError, ImageStore,
                              image_download_reference, parse_image_metadata)
+from .sticker_download import StickerUnavailable, download_sticker
 
 
 _PUBLIC_FIELDS = (
@@ -39,7 +40,7 @@ class ImageReceiver:
     只有当前会话会收到 ready/failed/skipped 事件；原始图片 XML 在解析后从事件中移除。
     """
 
-    def __init__(self, store: ImageStore, downloader, deliver, is_current, queue_size=16):
+    def __init__(self, store: ImageStore, downloader, deliver, is_current, queue_size=16, *, note_pending=None):
         if not isinstance(store, ImageStore):
             raise ValueError("图片接收器需要 ImageStore")
         if not all(callable(value) for value in (downloader, deliver, is_current)):
@@ -54,6 +55,7 @@ class ImageReceiver:
         self._downloader = downloader
         self._deliver_callback = deliver
         self._is_current = is_current
+        self._note_pending = note_pending
         self._queue = queue.Queue(maxsize=queue_size)
         self._enqueue_lock = threading.Lock()
         self._stop = threading.Event()
@@ -99,7 +101,7 @@ class ImageReceiver:
         # 原始 XML 含 CDN 地址和密钥，只用于本次解析；任何投递路径都不再带上它。
         raw_content = snapshot.pop("raw_content", "")
         try:
-            metadata = parse_image_metadata(raw_content)
+            metadata = parse_image_metadata(raw_content, wx_type=snapshot.get("wx_type", 3))
         except ImageMetadataError:
             self._failed(snapshot, "图片元数据无效")
             return False
@@ -109,6 +111,8 @@ class ImageReceiver:
         with self._enqueue_lock:
             if self._stop.is_set():
                 return False
+            if self._note_pending is not None:
+                self._note_pending(snapshot)
             try:
                 self._queue.put_nowait((snapshot, metadata))
             except queue.Full:
@@ -132,11 +136,13 @@ class ImageReceiver:
                 return destination
         raise FileExistsError("无法生成不重复的图片临时文件名")
 
-    def _download(self, metadata: ImageMetadata, sequence):
+    def _download(self, metadata: ImageMetadata, sequence, wx_type):
         destination = self._new_download_path()
         if not self._active():
             return None
-        if self._downloader(metadata, destination) is not True:
+        if wx_type == 47:
+            download_sticker(metadata, destination, self._active)
+        elif self._downloader(metadata, destination) is not True:
             raise ValueError("图片下载未成功")
         if not self._active():
             return None
@@ -151,8 +157,8 @@ class ImageReceiver:
                 return
             data["image_quality"] = image_download_reference(attempt)[2]
             try:
-                path = self._download(attempt, data.get("sequence"))
-            except ImageDownloadSkipped as error:
+                path = self._download(attempt, data.get("sequence"), data.get("wx_type", 3))
+            except (ImageDownloadSkipped, StickerUnavailable) as error:
                 data.update(image_status="skipped", image_path="",
                             image_error=str(error) or "图片不在支持范围")
                 self._deliver(data)

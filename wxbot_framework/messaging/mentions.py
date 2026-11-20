@@ -102,7 +102,7 @@ def parse_quote(source):
     不是引用时返回 None。
 
     ``title`` 是这次回复的正文，``text`` 是被引用的原文（只取文本类引用，截断到 300 字）；
-    ``svrid`` 是被引用消息的编号，引用图片（ref_type 3）时 ``image_md5`` 是那张图的 md5，用来找本地图片。
+    ``svrid`` 是被引用消息的编号；引用图片或表情时 ``image_md5`` 可用于查找本地文件。
     """
     if not isinstance(source, str) or len(source) > QUOTE_MAX_CHARS:
         return None
@@ -136,7 +136,7 @@ def parse_quote(source):
             "chatusr": (refer.findtext("chatusr") or "").strip(),
             "fromusr": (refer.findtext("fromusr") or "").strip(),
             "svrid": svrid if svrid.isascii() and svrid.isdigit() and len(svrid) <= 20 else "",
-            "image_md5": _quoted_image_md5(content) if ref_type == "3" else "",
+            "image_md5": _quoted_image_md5(content) if ref_type in ("3", "47") else "",
             "voice_client_id": _quoted_voice_id(content) if ref_type == "34" else ""}
 
 

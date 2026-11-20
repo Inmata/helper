@@ -33,6 +33,8 @@ SEARCH = "search"
 # 明确要求看图 / 联网的说法；只收不会出现在普通闲聊里的写法，“查一下”这类泛称交给 Jev。
 VISION_HINTS = ("看图", "看看图", "看下图", "看一下图", "看看这张图", "识图", "识别图", "识别一下图", "图里", "图上",
                 "图中", "这张图", "截图里", "照片里")
+STICKER_HINTS = ("这个表情", "这张表情", "那个表情", "那张表情", "看看表情", "识别表情", "表情包什么意思",
+                 "表情包啥意思")
 SEARCH_HINTS = ("联网", "上网查", "网上查", "上网搜", "网上搜", "搜一下", "搜搜", "搜下", "帮我搜", "去搜",
                 "百度一下", "谷歌一下")
 IMAGE_WINDOW_SECONDS = 120
@@ -66,6 +68,8 @@ ASK_WHICH_IMAGE = "图片状态：当前发言者近期发了多张图片，尚�
 ASK_WHICH_OTHER_IMAGE = "图片状态：其他群友近期发了多张图片，尚未指定目标。请自然地询问要看哪张，可以让对方引用。"
 ASK_FOR_IMAGE = "图片状态：本轮没有匹配到图片。结合当前提问，请对方提供或引用目标图片，不猜图片内容。"
 QUOTED_IMAGE_MISSING = "图片状态：引用的图片没有收录，原因未知。请对方重新发送目标图片，不猜原图内容或缺失原因。"
+ASK_FOR_STICKER = "表情状态：没有匹配到这张表情。请对方引用或重新发送目标表情，不猜测内容。"
+ASK_WHICH_STICKER = "表情状态：近期有多张表情，尚未指定目标。请自然地询问要看哪张，可以让对方引用。"
 NO_IMAGE_SUPPORT = "图片状态：当前连接不支持收取图片。根据对方的问题自然说明这一限制，可请对方描述关键内容。"
 TOO_MANY_IMAGES = "图片状态：本轮超过三张图片的处理容量。请对方分批提供或先选最重要的图片。"
 ASK_SEARCH_TARGET = "搜索状态：没有保存这位发言者上次的搜索目标。请结合当前对话自然地问清这次要查什么。"
@@ -308,20 +312,24 @@ class MentionTools:
             outcome.results.append(result)
             return self._finish(outcome, started)
         all_images = not has_quote and bool(_ALL_IMAGES.fullmatch(question.strip()))
-        explicit_vision = all_images or wants(question, VISION_HINTS)
+        ref_type = quote.get("ref_type")
+        sticker = ref_type == "47" or (ref_type != "3" and wants(question, STICKER_HINTS))
+        wx_type = 47 if sticker else 3
+        explicit_vision = all_images or sticker or wants(question, VISION_HINTS)
         explicit_search = wants(question, SEARCH_HINTS)
-        quoted_image = quote.get("ref_type") == "3"
+        quoted_image = ref_type in ("3", "47")
         image, candidates, ask_which = None, (), ASK_WHICH_IMAGE
         own_candidates = False
         if quoted_image:
-            image = self.images.quoted(room, svrid=quote.get("svrid") or "", md5=quote.get("image_md5") or "")
+            image = self.images.quoted(room, svrid=quote.get("svrid") or "", md5=quote.get("image_md5") or "",
+                                       wx_type=wx_type)
         else:
             candidates = (image_choices if all_images else ()) or self.images.recent(
-                room, sender, before=received_at, within=IMAGE_WINDOW_SECONDS)
+                room, sender, before=received_at, within=IMAGE_WINDOW_SECONDS, wx_type=wx_type)
             own_candidates = bool(candidates)
             if not candidates:
                 candidates = self.images.recent(room, sender, before=received_at, within=IMAGE_WINDOW_SECONDS,
-                                                from_others=True)
+                                                from_others=True, wx_type=wx_type)
                 ask_which = ASK_WHICH_OTHER_IMAGE
             if len(candidates) == 1:
                 image = candidates[0]
@@ -345,7 +353,7 @@ class MentionTools:
         vision_text = None
         if vision_reason:
             if len(candidates) > 1 and not all_images:
-                outcome.ask = ask_which
+                outcome.ask = ASK_WHICH_STICKER if sticker else ask_which
                 outcome.image_choices = candidates
                 return outcome
             if all_images and len(candidates) > MAX_BATCH_IMAGES:
@@ -355,7 +363,7 @@ class MentionTools:
             if not selection:
                 # 引用的图对不上记录（多半是上线前发的）把缺失状态交给模型，澄清时不猜原图。
                 outcome.ask = (NO_IMAGE_SUPPORT if not self.image_supported else
-                               QUOTED_IMAGE_MISSING if quoted_image else ASK_FOR_IMAGE)
+                               ASK_FOR_STICKER if sticker else QUOTED_IMAGE_MISSING if quoted_image else ASK_FOR_IMAGE)
                 return outcome
             yield
             for index, candidate in enumerate(selection):

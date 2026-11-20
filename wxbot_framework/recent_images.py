@@ -35,6 +35,7 @@ class ImageRecord:
     path: str = ""
     error: str = ""
     used: bool = False  # 已被一次看图成功用过：不再算“刚发的图”，仍可被引用
+    wx_type: int = 3
 
 
 def _key(data):
@@ -58,7 +59,8 @@ class RecentImages:
         self.per_room = per_room
         self.rooms = rooms
         self.clock = clock
-        self._rooms = OrderedDict()  # room -> deque[ImageRecord]，最近活跃的群在末尾
+        # 群里连发表情时，普通图片的最近记录仍有原来的容量。
+        self._rooms = {3: OrderedDict(), 47: OrderedDict()}
         self._changed = threading.Condition()
 
     def note(self, data):
@@ -68,16 +70,20 @@ class RecentImages:
         room, key, status = data.get("chat_id") or "", _key(data), data.get("image_status")
         if not isinstance(room, str) or not room or not key or status not in STATUSES:
             return None
+        wx_type = data.get("wx_type", 3)
+        rooms = self._rooms.get(wx_type)
+        if rooms is None:
+            return None
         path = data.get("image_path") if status == READY else ""
         error = data.get("image_error") if status in (FAILED, SKIPPED) else ""
         with self._changed:
-            records = self._rooms.get(room)
+            records = rooms.get(room)
             if records is None:
-                records = self._rooms[room] = deque(maxlen=self.per_room)
-                while len(self._rooms) > self.rooms:
-                    self._rooms.popitem(last=False)
+                records = rooms[room] = deque(maxlen=self.per_room)
+                while len(rooms) > self.rooms:
+                    rooms.popitem(last=False)
             else:
-                self._rooms.move_to_end(room)
+                rooms.move_to_end(room)
             for index, old in enumerate(records):
                 if old.key == key:
                     record = replace(old, status=status, md5=_md5(data) or old.md5, path=str(path or ""),
@@ -87,14 +93,14 @@ class RecentImages:
             else:
                 record = ImageRecord(room=room, sender=str(data.get("sender_id") or ""), key=key, status=status,
                                      seen_at=self.clock(), native_message_id=key[3:] if key.startswith("id:") else "",
-                                     md5=_md5(data), path=str(path or ""), error=str(error or ""))
+                                     md5=_md5(data), path=str(path or ""), error=str(error or ""), wx_type=wx_type)
                 records.append(record)
             self._changed.notify_all()
         return record
 
-    def _records(self, room):
+    def _records(self, room, wx_type=3):
         with self._changed:
-            return tuple(self._rooms.get(room, ()))
+            return tuple(self._rooms[wx_type].get(room, ()))
 
     def sent(self, room, sender, path, *, md5="", svrid=""):
         path = Path(path).resolve()
@@ -108,10 +114,10 @@ class RecentImages:
         rows = members.sent_images(room)
         allowed = {row["md5"] for row in rows}
         with self._changed:
-            records = self._rooms.get(room)
+            records = self._rooms[3].get(room)
             if records is not None:
-                self._rooms[room] = deque((r for r in records if r.sender != members.account or r.md5 in allowed),
-                                          maxlen=self.per_room)
+                self._rooms[3][room] = deque((r for r in records if r.sender != members.account or r.md5 in allowed),
+                                             maxlen=self.per_room)
         for row in reversed(rows):
             if Path(row["path"]).is_file():
                 self.sent(room, members.account, row["path"], md5=row["md5"])
@@ -127,9 +133,9 @@ class RecentImages:
                     members.record_sent_image(room, record.path, record.md5, source_id)
                     break
 
-    def quoted(self, room, *, svrid="", md5=""):
+    def quoted(self, room, *, svrid="", md5="", wx_type=3):
         """按引用里的原消息编号找图，找不到再按 md5 找本群最近一张。"""
-        records = self._records(room)
+        records = self._records(room, wx_type)
         if svrid:
             for record in reversed(records):
                 if record.native_message_id == svrid:
@@ -141,16 +147,16 @@ class RecentImages:
                     return record
         return None
 
-    def recent(self, room, sender, *, before, within, from_others=False):
+    def recent(self, room, sender, *, before, within, from_others=False, wx_type=3):
         """提问前 ``within`` 秒内、还没被看过的图（按到达顺序）：默认是这个人自己发的，``from_others`` 时是别人发的。"""
-        return tuple(record for record in self._records(room)
+        return tuple(record for record in self._records(room, wx_type)
                      if (record.sender != sender) == from_others and not record.used and
                      before - within <= record.seen_at <= before + ARRIVAL_SLACK_SECONDS)
 
     def mark_used(self, record):
         """这张图已被看过：之后不再按“刚发的图”选中，引用它仍然找得到。"""
         with self._changed:
-            records = self._rooms.get(record.room, ())
+            records = self._rooms[record.wx_type].get(record.room, ())
             for index, old in enumerate(records):
                 if old.key == record.key:
                     records[index] = replace(old, used=True)
@@ -162,7 +168,8 @@ class RecentImages:
         deadline = self.clock() + timeout
         with self._changed:
             while True:
-                current = next((item for item in self._rooms.get(record.room, ()) if item.key == record.key), record)
+                current = next((item for item in self._rooms[record.wx_type].get(record.room, ())
+                                if item.key == record.key), record)
                 remaining = deadline - self.clock()
                 if current.status != PENDING or remaining <= 0 or (stopped is not None and stopped.is_set()):
                     return current
@@ -170,7 +177,8 @@ class RecentImages:
 
     def clear(self):
         with self._changed:
-            self._rooms.clear()
+            for rooms in self._rooms.values():
+                rooms.clear()
             self._changed.notify_all()
 
 

@@ -16,6 +16,48 @@ FOLLOW_LIMIT = 2
 CLARIFICATION_SECONDS = 90
 _QUESTION = re.compile(r"[?？]|你(?:问|指|说)的是|哪个|哪(?:一)?[场款天年]")
 _REFERS_BACK = re.compile(r"不是|刚才|你(?:说|讲)|我说的是|到底|不对吧|(?:^|[，。])那|这(?:个|事|说法)|他们")
+_SELF_REFERENCE = re.compile(r"你|刚才|刚刚|之前|上次|前面|前几天|以前|不对|说错|搞错|念|朗读|唱|语音|重说|记错")
+_SING_REQUEST = re.compile(r"唱|来(?:一|半)?首|\bsing\b", re.IGNORECASE)
+
+CORRECTION_INTENT = {
+    "instructions": "当前发言是否在核对、质疑或纠正机器人自己先前的发言或实际动作？考虑引用和最近一轮。",
+    "true": "说机器人以前讲过某句话、指出它答错或改口，追问它为何那样回答，"
+            "或者质疑它刚发的语音其实是念的。‘你之前说结婚就选小林’即使没有问号，仍然在核对旧话。"
+            "引用机器人称某分数是高手，反问‘前十万也叫高手？’也算。",
+    "false": "普通新问题、群友纠正自己的错字、单纯补充新条件、评价其他人、单纯请求唱歌或朗读。",
+}
+SING_INTENT = {
+    "instructions": "当前发言是否直接要求机器人实际唱歌或用旋律演唱？",
+    "true": "‘唱一个雨爱’、‘给我用语音唱一下’、‘来首歌’。",
+    "false": "要求念歌词、评论之前的语音、指出上次光念没唱、问会不会唱，或在讨论别人唱歌。",
+}
+READ_CONSENT = {
+    "instructions": "机器人刚提出把原请求内容改为文字朗读。当前发言是否接受这项朗读提议？",
+    "true": "清楚同意用朗读替代演唱，比如‘可以，那就念吧’或紧接具体朗读提议说‘行’。",
+    "false": "否定、想要唱而非念、另起话题、对旧语音的评论，或要求朗读不同内容。",
+}
+
+
+def turn_intents(jev, question, *, quote=None, previous=None):
+    if jev is None or not question:
+        return set()
+    checks = {}
+    if quote or previous or _SELF_REFERENCE.search(question):
+        checks["correction"] = CORRECTION_INTENT
+    if _SING_REQUEST.search(question):
+        checks["sing"] = SING_INTENT
+    if previous and previous.reading_offer:
+        checks["read"] = READ_CONSENT
+    if not checks:
+        return set()
+    state = {"当前发言": question, "引用": quote, "机器人上一轮答复": previous.text if previous else ""}
+    if "read" in checks:
+        state["待确认的原请求"] = previous.reading_offer
+    try:
+        scores = jev.noul(state, list(checks.values()), timeout=2)
+        return {key for key, score in zip(checks, scores, strict=True) if score >= 0.7}
+    except (JevError, OSError, ValueError):
+        return set()
 
 
 def turn_key(message):
@@ -39,7 +81,7 @@ def judge_turn(jev, intent, question, *, previous="", new=""):
                    "纯感叹或评价、和其他人说话、另起话题，或不清楚是不是在问机器人。"),
         "status": ("发言正在询问机器人上一轮为什么没有正常回答、是否被拦截或处理结果如何。"
                    "紧接着问‘为什么会这样’也算。",
-                   "另起话题、询问原问题的具体做法、询问生图任务、要求重试、调侃或与别人说话。"),
+                   "纠正或质疑机器人已经发出的某句话、另起话题、询问原问题的具体做法、询问生图任务、要求重试、调侃或与别人说话。"),
         "clarify": ("新话正好补齐机器人刚问的条件，例如地区、年份、型号、哪场比赛。允许另一位群友补充。",
                     "是道谢、单独的新问题、在和别人说话，或没有补充这轮缺的条件。"),
         "refer": ("新话确实在追问或纠正机器人刚才对原问题的答复。",
@@ -116,6 +158,8 @@ class LastReply:
     text: str
     sent_at: float
     depth: int
+    reading_offer: str = ""
+    voice_action: str = ""
 
 
 class ConversationTurns:
@@ -185,21 +229,22 @@ class ConversationTurns:
                 self._condition.wait(left)
             return ()
 
-    def sent(self, turn, text):
+    def sent(self, turn, text, *, reading_offer="", voice_action=""):
         with self._condition:
             key = turn_key(turn.message)
             if self._active.get(key) is not turn:
                 return
-            turn.sent.append(text)
+            if text:
+                turn.sent.append(text)
             now = monotonic()
             self._replied = {k: value for k, value in self._replied.items()
                              if now - value.sent_at <= FOLLOW_SECONDS}
-            self._replied[key] = LastReply(turn.question, "\n".join(turn.sent), now, turn.depth)
+            self._replied[key] = LastReply(turn.question, "\n".join(turn.sent), now, turn.depth, reading_offer, voice_action)
 
     def continuation(self, message):
         with self._condition:
             previous = self._replied.get(turn_key(message))
-            if (previous is not None and previous.depth < FOLLOW_LIMIT
+            if (previous is not None and (previous.depth < FOLLOW_LIMIT or previous.reading_offer)
                     and 0 <= message.received_at - previous.sent_at <= FOLLOW_SECONDS):
                 return previous
 

@@ -307,6 +307,9 @@ class MemberStore:
     def delivery_guard(self, snapshot):
         return self.transcript.delivery_guard(snapshot)
 
+    def own_replies(self, snapshot):
+        return self.transcript.own_replies(snapshot)
+
     def record(self, message):
         # 落库与计入预算在同一把聊天记录锁内完成：发送守卫持有这把锁，
         # 守卫内发出的消息与随后到达的群友消息，在预算里的先后顺序与落库一致。

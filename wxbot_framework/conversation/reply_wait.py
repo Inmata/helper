@@ -68,12 +68,14 @@ class ReplyWait:
             key = turn_key(message)
             with budget.lock:
                 budget.closed = True
-                text = budget.ready
-                if budget.sent or budget.sending or text:
+                draft = budget.ready
+                if blocked or (draft is not None and not budget.draft_is_current(draft)):
+                    draft = None
+                if budget.sent or budget.sending or draft is not None:
                     self.outcomes.pop(key, None)
                 if budget.sent or budget.sending:
                     return
-            if not text:
+            if draft is None:
                 facts = {"结果": reason}
                 if retryable and not blocked:
                     facts["可用操作"] = "艾特机器人说「重试」，可重新处理原问题"
@@ -81,8 +83,8 @@ class ReplyWait:
                 self.outcomes.move_to_end(key)
                 if len(self.outcomes) > 64:
                     self.outcomes.popitem(last=False)
-        if text:
-            self._send(job, text)
+        if draft is not None:
+            self._send(job, draft)
         else:
             self.status.submit(message, ctx, facts, personality=personality, guard=self._guard(job),
                                question="" if blocked else None)
@@ -126,7 +128,7 @@ class ReplyWait:
         self.status.submit(message, ctx, facts, personality=job[4], guard=guard, question=question, at=addressed)
         return True
 
-    def _guard(self, job, *, stage=None):
+    def _guard(self, job, *, stage=None, revision=None):
         budget, _, ctx, snapshot, personality, _ = job
         @contextmanager
         def guard():
@@ -136,18 +138,27 @@ class ReplyWait:
                 if stage is not None:
                     with budget.lock:
                         if (budget.closed or budget.sent or budget.sending or budget.stage != stage or
+                                budget.revision != revision or
                                 budget.clock() >= budget.deadline):
                             raise SnapshotExpired("回复阶段已变化")
                 yield
         return guard
 
-    def _send(self, job, text):
-        _, message, ctx, _, _, _ = job
+    def _send(self, job, draft):
+        budget, message, ctx, _, _, _ = job
+
+        @contextmanager
+        def guard():
+            with self._guard(job)():
+                if not budget.draft_is_current(draft):
+                    raise SnapshotExpired("已有新条件，原草稿已失效")
+                yield
+
         try:
             from .utterance import QA, speak
             display = ctx.members.at_display_name(message.sender_id, message.chat_id) or "群友"
-            speak(text, tier=QA, byte_budget=1023 - len(("@" + display + "\u2005\n").encode("utf-8")),
-                  send_at=lambda part: ctx.reply_at(message, part, delivery_guard=self._guard(job)))
+            speak(draft.text, tier=QA, byte_budget=1023 - len(("@" + display + "\u2005\n").encode("utf-8")),
+                  send_at=lambda part: ctx.reply_at(message, part, delivery_guard=guard))
         except (SnapshotExpired, RuntimeError):
             ctx.logger.info("回复状态未提交")
 
@@ -164,12 +175,13 @@ class ReplyWait:
                     if notice:
                         budget.progress = True
                         stage = budget.stage
+                        revision = budget.revision
                 if expired:
                     self.finish(budget, "本轮等待超时，回答未完成")
                 elif notice:
                     _, message, ctx, _, personality, _ = job
                     self.status.submit(message, ctx, {"当前阶段": stage}, personality=personality,
-                                       guard=self._guard(job, stage=stage))
+                                       guard=self._guard(job, stage=stage, revision=revision))
 
     def close(self):
         self.stopped.set()

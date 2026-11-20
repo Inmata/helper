@@ -890,7 +890,7 @@ class FixedPersonalityTests(unittest.TestCase):
         provider = Mock(side_effect=["", status])
         plugin = self.setup_chat(provider)
         self.ctx._jev = Mock()
-        self.ctx._jev.noul.return_value = [0.98]
+        self.ctx._jev.noul.return_value = [0.98, 0.01]
         delivered = threading.Event()
         send = self.backend.send_at_text
 

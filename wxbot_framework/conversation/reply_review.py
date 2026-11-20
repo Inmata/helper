@@ -1,6 +1,9 @@
 """普通回复的依据检查：同一次 Jev 调用区分修订与必要的公开查证。"""
 from dataclasses import dataclass
+import re
 
+from ..integrations.jev import JevError
+from ..messaging.mentions import strip_at_labels
 from .tool_router import ACCEPTED, REJECTED, UNAVAILABLE
 
 
@@ -39,6 +42,74 @@ NEEDS_SEARCH = {
              "‘很多人觉得’或‘劝退不少人’等旁支说法可以删去，不值得为这些多余断言触发搜索。"
              "提供的工具资料已经支持本问时也无需补查。",
 }
+VOICE_CAPABILITY = "语音功能只会把文字朗读成语音，不能实际唱歌。"
+UNSUPPORTED_SELF = {
+    "instructions": "核对机器人对自己先前的话、动机、工具操作或语音动作的陈述，使用‘本轮确认事实’中的证据。",
+    "true": "拒绝承认已找到的匹配原话、把没找到说成从未说过、指责群友编造、用旧说法冒充事实、"
+            "捏造自己想捧场等动机或查过、查不了、已发送等动作。也包括声称唱过、跑调或承诺稍后唱歌，"
+            "把未确认或失败说成已完成，或在应先解释只能朗读时直接开始念内容。",
+    "false": "按原话和当时语境承认或更正，待核实的地方坦白不清楚。"
+             "如实表达能力限制、已确认的朗读或回执状态。群友接受后直接提供要朗读的内容也算。",
+}
+UNSUPPORTED_EXPLANATION = {
+    "instructions": "只判断这一件事：候选是否给机器人先前的说法或失误编了程序未确认的具体理由或动机？",
+    "true": "用‘当时就是想给你捧场’、‘看你心情不佳所以故意哄你’、‘我就是逗你才那样说’、"
+            "‘我纯是为了蹭饭才说的’、‘我查不到所以才这么答’等解释自己的旧回答，而程序证据没有给出这个原因。"
+            "原话里玩笑提到一件好处，不等于程序证实当时真实动机。即使是群聊调侃也判真。",
+    "false": "承认‘我那句说得太满了’、按原话修正判断，或坦白不知道原因。"
+             "指出原话出自确有记录的假设、玩笑或问答场景也可。",
+}
+CORRECTION_EVADED = {
+    "instructions": "只判断候选有没有正面回应对机器人上一句或历史原话的纠正。对照‘本轮确认事实’里的原话核对。",
+    "true": "找到能对应的原话，却没有明确承认那句是自己说的。原断言被质疑且依据不足，"
+            "只换一个说法、谈泛泛的可能性或反问群友，却没有收回或说明先前说得太确定。"
+            "没有可信原话却回避说明查不到。追问实际动作时，明明有程序记录却转移话题。",
+    "false": "明确承认自己说过对应的话；需要更正时承认前面哪点说错或说得太满，按证据更正，"
+             "当前无可靠事实就说明依据缺口。已有程序确认的动作则直接回答。可以口语化，无需使用固定句式。",
+}
+UNVERIFIED_REPLACEMENT = {
+    "instructions": "机器人撤回一条旧说法时，有没有用另一个同样缺少证据的具体判断来替换它？只看新判断。",
+    "true": "旧答说‘高手’，候选又说‘前十万哪算得上高手’或‘就是及格线’，但资料没有总人数、榜单分布或分段标准。"
+            "也包括纠错后换成其他没有证据的结论，即使表述简短或像调侃。",
+    "false": "说明原判断太确定，并承认现有资料不足；只讨论明确的假设或按给出的榜单事实作有限判断。"
+             "确认自己说过哪句话、复述原话或描述能确定的前提，也不属于无依据的新判断。",
+}
+
+
+def _speech_terms(text):
+    terms = set()
+    for word in re.findall(r"[a-z0-9]+|[\u3400-\u9fff]+", text.casefold()):
+        if word.isascii():
+            terms.add(word)
+        else:
+            terms.update(word[i:i + 2] for i in range(len(word) - 1))
+    return terms
+
+
+def correction_evidence(jev, question, rows, *, quote=None, quote_id=""):
+    """按明示引用和关键词取候选，语义上是否对应由 Jev 判断。"""
+    quoted = " ".join(strip_at_labels(quote["text"]).split()) if quote else ""
+    direct = next((row for row in rows if quote_id and row["context_message_id"] == quote_id), None)
+    if direct is None and quoted:
+        direct = next((row for row in rows if " ".join(strip_at_labels(row["text"]).split()) == quoted), None)
+    if direct is not None:
+        candidates = [direct]
+    else:
+        terms = _speech_terms(question + " " + quoted)
+        candidates = sorted(rows, key=lambda row: len(terms & _speech_terms(row["text"])), reverse=True)[:10]
+    evidence = [{"编号": row["id"], "时间": row["received_at"], "形式": "朗读语音" if row["context_kind"] == "voice" else "文字",
+                 "原话": strip_at_labels(row["text"])} for row in candidates]
+    if direct is not None or not evidence:
+        return evidence
+    checks = [{"instructions": f"编号 {row['编号']} 的机器人历史原话是否直接对应群友现在核对的那句话或语音？",
+               "true": "是同一说法、同一件事的相反说法，或直接对应其质疑的语音。保留玩笑等条件。",
+               "false": "只是同名、同主题、一般闲聊、无关状态，或无法确定指的是这条。"} for row in evidence]
+    try:
+        scores = jev.noul({"现在的纠正或追问": question, "引用线索": quoted, "候选原话": evidence}, checks, timeout=2)
+        ranked = sorted(zip(scores, evidence, strict=True), key=lambda pair: pair[0], reverse=True)
+    except (JevError, OSError, ValueError):
+        return []
+    return [row for score, row in ranked[:3] if score >= 0.7]
 
 
 @dataclass(frozen=True)
@@ -48,6 +119,7 @@ class ReplyReview:
     public: float | None = None
     search: float | None = None
     error: str | None = None
+    own: float | None = None
 
     @property
     def needs_search(self):
@@ -55,7 +127,7 @@ class ReplyReview:
 
 
 def reply_evidence(snapshot, context, *, quote=None, quote_is_bot=False, tools=(), room_game=None,
-                   turn_context=""):
+                   turn_context="", self_facts=None):
     rows = {}
     for row in (*snapshot.messages, *snapshot.group_messages, *snapshot.history):
         key = row.get("id", (row.get("speaker_name"), row["text"]))
@@ -66,7 +138,7 @@ def reply_evidence(snapshot, context, *, quote=None, quote_is_bot=False, tools=(
             "编号": row.get("speaker", snapshot.speaker_tag),
             "类型": row.get("context_kind", ""), "原文": row["text"],
         }
-    return {
+    evidence = {
         "当前发言者": {"编号": snapshot.speaker_tag, "名称": snapshot.speaker_name},
         "已确认成员称呼": snapshot.participants,
         "提问者档案": context.speaker_profile, "相关人物档案": context.people,
@@ -77,14 +149,23 @@ def reply_evidence(snapshot, context, *, quote=None, quote_is_bot=False, tools=(
         "本次引用": {"角色": "机器人" if quote_is_bot else "群友", **quote} if quote else None,
         "本轮接话": turn_context, "工具资料": list(tools), "接龙进度": room_game,
     }
+    if self_facts:
+        evidence["本轮确认事实"] = self_facts
+    return evidence
 
 
 def review_reply(jev, question, answer, evidence):
     if jev is None:
         return ReplyReview(UNAVAILABLE, error="not-configured")
+    checks = [UNSUPPORTED_LOCAL, UNSUPPORTED_PUBLIC, NEEDS_SEARCH]
+    facts = evidence.get("本轮确认事实") or {}
+    if facts:
+        checks.append(UNSUPPORTED_SELF)
+    if "原话核对" in facts:
+        checks.extend((UNSUPPORTED_EXPLANATION, CORRECTION_EVADED, UNVERIFIED_REPLACEMENT))
     try:
-        local, public, search = jev.noul({"提问": question, "拟发送的回答": answer, "依据": evidence},
-                                        [UNSUPPORTED_LOCAL, UNSUPPORTED_PUBLIC, NEEDS_SEARCH], timeout=2)
+        local, public, search, *own = jev.noul({"提问": question, "拟发送的回答": answer, "依据": evidence}, checks, timeout=2)
     except Exception as error:
         return ReplyReview(UNAVAILABLE, error=type(error).__name__)
-    return ReplyReview(REJECTED if max(local, public) >= 0.7 else ACCEPTED, local, public, search)
+    return ReplyReview(REJECTED if max(local, public, *own) >= 0.7 else ACCEPTED,
+                       local, public, search, own=max(own) if own else None)

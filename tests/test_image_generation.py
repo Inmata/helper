@@ -92,7 +92,7 @@ class Backend:
 class Jev:
     def noul(self, state, questions, **options):
         if "拟发送回复" in state:
-            return [0.99]
+            return [0.99, 0.01]
         return [0.99, 0.01]
 
 

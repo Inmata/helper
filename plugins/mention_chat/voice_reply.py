@@ -43,7 +43,8 @@ VOICE_PROMPT = """
 朗读给定台词按转述处理，沿用熟人群的玩笑尺度：轻度互损、粗口、谐音梗和略低俗的玩笑可以照念，不因带人名或谐音像脏话就拒读，不主动把普通词扩展成色情、诅咒或真实攻击。先看本轮实际要念的内容，历史里拒读过别的句子也不延续成一律禁念的规则；可以念时直接给【语音】和原话，不加道德评价或拒读说明。
 明确要求打字或别发语音时加【文字】。单独的「说说」「说一句」、讨论语音功能、引用语音问内容，都照常输出正文，不加标记。历史里别人的请求不算这轮的要求。
 自己生成的文字正文带小表情或 emoji 时加【文字】，保留文字里的表情；生成语音正文时不主动添加表情，指定原话仍照原话处理。
-标记只供程序使用，是上面正文格式的唯一例外。"""
+标记只供程序使用，是上面正文格式的唯一例外。
+语音由程序把文字读出来。只能如实说朗读，别声称自己唱过、唱完或跑调。"""
 
 FIXED_VOICE_PROMPT = """
 当前发言者已开启固定语音回复，本轮正文会用语音念出。只写要念的内容，适合直接听，
@@ -215,19 +216,26 @@ class VoiceReply:
         self._next[room] = now + _INTERVAL_SECONDS
         return True
 
-    def deliver(self, message, ctx, reply, *, voice, guard, split=False, dispatch=None, on_sent=None, fixed=False):
+    def deliver(self, message, ctx, reply, *, voice, guard, split=False, dispatch=None, on_sent=None, on_outcome=None,
+                fixed=False):
         """交给慢队列逐段发送；合成失败返回未发送正文，完成或回执不明返回 None。"""
         yield
         member = (message.chat_id, message.sender_id)
         if fixed and monotonic() < self._fixed_next.get(member, 0):
             ctx.logger.info("固定语音间隔未到，改发文字：room=%s sender=%s", *member)
+            if on_outcome is not None:
+                on_outcome("interval")
             return reply
         parts = voice_parts(reply) if split else [reply]
         for index, part in enumerate(parts):
             submitted = self.send(message, ctx, part, voice=voice, guard=guard, dispatch=dispatch)
             if submitted is None:
+                if on_outcome is not None:
+                    on_outcome("failed")
                 return " ".join(parts[index:])
             if not submitted:
+                if on_outcome is not None:
+                    on_outcome("unknown")
                 return None
             if fixed:
                 self._fixed_next[member] = monotonic() + _FIXED_INTERVAL_SECONDS

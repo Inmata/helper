@@ -157,6 +157,8 @@ def _render(payload):
     lines.append(f"【当前提问】{payload['name']}：{payload['current'] or '（只艾特了机器人，没有正文）'}")
     if payload.get("turn_context"):
         lines.append("【本轮接话】\n" + payload["turn_context"])
+    if payload.get("self_facts"):
+        lines.append("【程序确认的聊天证据与动作】\n" + json.dumps(payload["self_facts"], ensure_ascii=False))
     if payload.get("revision"):
         lines.append("【待修订候选（包含无依据说法，不作为事实）】\n" + payload["revision"])
     quote = payload.get("quote")
@@ -190,7 +192,6 @@ def _render(payload):
         lines.append(f"【当前发言者档案】{_profile_text(profile)}")
     people = payload.get("people") or []
     if payload.get("相关成员原话"):
-        import json
         lines.append("【相关成员原话】\n" + json.dumps(payload["相关成员原话"], ensure_ascii=False))
     if people:
         lines.append("【相关人物档案】")
@@ -247,7 +248,7 @@ class Dialogue:
 
     def reply(self, snapshot, *, knowledge=(), style=None, speaker_profile=None, people=(), room_game=None,
               detail=False, examples=(), system=None, quote=None, avoid=None, question=None, tool_results=(), turn_context="",
-              revision=None, person_messages=()):
+              revision=None, person_messages=(), self_facts=None):
         """``quote`` 为本次提问引用的消息 ``{"name", "text"}``；``avoid`` 为刚说过、这次要换个角度的那句。
 
         ``question`` 是清理过手打 @ 标签的提问；缺省用快照里的原文。原文仍作为上下文锚点。
@@ -285,6 +286,15 @@ class Dialogue:
             payload["tools"] = [dict(item) for item in tool_results]
         if turn_context:
             payload["turn_context"] = turn_context
+        if self_facts:
+            payload["self_facts"] = self_facts
+            system = (system or SYSTEM) + (
+                "\n按程序确认的聊天证据与动作自然回答。核对自己的历史时，先直接回答有没有说过，找到匹配原话就明说是自己讲过的。"
+                "被质疑前一轮下结论太快时，先说明那句说得太满，再用现有证据更正；查不到或不能确认就直说。"
+                "当前缺少查证结果时，到说明依据不足为止。没有可比的榜单或完整条件时，别用反方向的结论替换旧结论。"
+                "只问有没有说过时，简短承认或说明没找到就够了。保留当时的条件和玩笑语境，别解释自己当时为什么说。"
+                "别为自己编动机、查证经过或故障原因，"
+                "别把计划、想做的动作或群友的猜测说成已发生。语音是朗读，按程序给出的处理要求回复。")
         if revision:
             payload["revision"] = revision
         options = {"history": self._history(snapshot, quote)}

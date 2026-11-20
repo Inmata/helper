@@ -4,18 +4,22 @@ import json
 import threading
 import time
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
-from unittest.mock import Mock
+from datetime import timedelta
+from unittest.mock import Mock, patch
 
 import test_chat_summary as daily
 from wxbot_framework.conversation.person_context import person_context
 from wxbot_framework.conversation.reply_wait import ReplyWait
 from wxbot_framework.conversation.status_replies import StatusReplies
+from wxbot_framework.conversation.turns import CORRECTION_INTENT
 from wxbot_framework.conversation.mention_tools import _within
-from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget, ReplyExpired, remaining
+from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget, ReplyDraft, ReplyExpired, remaining
 from wxbot_framework.memory.knowledge import KnowledgeStore
 from wxbot_framework.recent_images import RecentImages
 from plugins.mention_chat.voice_reply import VoiceReply
+from plugins.mention_chat import Plugin as MentionPlugin
 
 
 class ReplyImprovements(unittest.TestCase):
@@ -80,7 +84,7 @@ class ReplyImprovements(unittest.TestCase):
         ctx.personality.return_value = self.store.personality(daily.ROOM)
         ctx.response_guard = lambda snapshot, persona: self.store.delivery_guard(snapshot)
         ctx.llm_for.return_value.complete_text.return_value = "这回没弄完，再喊我一声试试。"
-        ctx.jev.noul.return_value = [0.98]
+        ctx.jev.noul.return_value = [0.98, 0.01]
         sent = threading.Event()
         def reply(*args, **kwargs):
             with kwargs['delivery_guard']():
@@ -105,8 +109,154 @@ class ReplyImprovements(unittest.TestCase):
             wait.close()
             status.close()
 
+    def test_self_correction_reads_own_scoped_records_and_revises_the_denial(self):
+        original_time = self.now
+        self.now -= timedelta(days=15)
+        self.store.record_bot_reply(daily.ROOM, "太早：我说过要选小林")
+        self.now += timedelta(days=8)
+        self.store.record_bot_reply(daily.ROOM, "清空前：我说过要选小林")
+        self.store.reset_context(daily.ROOM)
+        self.now += timedelta(days=1)
+        original = "非让我选的话，那我选小林，嫁过去就能蹭饭。"
+        self.store.record_bot_reply(daily.ROOM, original, voice_id="18123")
+        self.store.record_bot_reply(daily.OTHER_ROOM, "别群：我说过要选小林")
+        self.new_store(account="wxid_second_bot").record_bot_reply(daily.ROOM, "别账号：我说过要选小林")
+        self.store.record(self.message("群友复述：我说过要选小林", sequence=1))
+        self.now = original_time
+        message = self.message("@机器人\u2005你之前说结婚就选小林", sequence=2,
+                               data={"is_at_self": True, "at_members": (daily.ROBOT,)})
+        self.store.record(message)
+        self.store.record_bot_reply(daily.ROOM, "未来：我说过要选小林")
+        self.assertEqual([row["text"] for row in self.store.own_replies(self.store.conversation_snapshot(message))], [original])
+
+        plugin = MentionPlugin()
+        plugin.members, plugin.room_state = self.store, self.store.room_state
+        self.backend.send_at_text = lambda room, text, ids: self.backend.send_text(room, text)
+        denied = "我哪说过这种话，你别瞎编。"
+        corrected = "我那会儿确实说过选小林，刚才否认说得太满了。"
+        provider = self.ctx._llm.complete_text = Mock(side_effect=[denied, corrected])
+        self.ctx._jev = Mock()
+        verified = []
+
+        def judge(state, questions, **kw):
+            if "拟发送的回答" in state:
+                verified.append(state["依据"]["本轮确认事实"])
+                return [0.01, 0.01, 0.01, 0.99 if state["拟发送的回答"] == denied else 0.01, 0.01, 0.01, 0.01]
+            if "候选原话" in state:
+                self.assertEqual([row["原话"] for row in state["候选原话"]], [original])
+                return [0.99]
+            return [0.99 if q == CORRECTION_INTENT else 0.01 for q in questions]
+
+        self.ctx._jev.noul.side_effect = judge
+        plugin.on_message(message, self.ctx)
+        self.assertIn(original, provider.call_args.args[1])
+        self.assertEqual(len(verified), 2)
+        self.assertEqual(verified[0], verified[1])
+        self.assertEqual(len(self.backend.sent), 1)
+        self.assertTrue(self.backend.sent[0][1].endswith(corrected))
+        self.store.reset_context(daily.ROOM)
+
+        missing = self.message("@机器人\u2005你之前说过要选小林", sequence=3,
+                               data={**message.data, "quote": {"fromusr": daily.ROBOT, "text": original,
+                                                               "svrid": "18123", "ref_type": "34"}})
+        self.store.record(missing)
+        provider.side_effect = ["这段记录里我没找着那句，能引用一下吗？"]
+        with patch.object(self.store, "context_text", side_effect=AssertionError("语音引用必须先经过纠错范围过滤")):
+            plugin.on_message(missing, self.ctx)
+        self.assertNotIn(original, provider.call_args.args[1])
+        self.assertEqual(verified[-1]["机器人原话"], [])
+        self.assertTrue(self.backend.sent[-1][1].endswith("这段记录里我没找着那句，能引用一下吗？"))
+
+    def test_own_reply_lookback_uses_the_message_time_without_context_reset(self):
+        self.store.record_bot_reply(daily.ROOM, "早于窗口")
+        self.now += timedelta(seconds=1)
+        self.store.record_bot_reply(daily.ROOM, "恰好在窗口内")
+        self.now += timedelta(days=14)
+        current = self.message("你以前是不是说过", sequence=4)
+        self.store.record(current)
+        self.now += timedelta(days=1)
+        snapshot = self.store.conversation_snapshot(current)
+        self.assertEqual([r["text"] for r in self.store.own_replies(snapshot)], ["恰好在窗口内"])
+
+    def test_old_status_claims_are_rejected_even_when_general_check_passes(self):
+        for candidate, facts in (
+            ("八成靠门票钱回血。", {"当前阶段": "组织回答"}),
+            ("刚才没查准。", {"结果": "本轮没有可发送的答复，具体原因未确认"}),
+            ("刚才卡壳没唱出来，重试我给你唱。", {"结果": "模型连接失败或超时，没有拿到回答"}),
+        ):
+            with self.subTest(candidate=candidate):
+                message = self.message("测试状态", sequence=1)
+                ctx = Mock()
+                provider = ctx.llm_for.return_value.complete_text
+                correct = "我这边还没拿到结果。"
+                provider.side_effect = [candidate, correct]
+                checked = []
+
+                def judge(state, questions, **kwargs):
+                    checked.append(state["拟发送回复"])
+                    if checked[-1] == correct:
+                        return [0.98, 0.01]
+                    if "唱" in candidate:
+                        return [0.74, 0.98]
+                    return [0.24, 0.9]
+
+                ctx.jev.noul.side_effect = judge
+                delivered = threading.Event()
+                ctx.reply_at.side_effect = lambda *args, **kw: delivered.set()
+                status = StatusReplies(ctx.logger)
+                try:
+                    status.submit(message, ctx, facts, personality=self.store.personality(daily.ROOM), guard=nullcontext)
+                    self.assertTrue(delivered.wait(2))
+                    self.assertEqual(checked, [candidate, correct])
+                    self.assertEqual(ctx.reply_at.call_count, 1)
+                    self.assertEqual(ctx.reply_at.call_args.args[1], correct)
+                finally:
+                    status.close()
+
+    def test_rank_correction_rejects_the_invented_motive(self):
+        original = "1600 分妥妥的高手分段啦！"
+        self.store.record_bot_reply(daily.ROOM, original)
+        current = self.message("全球前十万就是高手是吧", sequence=7,
+                               data={"quote": {"fromusr": daily.ROBOT, "ref_type": "1", "text": original}})
+        self.store.record(current)
+        self.backend.send_at_text = lambda room, text, ids: self.backend.send_text(room, text)
+        plugin = MentionPlugin()
+        plugin.members, plugin.room_state = self.store, self.store.room_state
+        excuse = "被你抓包了，我刚才是想给你捧场。"
+        correction = "我刚才说得太满了，没核实榜单，光凭 1600 分我判断不了水平。"
+        provider = self.ctx._llm.complete_text = Mock(side_effect=[excuse, correction])
+        self.ctx._jev = Mock()
+
+        def judge(state, questions, **kw):
+            if "拟发送的回答" in state:
+                self.assertEqual(len(questions), 7)
+                self.assertEqual(state["依据"]["本轮确认事实"]["机器人原话"][0]["原话"], original)
+                return [0.02, 0.02, 0.02, 0.4, 0.99 if state["拟发送的回答"] == excuse else 0.01, 0.01, 0.01]
+            return [0.99 if q == CORRECTION_INTENT else 0.01 for q in questions]
+
+        self.ctx._jev.noul.side_effect = judge
+        plugin.on_message(current, self.ctx)
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(len(self.backend.sent), 1)
+        self.assertTrue(self.backend.sent[0][1].endswith(correction))
+
 
 class ReplyBudgetTests(unittest.TestCase):
+    def test_deadline_draft_checks_pending_additions_and_revision(self):
+        budget = ReplyBudget(time.monotonic())
+        pending = threading.Event()
+        draft = ReplyDraft(budget.revision, "当前草稿", pending.is_set)
+        budget.ready = draft
+        self.assertTrue(budget.draft_is_current(draft))
+        pending.set()
+        self.assertFalse(budget.draft_is_current(draft))
+        pending.clear()
+        budget.revise()
+        self.assertIsNone(budget.ready)
+        self.assertFalse(budget.draft_is_current(draft))
+        with self.assertRaises(ReplyExpired), budget.delivery(draft.revision):
+            pass
+
     def test_nested_tool_thread_inherits_same_budget(self):
         now = time.monotonic()
         budget = ReplyBudget(now, 1)

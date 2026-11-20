@@ -21,8 +21,9 @@ from wxbot_framework.conversation.personality import PersonalityState
 from wxbot_framework.conversation.reply_wait import ReplyWait
 from wxbot_framework.conversation.room_state import RoomStateStore
 from wxbot_framework.conversation.status_replies import StatusReplies
-from wxbot_framework.conversation.turns import ConversationTurns
-from wxbot_framework.integrations.llm import LLMClient, LLMError
+from wxbot_framework.conversation.turns import READ_CONSENT, SING_INTENT, ConversationTurns
+from wxbot_framework.integrations.llm import LLMClient, LLMConnectionError, LLMError
+from wxbot_framework.integrations.reply_budget import ReplyExpired
 from wxbot_framework.messaging.mentions import parse_quote
 from wxbot_framework.sdk import Message
 
@@ -548,7 +549,7 @@ class MentionDeliveryTests(unittest.TestCase):
                 self.assertIn("拦截", state["机器人刚才的答复"])
                 return [0.98]
             verified.append(state)
-            return [0.02 if state["拟发送回复"] == denial else 0.99]
+            return [0.02 if state["拟发送回复"] == denial else 0.99, 0.01]
 
         ctx.jev.noul.side_effect = judge
 
@@ -593,7 +594,7 @@ class MentionDeliveryTests(unittest.TestCase):
         turns = self.members.turns = ConversationTurns()
         plugin, ctx = self.build(["南门集合", "改到北门集合", "晚上八点"])
         ctx.jev = Mock()
-        ctx.jev.noul.return_value = [0.9]
+        ctx.jev.noul.side_effect = lambda state, questions, **kw: [0.01 if "当前发言" in state else 0.9] * len(questions)
         first = replace(mention("在哪集合？", time.monotonic()), dispatch_sequence=1)
         extra = replace(first, text="改成北门。", data={}, dispatch_sequence=2)
         turns.observe(first)
@@ -610,6 +611,68 @@ class MentionDeliveryTests(unittest.TestCase):
         turns.observe(follow)
         plugin.on_message(follow, ctx)
         self.assertEqual(ctx.sent, [("reply_at", "改到北门集合"), ("reply", "晚上八点")])
+
+    def test_replan_never_sends_old_draft_when_new_answer_fails(self):
+        old_reply = "火系自己放火招有本系加成，一共三倍。"
+        new_reply = "水系使用火系招式没有本系加成。"
+        for failure in (None, LLMConnectionError("连接失败"), LLMError("依据未核对"), ReplyExpired("超时")):
+            with self.subTest(failure=failure):
+                turns = self.members.turns = ConversationTurns()
+                plugin, ctx = self.build(old_reply)
+                status = Mock()
+                plugin._wait = ReplyWait(status)
+                ctx.jev = Mock()
+                ctx.jev.noul.side_effect = lambda state, questions, **kw: [0.01 if "当前发言" in state else 0.9] * len(questions)
+                first = replace(mention("火系用火招打草系是两倍吗"), dispatch_sequence=1)
+                turns.observe(first)
+                generate = Mock(side_effect=[old_reply, failure or new_reply])
+                ctx.client.complete_text = generate
+
+                def add_before_send(_):
+                    ctx.before_guard = None
+                    turns.observe(replace(first, text="打错了，是水系。", data={}, dispatch_sequence=2))
+
+                ctx.before_guard = add_before_send
+                try:
+                    plugin.on_message(first, ctx)
+                    self.assertEqual(generate.call_count, 2)
+                    self.assertIn("水系", generate.call_args.args[1])
+                    self.assertEqual(ctx.sent, [] if failure else [("reply_at", new_reply)])
+                    self.assertEqual(status.submit.call_count, int(failure is not None))
+                finally:
+                    plugin._wait.close()
+
+    def test_singing_offer_is_text_and_only_consent_starts_reading(self):
+        turns = self.members.turns = ConversationTurns()
+        explanation = "唱我不会，不过能念给你听，你想听朗读吗？"
+        reading = "月光从窗边落下来。"
+        plugin, ctx = self.build([explanation, reading])
+        ctx.capabilities = {"voice.send"}
+        ctx.jev = Mock()
+
+        def judge(state, questions, **kw):
+            if "前一句或锚点" in state:
+                return [0.99]
+            return [0.99 if question in (SING_INTENT, READ_CONSENT) else 0.01 for question in questions]
+
+        ctx.jev.noul.side_effect = judge
+        first = replace(mention("给我唱一首月光"), dispatch_sequence=1)
+        ok = replace(first, text="好，那就念吧", data={}, dispatch_sequence=2)
+        with patch.object(plugin.voice_reply, "send", return_value=True) as voice:
+            turns.observe(first)
+            plugin.on_message(first, ctx)
+            self.assertEqual(ctx.sent, [("reply_at", explanation)])
+            voice.assert_not_called()
+            self.assertIn("还未朗读", ctx.last_user)
+            ok = replace(ok, received_at=time.monotonic())
+            turns.observe(ok)
+            plugin.on_message(ok, ctx)
+            voice.assert_called_once()
+            self.assertEqual(voice.call_args.args[2], reading)
+        self.assertIn("获准朗读的原请求", ctx.last_user)
+        follow = replace(ok, received_at=time.monotonic(), dispatch_sequence=3)
+        self.assertEqual(turns.continuation(follow).voice_action, "已提交朗读语音")
+        self.assertFalse(turns.continuation(follow).reading_offer)
 
     def test_interjection_after_first_send_drops_the_rest_without_error(self):
         plugin, ctx = self.build("哈哈！真的假的？我不信。")

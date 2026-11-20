@@ -1,6 +1,8 @@
 """一轮回复的截止时间与调用额度；限时线程显式传递同一上下文。"""
 from contextvars import ContextVar
 from contextlib import contextmanager
+from collections.abc import Callable
+from dataclasses import dataclass
 import threading
 import time
 
@@ -9,6 +11,13 @@ CURRENT = ContextVar("reply_budget", default=None)
 
 class ReplyExpired(TimeoutError):
     pass
+
+
+@dataclass(frozen=True)
+class ReplyDraft:
+    revision: int
+    text: str
+    needs_review: Callable[[], bool] | None
 
 
 class ReplyBudget:
@@ -22,8 +31,23 @@ class ReplyBudget:
         self.sending = False
         self.sent = False
         self.progress = False
-        self.ready = ""
+        self.revision = 0
+        self.reviewing_additions = False
+        self.ready = None
         self.lock = threading.RLock()
+
+    def revise(self):
+        with self.lock:
+            if self.closed:
+                raise ReplyExpired("本轮回复已结束")
+            self.revision += 1
+            self.ready = None
+            self.stage = "理解新条件"
+
+    def draft_is_current(self, draft):
+        with self.lock:
+            return (draft.revision == self.revision and not self.reviewing_additions
+                    and not (draft.needs_review is not None and draft.needs_review()))
 
     def remaining(self, cap, *, kind=None):
         with self.lock:
@@ -39,9 +63,10 @@ class ReplyBudget:
             return min(cap, remaining)
 
     @contextmanager
-    def delivery(self):
+    def delivery(self, revision=None):
         with self.lock:
-            if self.closed or self.clock() >= self.deadline:
+            if (self.closed or self.clock() >= self.deadline or
+                    (revision is not None and revision != self.revision)):
                 raise ReplyExpired("本轮回复已结束")
             self.sending = True
         try:

@@ -355,6 +355,20 @@ class ConversationHistory:
             result.append(item)
         return result
 
+    def own_replies(self, snapshot):
+        """纠错证据只取当前群未清空、提问前 14 天的机器人发言。"""
+        account, room = self.members.account, snapshot.room
+        with self.delivery_guard(snapshot):
+            db = self.members.connection()
+            stamp, = db.execute("SELECT received_at FROM messages WHERE id=?", (snapshot.anchor_id,)).fetchone()
+            since = iso_utc(parse_utc(stamp) - timedelta(days=14))
+            rows = db.execute("""SELECT id, received_at, text, context_kind, context_message_id FROM messages
+                WHERE account=? AND room=? AND sender_id=? AND bot_generated=1 AND id<?
+                AND id>(SELECT context_floor FROM chat_buffers WHERE account=? AND room=?)
+                AND replace(received_at,'+00:00','Z')>=? ORDER BY id DESC""",
+                (account, room, account, snapshot.anchor_id, account, room, since))
+            return [dict(row) for row in rows]
+
     def recent_snapshot(self, room, *, name=None, limit=200, today=False, before_id=None, context=False):
         members = self.members
         with self._lock:

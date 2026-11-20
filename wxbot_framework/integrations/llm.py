@@ -34,6 +34,14 @@ class LLMAuthError(LLMError):
     """密钥、余额或模型配置问题：重试没有意义，直接失败。"""
 
 
+class LLMContentBlocked(LLMError):
+    """上游内容过滤已终止本轮生成。"""
+
+
+class LLMConnectionError(LLMError):
+    """请求没有完成，可能是连接失败或超时。"""
+
+
 class LLMFormatError(LLMError):
     """模型输出不符合约定结构：可以补救一次。"""
 
@@ -125,7 +133,7 @@ class LLMClient:
                 raise LLMAuthError(f"大模型接口 HTTP {error.code}；请核对密钥与模型配置") from None
             raise LLMError(f"大模型接口 HTTP {error.code}；请核对密钥、余额和模型配置") from None
         except (URLError, TimeoutError, OSError):
-            raise LLMError("大模型连接失败或超时，请稍后再试") from None
+            raise LLMConnectionError("大模型连接失败或超时，请稍后再试") from None
         if len(raw) > 1024 * 1024:
             raise LLMError("大模型响应过大")
         try:
@@ -139,14 +147,15 @@ class LLMClient:
                 raise LLMError("大模型响应被截断，请增加 max_tokens")
             if finish_reason == "content_filter":
                 # 上游过滤可能留下非空残文，不能当正常回复发送，也不自动重试或续写。
-                raise LLMError("大模型响应被内容过滤中断，请调整问题后重试")
+                raise LLMContentBlocked("大模型响应被内容过滤中断")
             content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError, AttributeError):
             raise LLMFormatError("大模型响应缺少必要字段，请重试") from None
         if not isinstance(content, str) or not content.strip():
             raise LLMFormatError("大模型返回了空结果")
-        if "Your previous response was blocked by content safety filters" in content:
-            raise LLMError("上游返回内容过滤控制信息，未作为正文发送")
+        if ("Your previous response was blocked by content safety filters" in content or
+                content.lstrip().startswith("This request was blocked by Gemini's filters.")):
+            raise LLMContentBlocked("上游返回内容过滤控制信息，未作为正文发送")
         return content
 
     def complete_json(self, system, user, *, history=(), max_tokens=None):
@@ -172,6 +181,8 @@ class LLMClient:
             try:
                 repaired = self._post(repair, budget, json_mode=True, timeout=remaining,
                                       reasoning_effort=self.reasoning_effort)
+            except LLMContentBlocked:
+                raise
             except LLMError:
                 pass
             else:

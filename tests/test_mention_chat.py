@@ -1,6 +1,8 @@
 """验证接龙进行中人格对话的边界：答案交给接龙插件，进度按真实状态注入。"""
+import io
 import json
 import logging
+import threading
 import time
 import unittest
 from contextlib import contextmanager, nullcontext
@@ -16,9 +18,11 @@ from wxbot_framework.commands import help_text
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
 from wxbot_framework.conversation.members import ConversationSnapshot, MemberStore, SnapshotExpired
 from wxbot_framework.conversation.personality import PersonalityState
+from wxbot_framework.conversation.reply_wait import ReplyWait
 from wxbot_framework.conversation.room_state import RoomStateStore
+from wxbot_framework.conversation.status_replies import StatusReplies
 from wxbot_framework.conversation.turns import ConversationTurns
-from wxbot_framework.integrations.llm import LLMError
+from wxbot_framework.integrations.llm import LLMClient, LLMError
 from wxbot_framework.messaging.mentions import parse_quote
 from wxbot_framework.sdk import Message
 
@@ -517,6 +521,73 @@ class MentionDeliveryTests(unittest.TestCase):
         self.assertEqual(ctx.sent, [("reply_at", "行吧"), ("reply", "那我先睡了")])
         self.assertEqual(ctx.guard_calls, 2)  # 每条单独过守卫
         self.sleep.assert_not_called()
+
+    def test_blocked_answer_and_followup_send_only_grounded_text_with_fixed_voice(self):
+        turns = self.members.turns = ConversationTurns()
+        plugin, ctx = self.build("")
+        ctx.capabilities = {"voice.send"}
+        plugin.room_state = Mock(spec=RoomStateStore)
+        plugin.room_state.get.side_effect = lambda room, feature: (
+            {"wxid_player": True} if feature == "mention_voice_reply" else None)
+        ctx.client = LLMClient({"api_key": "dummy-test-key", "model": "fixture"})
+        plugin._status = StatusReplies(ctx.logger)
+        plugin._wait = ReplyWait(plugin._status)
+        self.addCleanup(plugin._status.close)
+        self.addCleanup(plugin._wait.close)
+        notice = "刚才那条触发了内容安全过滤，我这边答不了。"
+        explanation = "是刚才的请求被安全过滤挡住了，所以没答下去。"
+        retry_notice = "那一条已经被内容过滤拦住，我没有再发起请求。"
+        denial = "哪有违规呀，我还在处理呢。"
+        candidates = iter((denial, notice, explanation, retry_notice))
+        requests = []
+        verified = []
+        ctx.jev = Mock()
+
+        def judge(state, questions, **options):
+            if "拟发送回复" not in state:
+                self.assertIn("拦截", state["机器人刚才的答复"])
+                return [0.98]
+            verified.append(state)
+            return [0.02 if state["拟发送回复"] == denial else 0.99]
+
+        ctx.jev.noul.side_effect = judge
+
+        def http(request, timeout):
+            user = json.loads(request.data)["messages"][-1]["content"]
+            if user.startswith('{"群友原话"'):
+                requests.append(json.loads(user))
+                content = next(candidates)
+            else:
+                requests.append(None)
+                content = "This request was blocked by Gemini's filters. Please try rephrasing your prompt."
+            return io.BytesIO(json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": content}}]}).encode())
+
+        delivered = threading.Semaphore(0)
+        send = ctx._send
+
+        def notify_sent(*args):
+            result = send(*args)
+            delivered.release()
+            return result
+
+        ctx._send = notify_sent
+        first = replace(mention("原始测试请求"), dispatch_sequence=1)
+        follow = replace(first, text="为什么会这样？", data={}, dispatch_sequence=2)
+        retry = replace(mention("重试"), dispatch_sequence=3)
+        with (patch("wxbot_framework.integrations.llm.urlopen", side_effect=http),
+              patch.object(plugin.voice_reply, "deliver") as voice):
+            for message in (first, follow, retry):
+                message = replace(message, received_at=time.monotonic())
+                turns.observe(message)
+                plugin.on_message(message, ctx)
+                self.assertTrue(delivered.acquire(timeout=2))
+            voice.assert_not_called()
+        self.assertEqual(ctx.sent, [("reply_at", notice), ("reply", explanation), ("reply_at", retry_notice)])
+        self.assertIsNone(requests[0])
+        self.assertEqual([p["群友原话"] for p in requests[1:]], ["", "", "为什么会这样？", "重试"])
+        self.assertTrue(all("拦截" in p["实际状态"]["结果"] and "可用操作" not in p["实际状态"]
+                            for p in requests[1:]))
+        self.assertEqual([p["拟发送回复"] for p in verified], [denial, notice, explanation, retry_notice])
 
     def test_addition_during_delivery_replaces_old_answer_and_opens_followup(self):
         turns = self.members.turns = ConversationTurns()

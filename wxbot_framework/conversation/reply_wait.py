@@ -1,9 +1,12 @@
 """已受理回复的进度和一次收口；资源归艾特插件。"""
+from collections import OrderedDict
 from contextlib import contextmanager
 import threading
+import time
 
 from ..integrations.reply_budget import CURRENT, ReplyBudget, ReplyExpired
 from .members import SnapshotExpired
+from .turns import CLARIFICATION_SECONDS, FOLLOW_SECONDS, judge_turn, turn_key
 
 
 class ReplyWait:
@@ -12,6 +15,7 @@ class ReplyWait:
         self.stopped = threading.Event()
         self.lock = threading.Lock()
         self.jobs = {}
+        self.outcomes = OrderedDict()
         self.thread = threading.Thread(target=self._run, name="MentionChat.wait", daemon=True)
         self.thread.start()
 
@@ -49,28 +53,78 @@ class ReplyWait:
         finally:
             turn.close()
             with self.lock:
-                self.jobs.pop(id(budget), None)
-            with budget.lock:
-                budget.closed = True
+                job = self.jobs.pop(id(budget), None)
+                with budget.lock:
+                    budget.closed = True
+                    if job is not None and budget.sent:
+                        self.outcomes.pop(turn_key(job[1]), None)
 
-    def finish(self, budget, reason):
+    def finish(self, budget, reason, *, blocked=False):
         with self.lock:
             job = self.jobs.pop(id(budget), None)
-        if job is None:
-            return
-        with budget.lock:
-            budget.closed = True
-            if budget.sent or budget.sending:
+            if job is None:
                 return
-            text = budget.ready
+            _, message, ctx, _, personality, retryable = job
+            key = turn_key(message)
+            with budget.lock:
+                budget.closed = True
+                text = budget.ready
+                if budget.sent or budget.sending or text:
+                    self.outcomes.pop(key, None)
+                if budget.sent or budget.sending:
+                    return
+            if not text:
+                facts = {"结果": reason}
+                if retryable and not blocked:
+                    facts["可用操作"] = "艾特机器人说「重试」，可重新处理原问题"
+                self.outcomes[key] = (job, facts, time.monotonic(), blocked)
+                self.outcomes.move_to_end(key)
+                if len(self.outcomes) > 64:
+                    self.outcomes.popitem(last=False)
         if text:
             self._send(job, text)
         else:
-            budget, message, ctx, snapshot, personality, retryable = job
-            facts = {"结果": reason}
-            if retryable:
-                facts["可用操作"] = "艾特机器人说「重试」，可重新处理原问题"
-            self.status.submit(message, ctx, facts, personality=personality, guard=self._guard(job))
+            self.status.submit(message, ctx, facts, personality=personality, guard=self._guard(job),
+                               question="" if blocked else None)
+
+    def followup(self, message, ctx, question, *, addressed):
+        key = turn_key(message)
+        with self.lock:
+            outcome = self.outcomes.get(key)
+        if outcome is None:
+            return False
+        job, facts, ended, blocked = outcome
+        elapsed = message.received_at - job[1].received_at
+        if elapsed <= 0:
+            return False
+        retry = addressed and question in ("重试", "再试一次")
+        blocked_retry = retry and blocked and elapsed <= 300
+        if retry and not blocked_retry:
+            return False
+        window = CLARIFICATION_SECONDS if addressed else FOLLOW_SECONDS
+        if not blocked_retry and (message.received_at - ended > window or not question):
+            return False
+
+        @contextmanager
+        def guard():
+            with self._guard(job)():
+                with self.lock:
+                    if self.outcomes.get(key) is not outcome:
+                        raise SnapshotExpired("上一轮处理结果已变化")
+                yield
+
+        try:
+            with guard():
+                pass
+            if not blocked_retry and not judge_turn(ctx.jev, "status", "上一轮请求处理结果",
+                                                    previous=facts["结果"], new=question):
+                return False
+        except (SnapshotExpired, ValueError):
+            return False
+        if blocked_retry:
+            facts = {**facts, "本次操作": "没有重新提交已拦截的请求"}
+        self.status.submit(message, ctx, facts, personality=job[4], guard=guard, question=question, at=addressed)
+        return True
 
     def _guard(self, job, *, stage=None):
         budget, _, ctx, snapshot, personality, _ = job
@@ -123,4 +177,5 @@ class ReplyWait:
             for job in self.jobs.values():
                 job[0].closed = True
             self.jobs.clear()
+            self.outcomes.clear()
         self.thread.join()

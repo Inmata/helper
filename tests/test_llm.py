@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 
 from support.recyclable_tempdir import RecyclableTemporaryDirectory
 
-from wxbot_framework.integrations.llm import LLMClient, LLMError
+from wxbot_framework.integrations.llm import LLMClient, LLMContentBlocked, LLMError
 from plugins.idiom_chain.judge import IdiomJudge
 
 
@@ -66,7 +66,7 @@ class LLMTests(unittest.TestCase):
     def test_upstream_filter_control_text_is_not_released_as_a_reply(self):
         response = self.response("⚠ Your previous response was blocked by content safety filters\nRetries remaining: 3\n混入的正文")
         with patch("wxbot_framework.integrations.llm.urlopen", return_value=response):
-            with self.assertRaisesRegex(LLMError, "过滤控制信息"):
+            with self.assertRaisesRegex(LLMContentBlocked, "过滤控制信息"):
                 self.client.complete_text("测试", "测试")
 
     def setUp(self):
@@ -166,9 +166,8 @@ class LLMTests(unittest.TestCase):
             with (self.subTest(method=method.__name__),
                   patch("wxbot_framework.integrations.llm.urlopen",
                         return_value=self.response(partial, finish_reason="content_filter")) as call):
-                with self.assertRaises(LLMError) as caught:
+                with self.assertRaises(LLMContentBlocked) as caught:
                     method("系统", "测试")
-                self.assertIs(type(caught.exception), LLMError)
                 self.assertIn("内容过滤", str(caught.exception))
                 self.assertNotIn(partial, str(caught.exception))
                 self.assertEqual(call.call_count, 1)

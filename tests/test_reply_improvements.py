@@ -80,6 +80,7 @@ class ReplyImprovements(unittest.TestCase):
         ctx.personality.return_value = self.store.personality(daily.ROOM)
         ctx.response_guard = lambda snapshot, persona: self.store.delivery_guard(snapshot)
         ctx.llm_for.return_value.complete_text.return_value = "这回没弄完，再喊我一声试试。"
+        ctx.jev.noul.return_value = [0.98]
         sent = threading.Event()
         def reply(*args, **kwargs):
             with kwargs['delivery_guard']():

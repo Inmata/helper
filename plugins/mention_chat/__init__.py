@@ -31,7 +31,7 @@ from wxbot_framework.conversation.turns import (COLLECT_SECONDS, TurnFocus, exch
                                                 likely_incomplete, recent_exchange, turn_key)
 from wxbot_framework.conversation.tool_router import REJECTED, JevToolRouter
 from wxbot_framework.recent_images import RECENT_IMAGES
-from wxbot_framework.integrations.llm import LLMError
+from wxbot_framework.integrations.llm import LLMConnectionError, LLMContentBlocked, LLMError
 from wxbot_framework.conversation.members import BEIJING, SnapshotExpired
 from wxbot_framework.messaging.mentions import addressed_elsewhere, at_source, bot_names, strip_at_labels, typed_at
 from wxbot_framework.conversation.personality import personality_text
@@ -348,15 +348,6 @@ class Plugin:
         key = turn_key(message)
         waiting = None
         if not is_control(message.text) and at_source(message, self.members, self.aliases):
-            previous = self._retry.get(key)
-            clean = self._clean_query(message, at_source(message, self.members, self.aliases))
-            if clean in ("重试", "再试一次") and previous and message.received_at - previous[0] <= 300:
-                message = replace(message, data={**message.data, "retry_question": previous[1].text,
-                                                "quote": previous[1].data.get("quote")})
-            else:
-                self._retry[key] = (message.received_at, message)
-                if len(self._retry) > 64:
-                    self._retry.popitem(last=False)
             if self._wait is not None:
                 try:
                     waiting = self._wait.accept(message, ctx, 120 if wants_detail(message.text) else 90, retryable=True)
@@ -428,9 +419,15 @@ class Plugin:
         game = self.room_game(message.chat_id, ctx, message=message)
         if game and self.is_move(clean_query, game):
             return
-        if not message.is_self and source in ("structural", "typed"):
-            if self.image_reply.status(message, ctx, clean_query):
-                return
+        image_target = not message.is_self and source in ("structural", "typed")
+        if image_target and self.image_reply.status(message, ctx, clean_query):
+            return
+        if (self._wait is not None and (source or not addressed_elsewhere(message)) and
+                self._wait.followup(message, ctx, clean_query, addressed=source is not None)):
+            if turns is not None:
+                turns.claim(message)
+            return
+        if image_target:
             image_mode = self.image_reply.intent(message, ctx, clean_query)
             if image_mode:
                 if turns is not None:
@@ -449,6 +446,17 @@ class Plugin:
         elif turns is not None and not clean_query and not message.data.get("quote") and turns.active(message):
             turns.merge(message)
             return
+        elif source is not None:
+            key = turn_key(message)
+            with self._followup_lock:
+                previous = _tool_followup(self._retry, key, message.received_at, 300)
+                retry = clean_query in ("重试", "再试一次") and previous is not None
+                if not retry:
+                    _remember_tool_followup(self._retry, key, message.received_at, message)
+            if retry:
+                message = replace(message, data={**message.data, "retry_question": previous.text,
+                                                "quote": previous.data.get("quote")})
+                clean_query = self._clean_query(message, source)
         if turns is not None:
             turns.claim(message)
         if CURRENT.get() is None and self._wait is not None:
@@ -708,6 +716,8 @@ class Plugin:
                         "按当前问题与资料修订。先回答具体内容，人物话题用相关成员原话归纳，避免空泛接梗。"
                         "删掉没有对应来源的具体发言、动作、剧情、公众反应和病因；保留时间及说话者。"
                         "缺少必要条件时只问一个关键问题。不要描述核对流程。"))
+                except LLMContentBlocked:
+                    raise
                 except LLMError:
                     if repeated and decision.status != REJECTED and not search_needed:
                         break
@@ -725,11 +735,18 @@ class Plugin:
                             personality.name, len(snapshot.messages))
         except SnapshotExpired as error:
             ctx.logger.info("艾特对话已取消：%s", error)
+        except LLMContentBlocked:
+            ctx.logger.info("艾特对话未生成正文：内容安全过滤拦截")
+            active_budget = CURRENT.get()
+            if self._wait is not None and active_budget is not None:
+                self._wait.finish(active_budget, "本轮请求被模型的内容安全过滤拦截，回答未完成", blocked=True)
         except LLMError as error:
             ctx.logger.warning("艾特对话失败：%s", error)
             active_budget = CURRENT.get()
             if self._wait is not None and active_budget is not None:
-                self._wait.finish(active_budget, "本轮未能完成可信的回答")
+                reason = ("模型连接失败或超时，本轮没有拿到回答，具体原因未知"
+                          if isinstance(error, LLMConnectionError) else "本轮没有可发送的答复，具体原因未确认")
+                self._wait.finish(active_budget, reason)
         finally:
             # 已发出至少一条（含守卫或异常发生在首条之后）就保留去重记录，避免排队中的同一提问重发。
             self._release(key, delivered=bool(result.sent))

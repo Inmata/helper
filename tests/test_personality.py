@@ -889,6 +889,8 @@ class FixedPersonalityTests(unittest.TestCase):
         status = "这回没答好，你再喊我一下。"
         provider = Mock(side_effect=["", status])
         plugin = self.setup_chat(provider)
+        self.ctx._jev = Mock()
+        self.ctx._jev.noul.return_value = [0.98]
         delivered = threading.Event()
         send = self.backend.send_at_text
 
@@ -903,6 +905,7 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertEqual(len(self.backend.sent), 1)
         self.assertTrue(self.backend.sent[0][1].endswith(status))
         self.assertEqual(provider.call_count, 2)
+        self.assertIn("具体原因未确认", self.ctx._jev.noul.call_args.args[0]["实际状态"]["结果"])
         self.assertTrue(self.store.history("测试成员", ROOM))
 
     def test_game_reply_preserves_next_word_and_rule(self):

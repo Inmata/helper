@@ -91,6 +91,8 @@ class Backend:
 
 class Jev:
     def noul(self, state, questions, **options):
+        if "拟发送回复" in state:
+            return [0.99]
         return [0.99, 0.01]
 
 
@@ -215,12 +217,13 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)
         self.assertFalse(any("图片已发出" in text for _, text in self.backend.texts))
 
-    def test_followup_uses_original_question_and_real_stage_even_if_jev_is_down(self):
+    def test_followup_uses_original_question_and_real_stage_when_intent_check_fails(self):
         self.server.release.clear()
         self.plugin.on_message(self.message(), self.ctx)
         self.assertTrue(self.server.waiting.wait(2))
         model = self.ctx._llm
         complete_text = model.complete_text
+        noul = self.ctx._jev.noul
         outputs = {"画不出来？": "图还没回来，我再等等。", "图呢？": "这张还没到我手上呢。"}
 
         def render(system, user, **options):
@@ -228,15 +231,26 @@ class ImageGenerationTests(unittest.TestCase):
             question = json.JSONDecoder().raw_decode(user)[0]["群友原话"]
             return outputs.get(question, reply)
 
+        def intent_unavailable(state, questions, **options):
+            if "当前话语" in state:
+                raise JevError("本机测试意图判断不可用")
+            return noul(state, questions, **options)
+
         with (patch.object(model, "complete_text", side_effect=render),
               patch.object(self.ctx._jev, "noul", wraps=self.ctx._jev.noul) as judge):
             for question, expected in outputs.items():
                 if question == "图呢？":
-                    judge.side_effect = JevError("本机测试识别服务不可用")
+                    judge.side_effect = intent_unavailable
                 self.plugin.on_message(self.message("@机器人\u2005" + question,
                     data={"is_at_self": True, "at_members": ["wxid_robot"]}), self.ctx)
                 self.wait_for(lambda: any(text.endswith(expected) for _, text in self.backend.texts))
                 self.assertIn({"群友原话": question, "实际状态": {"当前任务阶段": "等待生成服务返回图片"}}, model.calls)
+            judge.side_effect = JevError("本机测试事实核对不可用")
+            sent = list(self.backend.texts)
+            self.plugin.on_message(self.message("@机器人\u2005图呢？",
+                data={"is_at_self": True, "at_members": ["wxid_robot"]}), self.ctx)
+            self.wait_for(lambda: not self.plugin._status.busy())
+            self.assertEqual(self.backend.texts, sent)
         self.server.release.set()
         self.wait_done()
         self.assertEqual(self.backend.images, [(ROOM, PNG)])

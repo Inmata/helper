@@ -1,7 +1,6 @@
 """上下文工具：把艾特回复前的预取收成一组带名字、参数和说明的函数。
 
-现阶段仍由 ``prefetch_mention_context`` 按固定顺序一次性调用；以后接入工具调用时，
-同一份注册表的 ``schemas()`` 可直接转成模型的 tools 描述，``call()`` 负责按名字执行。
+普通艾特使用 ``prefetch_mention_context``；需要自主选材的入口可把注册表直接交给工具循环。
 
 本模块位于 ``conversation`` 层，不依赖 ``memory``：知识库和成员目录都按鸭子类型传入，
 只用到下面这些方法：
@@ -86,7 +85,7 @@ class ContextTools:
         """可直接转成模型 tools 描述的列表，顺序即登记顺序。"""
         return [tool.schema() for tool in self._tools.values()]
 
-    def call(self, name, **arguments):
+    def call(self, name, /, **arguments):
         tool = self.get(name)
         declared = tool.parameters.get("properties", {})
         unknown = sorted(set(arguments) - set(declared))

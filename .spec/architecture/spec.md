@@ -41,7 +41,7 @@ related:
 | `app/` | 装配与显式初始化（`bootstrap.py`）、主循环（`runtime.py`）、消息顺序（`ingress.py`）、控制台、维护、检查命令、公告、资料修订 |
 | `messaging/` | 消息模型、发送、节奏、接收水位、文本与艾特工具 |
 | `plugin_engine/` | 清单、发现与加载、插件上下文 |
-| `conversation/` | 成员与历史、群状态、按成员的对话轮次、总结、群人格与清空控制；主动发言决策和预算（`planner.py`）、复读识别（`repetition.py`）、艾特工具判断与调用（`tool_router.py`、`mention_tools.py`） |
+| `conversation/` | 成员与历史、群状态、按成员的对话轮次、总结、群人格与清空控制；主动发言决策和预算（`planner.py`）、复读识别（`repetition.py`）、艾特工具判断与调用（`tool_router.py`、`mention_tools.py`）、工具目录执行与来源记录（`tool_loop.py`、`evidence_tools.py`） |
 | `memory/` | 知识库与维护、增量学习、人格习惯归纳、定时主动发言；事件驱动发言由 `plugins/proactive_chat/` 持有 |
 | `storage/` | 唯一连接与事务、集中迁移 |
 | `integrations/` | 原生微信适配、大模型与 Jev 客户端、Magpie 看图/联网及限时 HTTP；本地语音识别、合成子进程与 SILK 编码 |

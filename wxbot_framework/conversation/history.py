@@ -288,7 +288,8 @@ class ConversationHistory:
                 (members.account, room)).fetchone()[0]
 
     def recent_rows(self, room, *, limit=200, sender_id=None, before_id=None, since=None, until=None,
-                    context=False, include_bot=False, continuity_seconds=None, include_commands=False):
+                    context=False, include_bot=False, continuity_seconds=None, include_commands=False, keywords=(),
+                    after_id=None, earliest=False):
         members = self.members
         if room not in members.groups or type(limit) is not int or not 1 <= limit <= 5000:
             raise MemberError("查询需要已启用的群，条数应为 1—5000")
@@ -304,12 +305,18 @@ class ConversationHistory:
             if before_id is not None:
                 sql += " AND id<?"
                 values.append(before_id)
+            if after_id is not None:
+                sql += " AND id>?"
+                values.append(after_id)
             if since is not None:
                 sql += " AND replace(received_at,'+00:00','Z')>=?"
                 values.append(iso_utc(since))
             if until is not None:
                 sql += " AND replace(received_at,'+00:00','Z')<?"
                 values.append(iso_utc(until))
+            if keywords:
+                sql += " AND (" + " OR ".join("instr(lower(text),?)>0" for _ in keywords) + ")"
+                values.extend(keywords)
             if context:
                 floor = members.connection().execute(
                     "SELECT context_floor FROM chat_buffers WHERE account=? AND room=?",
@@ -317,7 +324,8 @@ class ConversationHistory:
                 sql += " AND id>?"
                 values.append(floor)
             rows, newest = [], None
-            for row in members.connection().execute(sql + " ORDER BY id DESC", values):
+            order = " ORDER BY id" if earliest else " ORDER BY id DESC"
+            for row in members.connection().execute(sql + order, values):
                 if continuity_seconds is not None:
                     try:
                         stamp = parse_utc(row["received_at"])
@@ -332,7 +340,7 @@ class ConversationHistory:
                     rows.append(dict(row))
                     if len(rows) >= limit:
                         break
-            return list(reversed(rows))
+            return rows if earliest else list(reversed(rows))
 
     def label_speakers(self, rows, room, *, speakers=None):
         members = self.members

@@ -131,16 +131,16 @@ class JevToolRouter:
             state["补充语境"] = _summary(context)
         return self._decide(VISION, state, VISION_QUESTION, self.vision_threshold, timeout)
 
-    def image_request(self, question, *, timeout=2):
+    def image_request(self, question, *, context=None, timeout=2):
         """一次判断生图意图与是否依赖参考图，返回 create / edit / 空串。"""
         if self.jev is None:
             return ""
         try:
-            values = self.jev.noul({"当前艾特正文": _question(question)}, [
-                {"instructions": "判断用户本条是否明确要求机器人现在生成或编辑一张实际图片。",
-                 "true": "明确要求画图、生成图、绘制插画、制作表情图片或修改图片。",
+            values = self.jev.noul({"当前艾特正文": _question(question), "前文与引用": context}, [
+                {"instructions": "结合当前艾特和它实际承接的提议，判断用户是否要求机器人现在生成或编辑一张实际图片。",
+                 "true": "明确要求画图，或当前话语明确接受、继续或修改前文中尚待执行的画图方案。",
                  "false": "问怎么画、索要绘画步骤或提示词、分析已有图片、夸图、讨论生图模型、否定或禁止画图、转述他人的画图要求，或只是提到画图。"},
-                {"instructions": "判断这个画图请求是否必须使用已有图片作为参考。",
+                {"instructions": "结合当前话语和明确关联的前文判断画图是否必须使用已有图片作为参考。",
                  "true": "要修改这张照片、原图、已发图片，例如换背景、改画风、修改图中对象。",
                  "false": "从文字描述画一张新图，不依赖已有图片。"},
             ], timeout=timeout)

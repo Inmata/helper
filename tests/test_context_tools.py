@@ -1,9 +1,13 @@
 import random
 import unittest
+from contextlib import nullcontext
+import json
+import logging
 
 from wxbot_framework.conversation.context_tools import (
-    ContextToolError, OFFENSIVE_WORDS, build_default_tools, is_offensive, pick_speech_examples,
+    ContextTool, ContextToolError, ContextTools, OFFENSIVE_WORDS, build_default_tools, is_offensive, pick_speech_examples,
     MentionContext, prefetch_mention_context, usable_example)
+from wxbot_framework.conversation.tool_loop import run_tools
 
 
 class FakeKnowledge:
@@ -71,6 +75,26 @@ class RegistryTests(unittest.TestCase):
         tools = build_default_tools(FakeKnowledge())
         tools.schemas()[0]["parameters"]["required"].append("x")
         self.assertNotIn("x", tools.schemas()[0]["parameters"]["required"])
+
+    def test_generic_loop_discovers_and_reuses_an_additional_tool(self):
+        calls = []
+        tools = ContextTools([ContextTool("lookup_lantern_palette", "读取手工灯笼配色",
+            {"type": "object", "properties": {"kind": {"type": "string"}}, "required": ["kind"]},
+            lambda kind: calls.append(kind) or {"配色": "杏红和米白"})])
+
+        class Model:
+            def complete_json(self, system, user, **options):
+                payload = json.loads(user)
+                trace = payload["取材记录"]
+                if len(trace) < 2:
+                    name = payload["可用工具"][0]["name"]
+                    return {"工具调用": [{"名称": name, "参数": {"kind": "纸灯笼"}}]}
+                return {"绘图指令": trace[-1][0]["结果"]["配色"]}
+
+        result = run_tools(Model(), "制作颜色卡", {"需求": "纸灯笼配色"}, tools,
+                           guard=nullcontext, logger=logging.getLogger(__name__))
+        self.assertEqual(calls, ["纸灯笼"])
+        self.assertEqual(result, {"绘图指令": "杏红和米白"})
 
 
 class PrefetchEqualsOldBehaviorTests(unittest.TestCase):

@@ -305,7 +305,7 @@ class KnowledgeStore(KnowledgeAdminMixin):
                         "as_of": self.now(), "memories": []}
             if not self.visible(entity):
                 return material
-            rows = self.connection().execute("""SELECT i.id,i.slot,i.kind,i.content,i.updated_at,
+            rows = self.connection().execute("""SELECT i.id,i.slot,i.kind,i.content,i.updated_at,i.revision,
                        MIN(s.source_time) AS first_source_at,MAX(s.source_time) AS last_source_at
                 FROM knowledge_items i LEFT JOIN knowledge_sources s ON s.item_id=i.id
                 WHERE i.account=? AND i.room=? AND i.entity_id=? AND i.epoch=? AND i.status='active'

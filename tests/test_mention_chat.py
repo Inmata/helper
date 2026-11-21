@@ -722,6 +722,42 @@ class MentionDeliveryTests(unittest.TestCase):
         self.assertEqual(self.members.last_options.get("sender_id"), "wxid_robot")
         self.assertEqual(self.members.last_options.get("limit"), 5)
 
+    def test_meaning_followup_binds_only_a_confirmed_bot_reference(self):
+        now = datetime.now(timezone.utc)
+        source = "我把旧音箱换成新的了"
+        bot_line = "现在这台桌子会唱歌了"
+        history = tuple(
+            {"text": text, "bot_generated": bot, "received_at": (now - timedelta(seconds=age)).isoformat()}
+            for age, text, bot in ((10, source, False), (8, bot_line, True), (4, "窗外下雨了", False))
+        )
+        snapshot = self.members.conversation_snapshot
+        self.members.conversation_snapshot = lambda message: replace(snapshot(message), history=history)
+        for query, relevance, expected in (
+            ("啥意思？", 0.9, bot_line),
+            ("啥意思？", 0.1, ""),
+            ("音箱什么时候到？", None, ""),
+        ):
+            with self.subTest(query=query, relevance=relevance):
+                plugin, ctx = self.build("就是换了个音箱呀")
+                ctx.jev = Mock()
+                ctx.jev.noul.return_value = [relevance]
+                plugin.on_message(mention(query), ctx)
+                if expected:
+                    self.assertIn(f"本轮要解释的原话由你自己说出：{expected}", ctx.last_user)
+                    self.assertIn("只谈你的本意", ctx.last_user)
+                    judged, _ = ctx.jev.noul.call_args.args
+                    self.assertEqual(judged["机器人刚才的答复"], bot_line)
+                else:
+                    self.assertNotIn("本轮要解释的原话", ctx.last_user)
+                self.assertEqual(ctx.jev.noul.call_count, int(relevance is not None))
+
+    def test_meaning_followup_prefers_explicit_bot_text_quote(self):
+        plugin, ctx = self.build("就是说换了个音箱")
+        message = mention("什么意思")
+        message.data["quote"] = {"text": "现在这台桌子会唱歌了", "ref_type": "1", "chatusr": "wxid_robot"}
+        plugin.on_message(message, ctx)
+        self.assertIn("本轮要解释的原话由你自己说出：现在这台桌子会唱歌了", ctx.last_user)
+
     def test_quote_without_text_still_carries_the_referrer(self):
         plugin, ctx = self.build("这个呢")
         plugin.members = self.members

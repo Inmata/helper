@@ -46,10 +46,16 @@ RECENT_BOT_ROWS = 5
 # 提问含这些词时视为明确要求详细回答，使用 detail_max_tokens 预算。
 DETAIL_HINTS = ("详细", "详解", "细说", "展开", "具体说说", "完整", "全文", "全篇", "原文", "一步一步", "逐步")
 CATCH_UP = re.compile(r"补个?课|(?:最后|最终|后来).{0,4}(?:定|说好)|(?:刚才|刚刚|昨晚|昨天).{0,8}(?:聊|讨论)")
+MEANING_QUESTION = re.compile(r"(?:什么|啥)意思[啊呀呢嘛吧]?[？?！!。]*$")
 VOICE_ACTION_WORDS = re.compile(r"唱|跑调|\b(?:sing|sang|sung)\b", re.IGNORECASE)
 # 框架按已编译桥接声明的图片能力；没有时找不到图要如实说“收不到图片”，而不是让对方去引用。
 IMAGE_CAPABILITY = "group.image.receive"
 TOOL_FOLLOWUP_LIMIT = 64
+
+
+def _arrival_time(received_at):
+    queued = max(0.0, time.monotonic() - received_at)
+    return datetime.now(timezone.utc) - timedelta(seconds=queued)
 
 
 class TurnChanged(Exception):
@@ -239,8 +245,7 @@ class Plugin:
         # 只艾特没写正文时，他上一条发言（如“这张图是啥意思？”）才是真正的问题。
         context_question = ""
         followup_topic = None
-        queued = max(0.0, time.monotonic() - message.received_at)
-        now = datetime.now(timezone.utc) - timedelta(seconds=queued)
+        now = _arrival_time(message.received_at)
         if not question and snapshot is not None:
             # 以这条艾特到达的墙钟时刻比较，扣掉它排队等待处理的时间。
             names = self._bot_names(message.chat_id)
@@ -300,6 +305,19 @@ class Plugin:
         except ValueError:
             return False
         return jev is not None and judge_turn(jev, intent, question, **context)
+
+    def _meaning_reference(self, message, ctx, question, snapshot, quote, *, quote_is_bot):
+        raw_quote = message.data.get("quote")
+        if raw_quote:
+            ref_type = raw_quote.get("ref_type")
+            if quote_is_bot and quote and (ref_type in (None, "1") or
+                                          (ref_type == "49" and raw_quote.get("ref_app_type") == "57")):
+                return quote["text"]
+            return ""
+        anchor, reference = recent_exchange(snapshot.history, _arrival_time(message.received_at))
+        if reference and self._turn_judge(ctx, "refer", anchor, previous=reference, new=question):
+            return reference
+        return ""
 
     def _advance_turn(self, turns, turn, ctx, *, deadline=None):
         changed = False
@@ -725,6 +743,14 @@ class Plugin:
                 options["tool_results"] = outcome.payload()
             if outcome.context or outcome.ask:
                 options["turn_context"] = "\n".join(filter(None, (options.get("turn_context"), outcome.context, outcome.ask)))
+            if not (self_facts or outcome.used or outcome.context or outcome.ask) and MEANING_QUESTION.search(clean_query):
+                reference = self._meaning_reference(message, ctx, clean_query, snapshot, quote, quote_is_bot=quote_is_bot)
+                if reference:
+                    explanation = (
+                        f"本轮要解释的原话由你自己说出：{reference}\n"
+                        "直接用一句口语解释这段话想表达的意思。只谈你的本意，省去背景复述和对其他发言者言行、动机的归因。"
+                    )
+                    options["turn_context"] = "\n".join(filter(None, (options.get("turn_context"), explanation)))
             can_voice = not offer_reading and (read_accepted or fixed_voice or (not detail and not outcome.used and voice_supported))
             if can_voice:
                 options["system"] = SYSTEM + VOICE_PROMPT

@@ -436,7 +436,6 @@ class FakeCtx:
         self.sent = []  # (方法名, 正文)
         self.before_guard = None  # 守卫之前的钩子，模拟发送层打字节奏等待期间进来的新消息
         self.guard_calls, self.expire_at_call, self.fail_at_send = 0, None, None
-        self.fail_at_completion = None
         self.completions = 0
         self.knowledge = MagicMock()
         self.knowledge.member_entity.return_value = {"id": 1}
@@ -452,9 +451,7 @@ class FakeCtx:
             def complete_text(self, system, user, **options):
                 ctx.completions += 1
                 ctx.last_user = user
-                if ctx.fail_at_completion is not None and ctx.completions >= ctx.fail_at_completion:
-                    raise LLMError("重说失败")
-                # reply_text 可以是多条候选（重复检测重说时按次序取），也可以是单个字符串。
+                # 后续回合可为各次模型请求准备不同正文。
                 if isinstance(ctx.reply_text, list):
                     return ctx.reply_text[min(ctx.completions - 1, len(ctx.reply_text) - 1)]
                 return ctx.reply_text
@@ -637,8 +634,13 @@ class MentionDeliveryTests(unittest.TestCase):
                     plugin.on_message(first, ctx)
                     self.assertEqual(generate.call_count, 2)
                     self.assertIn("水系", generate.call_args.args[1])
-                    self.assertEqual(ctx.sent, [] if failure else [("reply_at", new_reply)])
-                    self.assertEqual(status.submit.call_count, int(failure is not None))
+                    if failure:
+                        self.assertEqual(len(ctx.sent), 1)
+                        self.assertNotIn(old_reply, ctx.sent[0][1])
+                        self.assertNotIn("重试", ctx.sent[0][1])
+                    else:
+                        self.assertEqual(ctx.sent, [("reply_at", new_reply)])
+                    status.submit.assert_not_called()
                 finally:
                     plugin._wait.close()
 
@@ -702,25 +704,12 @@ class MentionDeliveryTests(unittest.TestCase):
         self.assertEqual(ctx.sent, [("reply_at", "可以。先点设置。再点开启。")])
         self.sleep.assert_not_called()
 
-    def test_reply_too_similar_to_recent_bot_line_is_generated_again(self):
+    def test_similar_casual_reply_is_delivered_without_regenerating(self):
         plugin, ctx = self.build(["志远你今天又来裸奔了", "道德经念得挺顺"])
         self.members.rows = [{"id": 9, "text": "志远你今天改走国学大师路线了啊", "bot_generated": 1, "is_self": 1}]
         plugin.on_message(mention("晚安啦"), ctx)
-        self.assertEqual(ctx.completions, 2)  # 第一次太像，换角度重说一次
-        self.assertEqual(ctx.sent, [("reply_at", "道德经念得挺顺")])
-
-    def test_retry_failure_keeps_the_first_reply(self):
-        plugin, ctx = self.build("志远你今天又来裸奔了")
-        self.members.rows = [{"id": 9, "text": "志远你今天改走国学大师路线了啊", "bot_generated": 1, "is_self": 1}]
-        ctx.fail_at_completion = 2  # 换角度重说的那次模型调用失败
-        plugin.on_message(mention("晚安啦"), ctx)
+        self.assertEqual(ctx.completions, 1)
         self.assertEqual(ctx.sent, [("reply_at", "志远你今天又来裸奔了")])
-
-    def test_recent_bot_lines_are_queried_by_bot_sender(self):
-        plugin, ctx = self.build("睡了睡了")
-        plugin.on_message(mention("晚安啦"), ctx)
-        self.assertEqual(self.members.last_options.get("sender_id"), "wxid_robot")
-        self.assertEqual(self.members.last_options.get("limit"), 5)
 
     def test_meaning_followup_binds_only_a_confirmed_bot_reference(self):
         now = datetime.now(timezone.utc)

@@ -4,7 +4,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -13,7 +13,7 @@ from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .image_reply import COMMAND as IMAGE_COMMAND, ImageReply
 from wxbot_framework.conversation.slow_replies import SlowReplies
 from wxbot_framework.conversation.person_context import person_context
-from wxbot_framework.conversation.reply_wait import ReplyWait
+from wxbot_framework.conversation.reply_wait import ReplyWait, timeout_reason
 from wxbot_framework.conversation.status_replies import StatusReplies
 from wxbot_framework.integrations.reply_budget import CURRENT, ReplyDraft, ReplyExpired
 from .voice_reply import (COMMAND as VOICE_COMMAND, READ_COMMAND as VOICE_READ_COMMAND,
@@ -27,13 +27,12 @@ from wxbot_framework.conversation.mention_tools import (IMAGE_WINDOW_SECONDS,
                                                         SEARCH_RETRY_SECONDS, MentionTools, ToolOutcome, ToolResult,
                                                         previous_question, public_search_topic, read_tool_options,
                                                         strip_links)
-from wxbot_framework.conversation.repetition import too_similar
 from wxbot_framework.conversation.reply_review import VOICE_CAPABILITY, correction_evidence, reply_evidence, review_reply
 from wxbot_framework.conversation.turns import (COLLECT_SECONDS, TurnFocus, exchange_intent, judge_turn,
                                                 likely_incomplete, recent_exchange, turn_intents, turn_key)
 from wxbot_framework.conversation.tool_router import REJECTED, JevToolRouter
 from wxbot_framework.recent_images import RECENT_IMAGES
-from wxbot_framework.integrations.llm import LLMConnectionError, LLMContentBlocked, LLMError
+from wxbot_framework.integrations.llm import LLMConnectionError, LLMContentBlocked, LLMError, LLMFormatError
 from wxbot_framework.conversation.members import BEIJING, SnapshotExpired
 from wxbot_framework.messaging.mentions import addressed_elsewhere, at_source, bot_names, strip_at_labels, typed_at
 from wxbot_framework.conversation.personality import personality_text
@@ -43,12 +42,11 @@ from wxbot_framework.commands import command_text, is_control
 
 GAME_FEATURE = "idiom_chain"
 USED_SAMPLE = 10
-# 与本群机器人最近几条发言比对重复的条数；太像时换角度重说一次。
-RECENT_BOT_ROWS = 5
 # 提问含这些词时视为明确要求详细回答，使用 detail_max_tokens 预算。
 DETAIL_HINTS = ("详细", "详解", "细说", "展开", "具体说说", "完整", "全文", "全篇", "原文", "一步一步", "逐步")
 CATCH_UP = re.compile(r"补个?课|(?:最后|最终|后来).{0,4}(?:定|说好)|(?:刚才|刚刚|昨晚|昨天).{0,8}(?:聊|讨论)")
 MEANING_QUESTION = re.compile(r"(?:什么|啥)意思[啊呀呢嘛吧]?[？?！!。]*$")
+GROUP_ATTRIBUTION = re.compile(r"(?:群里|刚才|刚刚).{0,5}谁|谁.{0,6}(?:刚才|刚刚|说过|说的|讲过|发过|发的)")
 VOICE_ACTION_WORDS = re.compile(r"唱|跑调|\b(?:sing|sang|sung)\b", re.IGNORECASE)
 # 框架按已编译桥接声明的图片能力；没有时找不到图要如实说“收不到图片”，而不是让对方去引用。
 IMAGE_CAPABILITY = "group.image.receive"
@@ -78,6 +76,10 @@ def read_aliases(config):
 
 def wants_detail(query):
     return any(hint in query for hint in DETAIL_HINTS)
+
+
+def reply_seconds(query):
+    return 120 if wants_detail(query) or any(word in query for word in ("联网", "核实", "查证", "搜一下")) else 90
 
 
 def _tool_followup(cache, key, received_at, window):
@@ -216,18 +218,6 @@ class Plugin:
     def _bot_names(self, room):
         return bot_names(self.members, room, self.aliases)
 
-    def _recent_bot_texts(self, room):
-        """本群机器人最近几条发言，供重复检测使用；读不到就当没有。"""
-        try:
-            rows = self.members.recent_rows(room, limit=RECENT_BOT_ROWS, include_bot=True,
-                                            sender_id=self.members.account)
-        except Exception:
-            return ()
-        if not isinstance(rows, (list, tuple)):
-            return ()
-        return tuple(row.get("text") or "" for row in rows
-                     if isinstance(row, dict) and (row.get("bot_generated") or row.get("is_self")))
-
     def _tools(self, ctx):
         try:
             jev = ctx.jev
@@ -239,7 +229,7 @@ class Plugin:
                             logger=ctx.logger, stopped=self._slow.stopped if self._slow is not None else None)
 
     def _run_tools(self, message, ctx, question, snapshot=None, *, resolved_quote=None, follow=False,
-                   group_context=None):
+                   group_context=None, stop_at=None):
         """本轮艾特的看图 / 联网；没开启时返回空结果。Jev 读不出来时只按明确说法执行。"""
         if self.tools is None:
             return ToolOutcome()
@@ -271,7 +261,7 @@ class Plugin:
             previous = self.members.turns.continuation(message)
             if previous is not None:
                 focus = replace(focus, anchor=previous.question[:180], reference=previous.text[:220])
-        elif snapshot is not None and not raw_quote and question:
+        elif snapshot is not None and not raw_quote and question and (stop_at is None or time.monotonic() < stop_at):
             anchor, reference = recent_exchange(snapshot.history, now)
             intent = exchange_intent(question, reference) if anchor else ""
             if intent and self._turn_judge(ctx, intent, anchor, previous=reference, new=question):
@@ -281,7 +271,7 @@ class Plugin:
                                          image_choices=choices, previous_search=last_search, followup_topic=followup_topic,
                                          previous_subject=last_subject, focus=focus,
                                          group_context=group_context,
-                                         search_date=now.astimezone(BEIJING).date().isoformat())
+                                         search_date=now.astimezone(BEIJING).date().isoformat(), stop_at=stop_at)
         with self._followup_lock:
             if outcome.image_choices:
                 _remember_tool_followup(self._image_choices, key, arrived, outcome.image_choices)
@@ -372,14 +362,14 @@ class Plugin:
         if not is_control(message.text) and at_source(message, self.members, self.aliases):
             if self._wait is not None:
                 try:
-                    waiting = self._wait.accept(message, ctx, 120 if wants_detail(message.text) else 90, retryable=True)
+                    waiting = self._wait.accept(message, ctx, reply_seconds(message.text))
                 except SnapshotExpired:
                     return
                 original = resume
                 resume = lambda: self._wait.wrap(original(), waiting)
         def queue_full():
             if waiting is not None:
-                self._wait.finish(waiting, "普通回复队列已满，本轮未开始")
+                self._wait.finish(waiting, "我前面排了太多条消息，这条还没轮到处理。")
 
         if self._slow is None:
             for _ in resume():
@@ -487,7 +477,7 @@ class Plugin:
             turns.claim(message)
         if CURRENT.get() is None and self._wait is not None:
             try:
-                waiting = self._wait.accept(message, ctx, 120 if wants_detail(clean_query) else 90)
+                waiting = self._wait.accept(message, ctx, reply_seconds(clean_query))
             except SnapshotExpired:
                 return
             yield from self._wait.wrap(self._reply_turn(message, ctx, clean_query, game, turns=turns,
@@ -586,6 +576,14 @@ class Plugin:
         result = SpeakResult()
         active_budget = CURRENT.get()
         revision = active_budget.revision if active_budget is not None else None
+        prepare_until = active_budget.prepare_until if active_budget is not None else None
+        answer_until = active_budget.answer_until if active_budget is not None else None
+
+        def work(stage, until):
+            return active_budget.work(stage, until) if active_budget is not None else nullcontext()
+
+        def can_prepare():
+            return prepare_until is None or active_budget.clock() < prepare_until
 
         def dispatch(send):
             while True:
@@ -622,7 +620,8 @@ class Plugin:
                 judge = getattr(ctx, "jev", None)
             except ValueError:
                 judge = None
-            intents = turn_intents(judge, clean_query, quote=quote_hint, previous=previous)
+            with work("理解问题", prepare_until):
+                intents = turn_intents(judge, clean_query, quote=quote_hint, previous=previous)
             if "correction" in intents and quote_is_bot:
                 quote, missing_quote = None, ""
             else:
@@ -643,14 +642,17 @@ class Plugin:
             if previous and previous.voice_action and not clean_query:
                 self_facts["同一发言者上一轮的语音结果"] = previous.voice_action
             if "correction" in intents:
-                rows = self.members.own_replies(snapshot)
-                originals = correction_evidence(judge, clean_query, rows, quote=quote_hint if quote_is_bot else None,
-                                                quote_id=raw_quote.get("svrid", "") if quote_is_bot else "")
-                self_facts["原话核对"] = "找到匹配原话" if originals else "本群最近14天的有效记录中未找到可核对的原话"
-                self_facts["机器人原话"] = originals
+                with work("查群聊资料", prepare_until):
+                    originals = correction_evidence(judge if can_prepare() else None, self.members, snapshot, message,
+                                                    clean_query, quote=quote_hint if quote_is_bot else None,
+                                                    quote_id=raw_quote.get("svrid", "") if quote_is_bot else "")
+                own_lines = [row for row in originals if row["发言人"] == "机器人"]
+                self_facts["原话核对"] = "找到相关聊天原文" if originals else "本群最近14天没有找到对应的聊天原话"
+                self_facts["机器人原话"] = own_lines
+                self_facts["群友原话"] = [row for row in originals if row["发言人"] != "机器人"]
                 snapshot = replace(snapshot, history=tuple(row for row in snapshot.history
                                    if not (row.get("bot_generated") or row.get("is_self"))))
-                if previous and previous.voice_action and (not raw_quote or any(r["形式"] == "朗读语音" for r in originals)):
+                if previous and previous.voice_action and (not raw_quote or any(r["形式"] == "朗读语音" for r in own_lines)):
                     self_facts["同一发言者上一轮的语音结果"] = previous.voice_action
 
             def send_part(part, send_guard=guard, *, use_at=False):
@@ -666,6 +668,12 @@ class Plugin:
 
             def send_at(part, send_guard=guard):
                 return send_part(part, send_guard, use_at=True)
+
+            def remember_draft(reply):
+                if active_budget is not None and not (offer_reading or read_accepted):
+                    with active_budget.lock:
+                        if not active_budget.closed and active_budget.revision == revision:
+                            active_budget.ready = ReplyDraft(revision, reply, needs_review, fallback_sent)
 
             fixed_voice = voice_supported and self.voice_reply.fixed(message, self.room_state)
             turn_voice = False
@@ -698,7 +706,8 @@ class Plugin:
                                 voice_action = "部分朗读已提交，剩余内容因合成失败改发文字"
                     remaining = yield from self.voice_reply.deliver(
                         message, ctx, reply, voice=personality.voice, guard=guard, split=fixed_voice or read_accepted,
-                        dispatch=dispatch, on_sent=record_voice, on_outcome=record_outcome, fixed=fixed_voice)
+                        dispatch=dispatch, on_sent=record_voice, on_outcome=record_outcome, fixed=fixed_voice,
+                        automatic=not (fixed_voice or read_accepted or turn_voice or preference))
                     if remaining is None:
                         return
                     reply = remaining
@@ -717,38 +726,42 @@ class Plugin:
 
             investigation = None
             fresh = False
+            quoted_image = raw_quote.get("ref_type") in ("3", "47")
             try:
                 planning_model = getattr(ctx, "llm", None)
             except ValueError:
                 planning_model = None
             if (callable(getattr(planning_model, "complete_json", None))
-                    and not (offer_reading or read_accepted or missing_quote)):
-                if "correction" in intents and quote_is_bot:
-                    target_quote = {"已核对的机器人原话": originals} if originals else None
-                else:
-                    target_quote = quote or quote_hint
-                fresh, needs_local = material_needs(judge, clean_query, snapshot, target_quote, previous)
-                if fresh or needs_local or "correction" in intents:
-                    if active_budget is not None:
+                    and not (offer_reading or read_accepted or missing_quote or quoted_image) and can_prepare()):
+                target_quote = quote or quote_hint
+                with work("理解问题", prepare_until):
+                    fresh, needs_local = material_needs(judge, clean_query, snapshot, target_quote, previous)
+                if fresh or (needs_local and "correction" not in intents and classify_tier(clean_query) != CHAT):
+                    if fresh and active_budget is not None:
                         with active_budget.lock:
                             active_budget.llm_limit = 5
                     lookup = self._tools(ctx).search if fresh and self.tools is not None else None
                     try:
                         yield  # 与原有联网流程一样，让同群其他人的任务先运行。
-                        investigation = gather_answer_material(
-                            planning_model, self.members, ctx.knowledge, message, snapshot, clean_query, target_quote,
-                            current=fresh, search=lookup, guard=lambda: ctx.response_guard(snapshot, personality),
-                            logger=ctx.logger)
+                        with work("联网查资料" if fresh else "查群聊资料", prepare_until):
+                            investigation = gather_answer_material(
+                                planning_model, self.members, ctx.knowledge, message, snapshot, clean_query, target_quote,
+                                current=fresh, search=lookup, guard=lambda: ctx.response_guard(snapshot, personality),
+                                logger=ctx.logger)
+                    except LLMContentBlocked:
+                        raise
                     except (LLMError, TimeoutError) as error:
                         ctx.logger.info("群聊取材未完成：%s", type(error).__name__)
                     if fresh and not (investigation and investigation.public):
-                        yield from respond("这条近期消息我还没查到能确认的资料，先不下结论。", QA)
+                        yield from respond("这条近期消息我还没查到能确认的出处。", QA)
                         return
             if catch_up and not missing_quote and not self_facts and investigation is None:
                 rows = snapshot.group_messages
-                reply = Dialogue(ctx.llm_for(message, personality=personality, for_reply=True),
-                                 display_timezone=ctx.display_timezone).catch_up(rows, clean_query, quote=quote)
+                with work("写回复", answer_until):
+                    reply = Dialogue(ctx.llm_for(message, personality=personality, for_reply=True),
+                                     display_timezone=ctx.display_timezone).catch_up(rows, clean_query, quote=quote)
                 self._ensure_running()
+                remember_draft(reply)
                 yield from respond(reply, QA)
                 ctx.logger.info("群聊补课完成：记录=%d", len(rows))
                 return
@@ -764,11 +777,6 @@ class Plugin:
             reviewer = self._tools(ctx).router.jev if self.tools is not None else None
             if self_facts:
                 reviewer = judge
-            material = [] if investigation is not None else person_context(self.members, ctx.knowledge, reviewer, message.chat_id, clean_query,
-                                      history=snapshot.history, before_id=self.members.message_id(message), quote=quote,
-                                      sender_id=message.sender_id)
-            context = replace(context, person_messages=material)
-            turn_voice = self.voice_reply.update_preference(message, ctx, clean_query, reviewer)
             RECENT_IMAGES.restore_sent(self.members, message.chat_id, quote=message.data.get("quote"),
                                        source_id=self.members.message_id(message))
             options = {"detail": True} if detail else {"examples": context.examples}
@@ -783,8 +791,20 @@ class Plugin:
             elif missing_quote:
                 outcome = ToolOutcome(ask=missing_quote)
             else:
+                if active_budget is not None and quoted_image:
+                    with active_budget.lock:
+                        active_budget.stage = "看图"
                 outcome = yield from self._run_tools(message, ctx, clean_query, snapshot, resolved_quote=quote, follow=plain,
-                                                     group_context=context.search_scope(snapshot.history))
+                                                     group_context=context.search_scope(snapshot.history), stop_at=prepare_until)
+            material = []
+            if can_prepare():
+                with work("查群聊资料", prepare_until):
+                    if investigation is None and not quoted_image and "correction" not in intents:
+                        material = person_context(self.members, ctx.knowledge, reviewer, message.chat_id, clean_query,
+                                                  history=snapshot.history, before_id=self.members.message_id(message),
+                                                  quote=quote, sender_id=message.sender_id)
+                    turn_voice = self.voice_reply.update_preference(message, ctx, clean_query, reviewer)
+            context = replace(context, person_messages=material)
             self._ensure_running()
             if before_send is not None:
                 before_send()
@@ -796,8 +816,10 @@ class Plugin:
                 options["turn_context"] = "\n".join(filter(None, (options.get("turn_context"),
                     "本轮已找到的群聊资料（引用时看清发言人、时间和类别）：" +
                     json.dumps(investigation.local, ensure_ascii=False))))
-            if not (self_facts or outcome.used or outcome.context or outcome.ask) and MEANING_QUESTION.search(clean_query):
-                reference = self._meaning_reference(message, ctx, clean_query, snapshot, quote, quote_is_bot=quote_is_bot)
+            if (not (self_facts or outcome.used or outcome.context or outcome.ask) and MEANING_QUESTION.search(clean_query)
+                    and (quote or can_prepare())):
+                with work("理解这句在接什么", prepare_until):
+                    reference = self._meaning_reference(message, ctx, clean_query, snapshot, quote, quote_is_bot=quote_is_bot)
                 if reference:
                     explanation = (
                         f"本轮要解释的原话由你自己说出：{reference}\n"
@@ -814,87 +836,79 @@ class Plugin:
                     "\n本轮核实的是近期可能变动的公开状态。以本轮可核对的公开资料为准，"
                     "直说结果并写出处和事件时间。群友转述或自己之前的话不能用作公开事实的证据。")
 
-            def generate(avoid=None, *, guidance="", revision=None):
+            correction_reply = ""
+            if "correction" in intents and originals and not fresh:
+                matched = [rows[0] for rows in (self_facts["群友原话"], own_lines) if rows]
+                correction_reply = "我翻到的原话是，" + "。".join(
+                    f"{'你' if row['本人'] else '我' if row['发言人'] == '机器人' else row['发言人']}说过「{row['原话'][:140]}」"
+                    for row in matched) + "。"
+                remember_draft(correction_reply)
+
+            def generate(*, guidance="", revision=None):
                 self._ensure_running()
                 prompt_options = options if not guidance else {
                     **options, "system": options.get("system", SYSTEM) + "\n" + guidance,
                 }
-                text = personality_text(Dialogue(ctx.llm_for(message, personality=personality, for_reply=True)).reply(
-                    snapshot, knowledge=context.knowledge, style=context.style,
-                    speaker_profile=context.speaker_profile, people=context.people, person_messages=context.person_messages,
-                    room_game=self.game_context(game) if game else None, quote=quote, avoid=avoid,
-                    question=clean_query, revision=revision, self_facts=self_facts, **prompt_options),
-                    personality.name)
+                with work("写回复", answer_until):
+                    text = personality_text(Dialogue(ctx.llm_for(message, personality=personality, for_reply=True)).reply(
+                        snapshot, knowledge=context.knowledge, style=context.style,
+                        speaker_profile=context.speaker_profile, people=context.people, person_messages=context.person_messages,
+                        room_game=self.game_context(game) if game else None, quote=quote,
+                        question=clean_query, revision=revision, self_facts=self_facts, **prompt_options),
+                        personality.name)
                 text, preference = voice_reply_format(text) if can_voice else (text, None)
                 if not text:
-                    raise LLMError("大模型对话结果格式不正确，请重试")
+                    raise LLMFormatError("大模型对话结果格式不正确")
                 return text, preference
 
             reply, voice_preference = generate()
             self._ensure_running()
-            recent_bot = self._recent_bot_texts(message.chat_id)
-            for attempt in range(2):
-                review_facts = self_facts
-                review_model = reviewer
-                if not review_facts and VOICE_ACTION_WORDS.search(reply):
-                    review_facts = {"语音能力": VOICE_CAPABILITY}
-                    review_model = judge
+            review_facts = self_facts
+            if not review_facts and VOICE_ACTION_WORDS.search(reply):
+                review_facts = {"语音能力": VOICE_CAPABILITY}
+            checked_search = any(item.tool == "search" and item.ok for item in outcome.results)
+            group_attribution = bool(GROUP_ATTRIBUTION.search(clean_query))
+            if fresh or review_facts or checked_search or group_attribution:
                 evidence = reply_evidence(snapshot, context, quote=quote,
                     quote_is_bot=quote_is_bot,
                     tools=outcome.payload(), room_game=self.game_context(game) if game else None,
                     turn_context=outcome.context, self_facts=review_facts)
-                decision = review_reply(review_model, clean_query, reply, evidence)
-                self._ensure_running()
-                ctx.logger.info("回复依据核对：status=%s local=%s public=%s search=%s own=%s error=%s",
-                                decision.status, decision.local, decision.public, decision.search, decision.own, decision.error)
-                search_needed = (self.tools is not None and decision.needs_search and not (offer_reading or read_accepted)
-                                 and not any(item.tool == "search" for item in outcome.results))
-                current_supported = not fresh or supports_current_answer(
-                    judge, clean_query, reply, investigation.public_text, now=self.members.now())
-                repeated = voice_preference is not True and too_similar(reply, recent_bot)
-                if current_supported and decision.status != REJECTED and not search_needed and (not repeated or attempt == 1):
-                    if review_model is not None and decision.error:
-                        raise LLMError("本轮未能完成依据核对")
+                for attempt in range(2):
+                    with work("核对回复", active_budget.deadline if active_budget else None):
+                        if fresh:
+                            accepted = supports_current_answer(judge, clean_query, reply, investigation.public_text,
+                                                               now=self.members.now())
+                        else:
+                            decision = review_reply(judge if review_facts else reviewer, clean_query, reply, evidence)
+                            accepted = decision.status != REJECTED
+                            ctx.logger.info("回复依据核对：status=%s local=%s public=%s own=%s error=%s",
+                                            decision.status, decision.local, decision.public, decision.own, decision.error)
+                    if accepted:
+                        break
+                    if attempt == 0 and (active_budget is None or active_budget.clock() + 8 < answer_until):
+                        try:
+                            reply, voice_preference = generate(revision=reply, guidance=(
+                                "按已有资料答当前问题，删掉没有依据的细节。纠错时区分群友和机器人各自说过的话，"
+                                "公开近况注明出处和时间，没查到的部分直说。"))
+                            continue
+                        except LLMContentBlocked:
+                            raise
+                        except (LLMError, ReplyExpired):
+                            pass
+                    if correction_reply:
+                        reply = correction_reply
+                    else:
+                        reply = ("这条消息我还没核实清楚，先不下结论。" if fresh or checked_search else
+                                 "我刚才没对上这句是谁说的，现有记录里还没找到。" if group_attribution or "correction" in intents else
+                                 VOICE_CAPABILITY)
+                    voice_preference = False
                     break
-                if attempt == 1:
-                    if fresh:
-                        reply, voice_preference = "这条近期消息我还没核实清楚，先不下结论。", False
-                        break
-                    raise LLMError("回复修订后仍未满足问题与依据要求")
-                if search_needed and self.tools is not None:
-                    query = Dialogue(ctx.llm_for(message, personality=personality)).search_followup(
-                        clean_query, context=outcome.context, evidence="", answer=reply)
-                    checked = self._tools(ctx).search(query)
-                    outcome.results.append(checked)
-                    outcome.search_query = outcome.search_subject = query
-                    options["tool_results"] = outcome.payload()
-                    with self._followup_lock:
-                        _remember_tool_followup(self._last_searches,
-                            (message.session_id, message.chat_id, message.sender_id), message.received_at, (query, query))
-                try:
-                    reply, voice_preference = generate(avoid=repeated, revision=reply, guidance=(
-                        "按当前问题与资料修订。先回答具体内容，人物话题用相关成员原话归纳，避免空泛接梗。"
-                        "删掉没有对应来源的具体发言、动作、剧情、公众反应和病因；保留时间及说话者。"
-                        "缺少必要条件时只问一个关键问题。不要描述核对流程。"
-                        + ("核对公开资料中的主体、发生时间和当前状态。采用有直接来源的结论，删去旧信息。" if fresh else "")
-                        + ("先承认已找到的原话或说明证据不足，再更正结论。只说原话、证据和更正，"
-                           "删掉‘当时就是为了……’之类的动机及任何解释，即使原话带玩笑。"
-                           "证据不足时别下新结论，涉及语音时只说程序确认的能力和动作。" if review_facts else "")))
-                except LLMContentBlocked:
-                    raise
-                except LLMError:
-                    if repeated and decision.status != REJECTED and not search_needed:
-                        break
-                    raise
             # 用了工具的回复按问答单条发出；带网址的消息容易触发微信风控，模型照抄了网址也在这里去掉。
             if outcome.used:
                 reply = strip_links(reply) or reply
             tier = QA if self_facts else ((DETAIL if detail else QA) if outcome.used or outcome.ask or material
                                          else classify_tier(clean_query, detail=detail))
-            if active_budget is not None and not (offer_reading or read_accepted):
-                with active_budget.lock:
-                    if not active_budget.closed and active_budget.revision == revision:
-                        active_budget.ready = ReplyDraft(revision, reply, needs_review, fallback_sent)
+            remember_draft(reply)
             yield from respond(reply, tier, preference=voice_preference if can_voice else False)
             ctx.logger.info("艾特对话完成：room=%s persona=%s context=%d", message.chat_id,
                             personality.name, len(snapshot.messages))
@@ -909,8 +923,12 @@ class Plugin:
             ctx.logger.warning("艾特对话失败：%s", error)
             active_budget = CURRENT.get()
             if self._wait is not None and active_budget is not None:
-                reason = ("模型连接失败或超时，本轮没有拿到回答，具体原因未知"
-                          if isinstance(error, LLMConnectionError) else "本轮没有可发送的答复，具体原因未确认")
+                if isinstance(error, LLMConnectionError):
+                    reason = timeout_reason(active_budget.stage)
+                elif isinstance(error, LLMFormatError):
+                    reason = "刚才模型回过来的内容里，我没能读出一段正文。"
+                else:
+                    reason = "刚才写回复的时候模型接口报错了，我没收到能发的文字。"
                 self._wait.finish(active_budget, reason)
         finally:
             # 已发出至少一条（含守卫或异常发生在首条之后）就保留去重记录，避免排队中的同一提问重发。

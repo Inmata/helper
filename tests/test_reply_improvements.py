@@ -83,8 +83,6 @@ class ReplyImprovements(unittest.TestCase):
         ctx.members = self.store
         ctx.personality.return_value = self.store.personality(daily.ROOM)
         ctx.response_guard = lambda snapshot, persona: self.store.delivery_guard(snapshot)
-        ctx.llm_for.return_value.complete_text.return_value = "这回没弄完，再喊我一声试试。"
-        ctx.jev.noul.return_value = [0.98, 0.01]
         sent = threading.Event()
         def reply(*args, **kwargs):
             with kwargs['delivery_guard']():
@@ -94,15 +92,15 @@ class ReplyImprovements(unittest.TestCase):
         status = StatusReplies(ctx.logger)
         wait = ReplyWait(status)
         try:
-            budget = wait.accept(message, ctx, 90, retryable=True)
+            budget = wait.accept(message, ctx, 90)
+            budget.stage = "看图"
             budget.deadline = time.monotonic() - 1
             self.assertTrue(sent.wait(2))
             wait.finish(budget, '重复结果')
             self.assertEqual(ctx.reply_at.call_count, 1)
-            self.assertEqual(ctx.reply_at.call_args.args[1], "这回没弄完，再喊我一声试试。")
-            payload = json.loads(ctx.llm_for.return_value.complete_text.call_args.args[1])
-            self.assertIn("等待超时", payload["实际状态"]["结果"])
-            self.assertIn("重试", payload["实际状态"]["可用操作"])
+            self.assertEqual(ctx.reply_at.call_args.args[1], "我等那张图的识别结果等太久了，没来得及回你。")
+            ctx.llm_for.assert_not_called()
+            ctx.jev.noul.assert_not_called()
             with self.assertRaises(ReplyExpired), budget.delivery():
                 pass
         finally:
@@ -143,8 +141,9 @@ class ReplyImprovements(unittest.TestCase):
                 verified.append(state["依据"]["本轮确认事实"])
                 return [0.01, 0.01, 0.01, 0.99 if state["拟发送的回答"] == denied else 0.01, 0.01, 0.01, 0.01]
             if "候选原话" in state:
-                self.assertEqual([row["原话"] for row in state["候选原话"]], [original])
-                return [0.99]
+                own = [row["原话"] for row in state["候选原话"] if row["发言人"] == "机器人"]
+                self.assertEqual(own, [original])
+                return [0.99 if row["原话"] == original else 0.01 for row in state["候选原话"]]
             return [0.99 if q == CORRECTION_INTENT else 0.01 for q in questions]
 
         self.ctx._jev.noul.side_effect = judge
@@ -166,6 +165,33 @@ class ReplyImprovements(unittest.TestCase):
         self.assertNotIn(original, provider.call_args.args[1])
         self.assertEqual(verified[-1]["机器人原话"], [])
         self.assertTrue(self.backend.sent[-1][1].endswith("这段记录里我没找着那句，能引用一下吗？"))
+
+    def test_correction_keeps_requesters_actual_words_and_bots_later_retelling(self):
+        self.store.record(self.message("不如我农村户口", sequence=1))
+        self.store.record_bot_reply(daily.ROOM, "他自称农村户口。")
+        current = self.message("我啥时候是农村户口", sequence=2)
+        self.store.record(current)
+        self.backend.send_at_text = lambda room, text, ids: self.backend.send_text(room, text)
+        plugin = MentionPlugin()
+        plugin.members, plugin.room_state = self.store, self.store.room_state
+        self.ctx._jev = Mock()
+        self.ctx._llm.complete_text = Mock(return_value="你之前说过‘不如我农村户口’，我后来按那句转述了。")
+
+        def judge(state, questions, **options):
+            if "候选原话" in state:
+                return [0.99] * len(questions)
+            if "拟发送的回答" in state:
+                facts = state["依据"]["本轮确认事实"]
+                self.assertEqual(facts["群友原话"][0]["原话"], "不如我农村户口")
+                self.assertTrue(facts["群友原话"][0]["本人"])
+                self.assertEqual(facts["机器人原话"][0]["原话"], "他自称农村户口。")
+            return [0.99 if question == CORRECTION_INTENT else 0.01 for question in questions]
+
+        self.ctx._jev.noul.side_effect = judge
+        for _ in plugin._reply_once(current, self.ctx, current.text, None):
+            pass
+        self.assertIn("不如我农村户口", self.ctx._llm.complete_text.call_args.args[1])
+        self.assertIn("按那句转述了", self.backend.sent[-1][1])
 
     def test_own_reply_lookback_uses_the_message_time_without_context_reset(self):
         self.store.record_bot_reply(daily.ROOM, "早于窗口")

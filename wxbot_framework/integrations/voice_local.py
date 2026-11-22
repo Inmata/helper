@@ -52,6 +52,10 @@ class LocalVoice:
             self._ready.set()
             self._responses.put(None)
 
+    @property
+    def ready(self):
+        return self._ready.is_set() and self._initialized
+
     def wait_ready(self):
         """等待启动预热完成；这段等待不占单句合成的 50 秒预算。"""
         from .reply_budget import remaining

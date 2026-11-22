@@ -5,13 +5,13 @@ from .context_tools import ContextToolError
 from .evidence_tools import ConversationEvidence, tool
 from .tool_loop import run_tools
 from ..integrations.jev import JevError
-from ..integrations.llm import LLMFormatError
+from ..integrations.llm import LLMContentBlocked, LLMError, LLMFormatError
 from ..timeutil import format_local
 
 
 ROUTING = (
     {"instructions": "本轮要答的核心是否依赖近期可能变化的公开状态，需要重新查证？",
-     "true": "核实某公众人物现在的任职、谁已离任或复职、某版本现状、当日结果、消息是否已证实。"
+     "true": "核实某公众人物现在的任职、谁已离任或复职、某版本现状、当日结果、消息是否已证实、某作品当前的评分。"
              "包括短回复在纠正机器人的旧说法，或当前问题把新消息当作关键前提。",
      "false": "只是翻译、复述、创作、讲稳定常识、普通闲聊，或问群友和私人话题。只判断本轮想弄清的事。"},
     {"instructions": "本轮是否需要主动找本群原文或档案，才能辨清对象、解释所指内容或回答？",
@@ -80,11 +80,21 @@ def gather_answer_material(model, members, knowledge, message, snapshot, questio
         evidence.tools.register(tool("search_public", "查询本轮涉及的近期公开事实，返回含出处的公开资料。",
                                      {"query": {"type": "string", "description": "公开主体和待核实的变更，不含群友私话"}},
                                      find_public, required=("query",)))
-    output = run_tools(model, SYSTEM, task, evidence.tools, guard=guard, logger=logger, max_tokens=None)
-    ids = output.get("依据")
-    if set(output) != {"依据"} or not isinstance(ids, list) or len(ids) > 12 or any(
-            not isinstance(key, str) or key not in evidence.records for key in ids):
-        raise LLMFormatError("群聊取材没有给出有效的来源编号")
+    initial = set(evidence.records)
+    try:
+        output = run_tools(model, SYSTEM, task, evidence.tools, guard=guard, logger=logger,
+                           max_tokens=None, rounds=2 if current else 1, repair=False)
+        ids = output.get("依据")
+        if not isinstance(ids, list):
+            raise LLMFormatError("群聊取材没有给出来源编号")
+        ids = [key for key in ids if isinstance(key, str) and key in evidence.records][:12]
+    except LLMContentBlocked:
+        raise
+    except (LLMError, TimeoutError) as error:
+        logger.info("群聊取材提前结束：%s", type(error).__name__)
+        ids = [key for key in evidence.records if key not in initial]
+        if not ids:
+            return None
     records = [evidence.records[key] for key in dict.fromkeys(ids)]
     local = tuple(row for row in records if row["类别"] != "公开搜索结果")
     public = tuple(row for row in records if row["类别"] == "公开搜索结果")

@@ -2,12 +2,12 @@
 import json
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import test_image_generation as images_test
 from wxbot_framework.conversation.mention_tools import MentionTools, ToolResult, read_tool_options
 from wxbot_framework.conversation.reply_wait import ReplyWait
-from wxbot_framework.integrations.reply_budget import ReplyDraft
+from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget, ReplyDraft, remaining
 
 
 ROOM = images_test.ROOM
@@ -122,6 +122,60 @@ class ChatEvidenceTests(unittest.TestCase):
             self._reply(message, message.text)
         self.assertIn("阿青最后定的是北门。", self.fixture.backend.texts[-1][1])
 
+    def test_preparation_timeout_leaves_firsthand_material_and_sixty_seconds_for_text(self):
+        self.fixture.message("路线定了，走北门。", sender="wxid_other")
+        for number in range(13):
+            self.fixture.message(f"闲聊 {number}", sender="wxid_other")
+        message = self.fixture.message("之前路线定在哪？")
+        now = [0]
+        budget = ReplyBudget(0, 90, clock=lambda: now[0])
+        model = self.ctx._llm = Mock()
+
+        def plan(system, user, **options):
+            self.assertEqual(remaining(45, kind="llm"), 20)
+            if not json.loads(user)["取材记录"]:
+                return images_test.lookup("search_messages", keywords=["路线"])
+            now[0] = 20
+            raise TimeoutError()
+
+        def answer(system, user, **options):
+            self.assertEqual(remaining(60, kind="llm"), 60)
+            self.assertIn("走北门", user)
+            return "走北门。"
+
+        model.complete_json.side_effect = plan
+        model.complete_text.side_effect = answer
+        token = CURRENT.set(budget)
+        try:
+            with patch("plugins.mention_chat.material_needs", return_value=(False, True)):
+                self._reply(message, message.text)
+        finally:
+            CURRENT.reset(token)
+        self.assertEqual(model.complete_text.call_count, 1)
+        self.assertIn("走北门。", self.fixture.backend.texts[-1][1])
+
+    def test_quoted_image_reaches_text_without_a_material_round_or_reply_review(self):
+        self.plugin.tools = read_tool_options({})
+        self.fixture.poster_fixture()
+        self.ctx._llm = Mock()
+        self.ctx._llm.complete_json.side_effect = AssertionError("短句引用图不需要先取材")
+        self.ctx._llm.complete_text.return_value = "这张确实更像头像。"
+
+        class Judge:
+            def noul(self, state, questions, **options):
+                assert "拟发送的回答" not in state
+                return [0.01] * len(questions)
+
+        self.ctx._jev = Judge()
+        message = self.fixture.message("不如这个", data={"quote": {"ref_type": "3", "svrid": "912"}})
+        self._reply(message, message.text)
+        self.assertEqual([call["name"] for call in self.fixture.server.calls], ["analyze_image"])
+        model = self.ctx._llm
+        model.complete_json.assert_not_called()
+        model.complete_text.assert_called_once()
+        self.assertIn("左侧旧职业为软件开发", model.complete_text.call_args.args[1])
+        self.assertIn("这张确实更像头像。", self.fixture.backend.texts[-1][1])
+
     def test_deadline_draft_registers_actual_send_and_can_be_followed_up(self):
         request = self.fixture.message("哪条路线？")
         turns = self.fixture.members.turns
@@ -184,7 +238,7 @@ class ChatEvidenceTests(unittest.TestCase):
         request = self.fixture.message("先回答")
         waiter = ReplyWait(self.plugin._status)
         self.addCleanup(waiter.close)
-        budget = waiter.accept(request, self.ctx, 90, retryable=True)
+        budget = waiter.accept(request, self.ctx, 90)
         budget.ready = ReplyDraft(0, "实际只提交一次的正文", None)
         with patch.object(self.fixture.backend, "send_at_text", return_value=False) as send:
             self.assertFalse(self.ctx.reply_at(request, budget.ready.text, delivery_guard=budget.delivery))

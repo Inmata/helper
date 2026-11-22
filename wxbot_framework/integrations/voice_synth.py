@@ -3,6 +3,8 @@ from io import BytesIO
 import subprocess
 import wave
 
+from .reply_budget import remaining
+
 _SYNTHESIZE = r"""
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Speech
@@ -32,7 +34,7 @@ try {
 def synthesize_voice(text):
     result = subprocess.run(
         ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _SYNTHESIZE],
-        input=text.encode("utf-8"), capture_output=True, timeout=8,
+        input=text.encode("utf-8"), capture_output=True, timeout=remaining(8),
         creationflags=subprocess.CREATE_NO_WINDOW, check=True)
     if not result.stdout:
         raise ValueError("本机语音合成没有音频")

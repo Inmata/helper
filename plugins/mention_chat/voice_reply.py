@@ -10,6 +10,7 @@ from wxbot_framework.conversation.members import MemberError
 from wxbot_framework.integrations.voice_synth import synthesize_voice
 from wxbot_framework.integrations.voice_local import LocalVoice
 from wxbot_framework.integrations.jev import JevError
+from wxbot_framework.integrations.reply_budget import CURRENT
 
 COMMAND = "/音色"
 READ_COMMAND = "/语音"
@@ -217,7 +218,7 @@ class VoiceReply:
         return True
 
     def deliver(self, message, ctx, reply, *, voice, guard, split=False, dispatch=None, on_sent=None, on_outcome=None,
-                fixed=False):
+                fixed=False, automatic=False):
         """交给慢队列逐段发送；合成失败返回未发送正文，完成或回执不明返回 None。"""
         yield
         member = (message.chat_id, message.sender_id)
@@ -228,7 +229,8 @@ class VoiceReply:
             return reply
         parts = voice_parts(reply) if split else [reply]
         for index, part in enumerate(parts):
-            submitted = self.send(message, ctx, part, voice=voice, guard=guard, dispatch=dispatch)
+            submitted = self.send(message, ctx, part, voice=voice, guard=guard, dispatch=dispatch,
+                                  **({"automatic": True} if automatic else {}))
             if submitted is None:
                 if on_outcome is not None:
                     on_outcome("failed")
@@ -243,15 +245,32 @@ class VoiceReply:
                 on_sent(part)
         return None
 
-    def send(self, message, ctx, reply, *, voice, guard, dispatch=None):
+    def send(self, message, ctx, reply, *, voice, guard, dispatch=None, automatic=False):
         """合成失败返回 None；已提交则返回微信发送结果。"""
-        with self._synthesis_lock:
+        now = monotonic()
+        budget = CURRENT.get()
+        if automatic and budget is not None:
+            with budget.work("合成语音", min(budget.deadline - 2, budget.clock() + 5)):
+                wav, voice = self._synthesize(ctx, reply, voice, automatic=True)
+        else:
+            wav, voice = self._synthesize(ctx, reply, voice, automatic=automatic)
+        if wav is None:
+            return None
+        submit = lambda: ctx.reply_voice(message, wav, transcript=reply, delivery_guard=guard)
+        sent = dispatch(submit) if dispatch is not None else submit()
+        ctx.logger.info("群聊语音回复：%s，音色=%s，合成到回执 %.2f 秒",
+                        "已提交" if sent else "未确认", voice, monotonic() - now)
+        return sent
+
+    def _synthesize(self, ctx, reply, voice, *, automatic):
+        if not self._synthesis_lock.acquire(blocking=not automatic):
+            return None, voice
+        try:
             if self._stopped:
-                return None
-            now = monotonic()
+                return None, voice
             if self._voices:
-                if voice not in self._voices:
-                    return None
+                if voice not in self._voices or (automatic and (self._local is None or not self._local.ready)):
+                    return None, voice
                 try:
                     if self._local is None:
                         ctx.logger.info("本地音色进程重新启动：%s", voice)
@@ -260,21 +279,19 @@ class VoiceReply:
                 except (OSError, ValueError) as error:
                     ctx.logger.warning("%s语音合成失败，改发文字：%s（%s）", voice, type(error).__name__, error)
                     self._close_local()
-                    return None
+                    return None, voice
                 if wav is None:
                     ctx.logger.info("%s语音重试后仍超长，改发文字", voice)
-                    return None
+                    return None, voice
             else:
                 if voice != DEFAULT_VOICE:
-                    return None
+                    return None, voice
                 try:
                     wav = synthesize_voice(reply)
                 except (OSError, SubprocessError, ValueError) as error:
                     ctx.logger.warning("本机语音合成失败，改发文字：%s", type(error).__name__)
-                    return None
+                    return None, voice
                 voice = "Windows"
-        submit = lambda: ctx.reply_voice(message, wav, transcript=reply, delivery_guard=guard)
-        sent = dispatch(submit) if dispatch is not None else submit()
-        ctx.logger.info("群聊语音回复：%s，音色=%s，合成到回执 %.2f 秒",
-                        "已提交" if sent else "未确认", voice, monotonic() - now)
-        return sent
+            return wav, voice
+        finally:
+            self._synthesis_lock.release()

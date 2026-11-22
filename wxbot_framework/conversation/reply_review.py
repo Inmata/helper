@@ -1,5 +1,6 @@
 """普通回复的依据检查：同一次 Jev 调用区分修订与必要的公开查证。"""
 from dataclasses import dataclass
+from datetime import timedelta
 import re
 
 from ..integrations.jev import JevError
@@ -61,10 +62,10 @@ UNSUPPORTED_EXPLANATION = {
 }
 CORRECTION_EVADED = {
     "instructions": "只判断候选有没有正面回应对机器人上一句或历史原话的纠正。对照‘本轮确认事实’里的原话核对。",
-    "true": "找到能对应的原话，却没有明确承认那句是自己说的。原断言被质疑且依据不足，"
+    "true": "找到能对应的原话，却回避发言人或把群友的话算给自己。原断言被质疑且依据不足，"
             "只换一个说法、谈泛泛的可能性或反问群友，却没有收回或说明先前说得太确定。"
             "没有可信原话却回避说明查不到。追问实际动作时，明明有程序记录却转移话题。",
-    "false": "明确承认自己说过对应的话；需要更正时承认前面哪点说错或说得太满，按证据更正，"
+    "false": "按记录说清群友先说过的话和机器人后来如何转述；需要更正时按证据更正，"
              "当前无可靠事实就说明依据缺口。已有程序确认的动作则直接回答。可以口语化，无需使用固定句式。",
 }
 UNVERIFIED_REPLACEMENT = {
@@ -86,30 +87,37 @@ def _speech_terms(text):
     return terms
 
 
-def correction_evidence(jev, question, rows, *, quote=None, quote_id=""):
-    """按明示引用和关键词取候选，语义上是否对应由 Jev 判断。"""
+def correction_evidence(jev, members, snapshot, message, question, *, quote=None, quote_id=""):
+    """在同一段历史里找机器人和群友各自说过的话，保留真实发言人。"""
+    rows = members.own_replies(snapshot)
     quoted = " ".join(strip_at_labels(quote["text"]).split()) if quote else ""
     direct = next((row for row in rows if quote_id and row["context_message_id"] == quote_id), None)
     if direct is None and quoted:
         direct = next((row for row in rows if " ".join(strip_at_labels(row["text"]).split()) == quoted), None)
-    if direct is not None:
-        candidates = [direct]
-    else:
-        terms = _speech_terms(question + " " + quoted)
-        candidates = sorted(rows, key=lambda row: len(terms & _speech_terms(row["text"])), reverse=True)[:10]
+    terms = _speech_terms((question + " " + quoted)[:320])
+
+    def related(candidates, limit):
+        scored = [(len(terms & _speech_terms(row["text"])), row) for row in candidates]
+        return [row for score, row in sorted(scored, key=lambda item: item[0], reverse=True)[:limit] if score]
+
+    peers = members.recent_rows(snapshot.room, before_id=snapshot.anchor_id, context=True, limit=100,
+                                since=members.now() - timedelta(days=14), keywords=tuple(sorted(terms))) if terms else []
+    peers = members.label_speakers(related(reversed(peers), 6), snapshot.room)
+    own = [direct] if direct is not None else related(rows, 6)
     evidence = [{"编号": row["id"], "时间": row["received_at"], "形式": "朗读语音" if row["context_kind"] == "voice" else "文字",
-                 "原话": strip_at_labels(row["text"])} for row in candidates]
-    if direct is not None or not evidence:
+                 "发言人": row.get("speaker_name", "机器人"), "本人": row.get("sender_id") == message.sender_id,
+                 "原话": strip_at_labels(row["text"])} for row in (*own, *peers)]
+    if direct is not None or jev is None or not evidence:
         return evidence
-    checks = [{"instructions": f"编号 {row['编号']} 的机器人历史原话是否直接对应群友现在核对的那句话或语音？",
+    checks = [{"instructions": f"编号 {row['编号']} 的聊天原话是否直接对应现在核对的说法，或能区分到底是谁先这么说？",
                "true": "是同一说法、同一件事的相反说法，或直接对应其质疑的语音。保留玩笑等条件。",
                "false": "只是同名、同主题、一般闲聊、无关状态，或无法确定指的是这条。"} for row in evidence]
     try:
         scores = jev.noul({"现在的纠正或追问": question, "引用线索": quoted, "候选原话": evidence}, checks, timeout=2)
         ranked = sorted(zip(scores, evidence, strict=True), key=lambda pair: pair[0], reverse=True)
     except (JevError, OSError, ValueError):
-        return []
-    return [row for score, row in ranked[:3] if score >= 0.7]
+        return evidence
+    return [row for score, row in ranked if score >= 0.7]
 
 
 @dataclass(frozen=True)

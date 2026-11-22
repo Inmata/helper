@@ -7,6 +7,7 @@ import threading
 import time
 
 CURRENT = ContextVar("reply_budget", default=None)
+_WORK = ContextVar("reply_work_deadline", default=None)
 
 
 class ReplyExpired(TimeoutError):
@@ -25,6 +26,8 @@ class ReplyBudget:
     def __init__(self, arrived, seconds=90, *, clock=time.monotonic):
         self.clock = clock
         self.deadline = arrived + seconds
+        self.prepare_until = self.deadline - 70
+        self.answer_until = self.deadline - 10
         self.notice_at = arrived + 30
         self.calls = {}
         self.llm_limit = 3
@@ -53,9 +56,20 @@ class ReplyBudget:
             return (draft.revision == self.revision and not self.reviewing_additions
                     and not (draft.needs_review is not None and draft.needs_review()))
 
-    def remaining(self, cap, *, kind=None):
+    @contextmanager
+    def work(self, stage, until):
         with self.lock:
-            remaining = self.deadline - self.clock()
+            self.stage = stage
+        token = _WORK.set((self, until))
+        try:
+            yield
+        finally:
+            _WORK.reset(token)
+
+    def remaining(self, cap, *, kind=None, until=None):
+        with self.lock:
+            deadline = self.deadline if until is None else min(self.deadline, until)
+            remaining = deadline - self.clock()
             if self.closed or remaining <= 0:
                 raise ReplyExpired("本轮回复已到截止时间")
             if kind:
@@ -63,7 +77,8 @@ class ReplyBudget:
                 if self.calls.get(kind, 0) >= limit:
                     raise ReplyExpired("本轮调用额度已用完")
                 self.calls[kind] = self.calls.get(kind, 0) + 1
-                self.stage = {"llm": "组织回答", "jev": "核对上下文", "search": "检索资料"}[kind]
+                if until is None:
+                    self.stage = {"llm": "组织回答", "jev": "核对上下文", "search": "检索资料"}[kind]
             return min(cap, remaining)
 
     @contextmanager
@@ -87,4 +102,7 @@ class ReplyBudget:
 
 def remaining(cap, *, kind=None):
     budget = CURRENT.get()
-    return budget.remaining(cap, kind=kind) if budget is not None else cap
+    if budget is None:
+        return cap
+    work = _WORK.get()
+    return budget.remaining(cap, kind=kind, until=work[1] if work and work[0] is budget else None)

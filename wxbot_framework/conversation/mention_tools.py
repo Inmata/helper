@@ -280,10 +280,12 @@ class MentionTools:
 
     def steps(self, *, question, room, sender, received_at, quote=None, context_question="", image_choices=(),
               previous_search="", followup_topic=None, previous_subject="", focus=None, search_date="",
-              group_context=None):
+              group_context=None, stop_at=None):
         """``context_question``：艾特没有正文时提问人上一条发言（见 ``previous_question``），只用来判断和调用工具。"""
         started = self.clock()
         deadline = started + self.budget
+        if stop_at is not None:
+            deadline = min(deadline, stop_at)
         quote = quote or {}
         has_quote = any(quote.get(key) for key in ("name", "text", "ref_type"))  # 引用了任意一条消息
         asked = question  # 艾特自己的正文；回填上一句话后仍用它判断这次艾特有没有实质问题

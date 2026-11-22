@@ -9,8 +9,8 @@ from wxbot_framework.conversation.tool_router import REJECTED, UNAVAILABLE
 
 
 class ReviewJev(FakeJev):
-    def __init__(self, answers):
-        super().__init__()
+    def __init__(self, answers, **options):
+        super().__init__(**options)
         self.answers = iter(answers)
         self.reviews = []
 
@@ -75,26 +75,28 @@ class OrdinaryReplyTests(unittest.TestCase):
         self.assertIn("待修订候选", ctx.last_user)
         self.assertIn("小红刚才回了俩问号", ctx.last_user)
 
-    def test_extra_public_consensus_is_removed_without_search(self):
-        plugin, ctx = self.build(["很多人觉得这书战力崩了。", "你觉得最拉的是哪一段？"],
-                                 jev=ReviewJev([[0.01, 0.98, 0.08], [0.01, 0.05, 0.03]]))
+    def test_casual_opinion_is_sent_without_search_or_review(self):
+        jev = ReviewJev([])
+        plugin, ctx = self.build("你觉得最拉的是哪一段？", jev=jev)
         plugin.on_message(mention("这书后半段是不是拉完了"), ctx)
         self.assertEqual(ctx.magpie.queries, [])
         self.assertEqual(ctx.sent, [("reply_at", "你觉得最拉的是哪一段？")])
+        self.assertEqual(jev.reviews, [])
 
-    def test_missing_essential_public_fact_triggers_search_and_existing_verification(self):
-        jev = ReviewJev([[0.01, 0.98, 0.98], [0.01, 0.02, 0.01]])
-        plugin, ctx = self.build(["这书评分9.8。", "这本书 官方评分 最新数据", "这个站显示是7.2分。"],
+    def test_essential_public_fact_search_runs_before_the_first_answer(self):
+        jev = ReviewJev([[0.01, 0.02, 0.01]], search=0.98)
+        plugin, ctx = self.build("这个站显示是7.2分。",
                                  jev=jev, magpie=FakeMagpie(search="官网本书评分7.2分。"))
         plugin.on_message(mention("这本书评分多少"), ctx)
-        self.assertEqual(ctx.magpie.queries, ["这本书 官方评分 最新数据"])
+        self.assertEqual(len(ctx.magpie.queries), 1)
+        self.assertIn("这本书评分多少", ctx.magpie.queries[0])
         self.assertEqual(ctx.sent, [("reply_at", "这个站显示是7.2分。")])
         self.assertIn("【联网搜索结果】", ctx.last_user)
-        self.assertEqual(ctx.completions, 3)
+        self.assertEqual(ctx.completions, 1)
 
     def test_failed_search_is_not_repeated_and_reply_can_ask_for_missing_material(self):
-        jev = ReviewJev([[0.01, 0.98, 0.98], [0.01, 0.04, 0.05]])
-        plugin, ctx = self.build(["评分9.8。", "这本书 评分", "你说的是哪个评分网站？"],
+        jev = ReviewJev([], search=0.98)
+        plugin, ctx = self.build("你说的是哪个评分网站？",
                                  jev=jev, magpie=FakeMagpie(error=TimeoutError()))
         plugin.on_message(mention("这本书评分多少"), ctx)
         self.assertEqual(len(ctx.magpie.queries), 1)
@@ -103,16 +105,16 @@ class OrdinaryReplyTests(unittest.TestCase):
     def test_repeatedly_unsupported_reply_is_never_sent(self):
         jev = ReviewJev([[0.98, 0.01, 0.01]] * 3)
         plugin, ctx = self.build("小红刚才回了俩问号。", jev=jev)
-        with self.assertLogs("MentionTests", level="WARNING") as logs:
-            plugin.on_message(mention("谁刚才急眼了"), ctx)
-        self.assertIn("修订后仍未满足", logs.output[0])
-        self.assertEqual(ctx.sent, [])
+        plugin.on_message(mention("谁刚才急眼了"), ctx)
+        self.assertEqual(ctx.sent, [("reply_at", "我刚才没对上这句是谁说的，现有记录里还没找到。")])
         self.assertEqual(ctx.completions, 2)
 
-    def test_unavailable_review_does_not_release_unverified_reply(self):
-        plugin, ctx = self.build("你好呀。", jev=ReviewJev([TimeoutError()]))
+    def test_greeting_does_not_depend_on_review(self):
+        jev = ReviewJev([TimeoutError()])
+        plugin, ctx = self.build("你好呀。", jev=jev)
         plugin.on_message(mention("你好"), ctx)
-        self.assertEqual(ctx.sent, [])
+        self.assertEqual(ctx.sent, [("reply_at", "你好呀。")])
+        self.assertEqual(jev.reviews, [])
         self.assertEqual(ctx.magpie.queries, [])
 
 

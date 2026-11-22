@@ -886,8 +886,8 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertEqual(history[1]["content"], "[机器人发言] 机器人说过乙")
 
     def test_invalid_model_reply_preserves_context(self):
-        status = "这回没答好，你再喊我一下。"
-        provider = Mock(side_effect=["", status])
+        status = "刚才模型回过来的内容里，我没能读出一段正文。"
+        provider = Mock(return_value="")
         plugin = self.setup_chat(provider)
         self.ctx._jev = Mock()
         self.ctx._jev.noul.return_value = [0.98, 0.01]
@@ -904,8 +904,8 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertTrue(delivered.wait(2))
         self.assertEqual(len(self.backend.sent), 1)
         self.assertTrue(self.backend.sent[0][1].endswith(status))
-        self.assertEqual(provider.call_count, 2)
-        self.assertIn("具体原因未确认", self.ctx._jev.noul.call_args.args[0]["实际状态"]["结果"])
+        provider.assert_called_once()
+        self.assertFalse(any("实际状态" in call.args[0] for call in self.ctx._jev.noul.call_args_list))
         self.assertTrue(self.store.history("测试成员", ROOM))
 
     def test_game_reply_preserves_next_word_and_rule(self):

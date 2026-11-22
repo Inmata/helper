@@ -9,6 +9,19 @@ from .members import SnapshotExpired
 from .turns import CLARIFICATION_SECONDS, FOLLOW_SECONDS, judge_turn, turn_key
 
 
+def timeout_reason(stage):
+    return {
+        "排队": "刚才前头的消息还没回完，这条排着排着就过了时间。",
+        "查群聊资料": "我在翻群里的原话，那边没及时给我结果。",
+        "看图": "我等那张图的识别结果等太久了，没来得及回你。",
+        "联网查资料": "我在等联网查到的结果，时间到了还没拿到。",
+        "写回复": "我等模型把这句写完，等到时间了还没回过来。",
+        "核对回复": "我卡在核对你问的那条说法了，没及时对上记录。",
+        "合成语音": "刚才等语音合成等太久了，音频没出来。",
+        "准备发送文字": "话写完了，但没赶上这轮的发送时间。",
+    }.get(stage, "我刚才卡在理解这句和接哪段前文了，没及时弄明白。")
+
+
 class ReplyWait:
     def __init__(self, status):
         self.status = status
@@ -19,13 +32,13 @@ class ReplyWait:
         self.thread = threading.Thread(target=self._run, name="MentionChat.wait", daemon=True)
         self.thread.start()
 
-    def accept(self, message, ctx, seconds, *, retryable=False):
+    def accept(self, message, ctx, seconds):
         budget = ReplyBudget(message.received_at, seconds)
         personality = ctx.personality(message)
         snapshot = ctx.members.conversation_snapshot(message)
         budget.source_id = snapshot.anchor_id
         with self.lock:
-            self.jobs[id(budget)] = (budget, message, ctx, snapshot, personality, retryable)
+            self.jobs[id(budget)] = (budget, message, ctx, snapshot, personality)
         return budget
 
     def wrap(self, turn, budget):
@@ -41,7 +54,7 @@ class ReplyWait:
                     CURRENT.reset(token)
                 yield
         except ReplyExpired:
-            self.finish(budget, "本轮达到处理时限或调用上限，回答未完成")
+            self.finish(budget, timeout_reason(budget.stage))
         except SnapshotExpired:
             return
         except Exception as error:
@@ -49,7 +62,7 @@ class ReplyWait:
                 job = self.jobs.get(id(budget))
             if job is not None:
                 job[2].logger.exception("回复任务失败：%s", type(error).__name__)
-            self.finish(budget, "本轮处理失败，回答未完成")
+            self.finish(budget, "刚才处理这条消息时程序出了错，我没拿到能发的答复。")
             raise
         finally:
             turn.close()
@@ -65,7 +78,7 @@ class ReplyWait:
             job = self.jobs.pop(id(budget), None)
             if job is None:
                 return
-            _, message, ctx, _, personality, retryable = job
+            _, message, ctx, _, personality = job
             key = turn_key(message)
             with budget.lock:
                 budget.closed = True
@@ -81,17 +94,19 @@ class ReplyWait:
                     reason = "回复发送结果未确认，已停止补发"
             if draft is None:
                 facts = {"结果": reason}
-                if retryable and not blocked and not budget.attempted:
-                    facts["可用操作"] = "艾特机器人说「重试」，可重新处理原问题"
                 self.outcomes[key] = (job, facts, time.monotonic(), blocked)
                 self.outcomes.move_to_end(key)
                 if len(self.outcomes) > 64:
                     self.outcomes.popitem(last=False)
         if draft is not None:
             self._send(job, draft)
-        else:
-            self.status.submit(message, ctx, facts, personality=personality, guard=self._guard(job),
-                               question="" if blocked else None)
+        elif blocked:
+            self.status.submit(message, ctx, facts, personality=personality, guard=self._guard(job), question="")
+        elif not budget.attempted:
+            try:
+                ctx.reply_at(message, reason, delivery_guard=self._guard(job))
+            except (SnapshotExpired, RuntimeError):
+                ctx.logger.info("回复结果未提交")
 
     def followup(self, message, ctx, question, *, addressed):
         key = turn_key(message)
@@ -133,7 +148,7 @@ class ReplyWait:
         return True
 
     def _guard(self, job, *, stage=None, revision=None):
-        budget, _, ctx, snapshot, personality, _ = job
+        budget, _, ctx, snapshot, personality = job
         @contextmanager
         def guard():
             with ctx.response_guard(snapshot, personality):
@@ -149,7 +164,7 @@ class ReplyWait:
         return guard
 
     def _send(self, job, draft):
-        budget, message, ctx, _, _, _ = job
+        budget, message, ctx, _, _ = job
 
         @contextmanager
         def guard():
@@ -187,15 +202,15 @@ class ReplyWait:
                 with budget.lock:
                     now = budget.clock()
                     expired = now >= budget.deadline
+                    stage = budget.stage
                     notice = not (budget.closed or budget.sent or budget.sending or budget.attempted or budget.progress) and now >= budget.notice_at
                     if notice:
                         budget.progress = True
-                        stage = budget.stage
                         revision = budget.revision
                 if expired:
-                    self.finish(budget, "本轮等待超时，回答未完成")
+                    self.finish(budget, timeout_reason(stage))
                 elif notice:
-                    _, message, ctx, _, personality, _ = job
+                    _, message, ctx, _, personality = job
                     self.status.submit(message, ctx, {"当前阶段": stage}, personality=personality,
                                        guard=self._guard(job, stage=stage, revision=revision))
 

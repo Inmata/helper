@@ -4,7 +4,7 @@ import logging
 import re
 import unicodedata
 
-from ..integrations.llm import LLMError
+from ..integrations.llm import LLMError, LLMFormatError
 from ..lore import GROUP_LORE
 from ..messaging.mentions import strip_at_labels
 from ..timeutil import describe_local, format_local
@@ -291,8 +291,8 @@ class Dialogue:
         if self_facts:
             payload["self_facts"] = self_facts
             system = (system or SYSTEM) + (
-                "\n按程序确认的聊天证据与动作自然回答。核对自己的历史时，先直接回答有没有说过，找到匹配原话就明说是自己讲过的。"
-                "被质疑前一轮下结论太快时，先说明那句说得太满，再用现有证据更正；查不到或不能确认就直说。"
+                "\n按程序确认的聊天证据与动作自然回答。有人质疑一句话时，先看机器人与群友原话的发言人和语境，再说明谁说过、自己后来怎么转述。"
+                "指正成立就明确更正；如果对方自己说过，可以直接提他的原话。发过这句话和说法本身属实是两件事，按记录说清楚。"
                 "当前缺少查证结果时，到说明依据不足为止。没有可比的榜单或完整条件时，别用反方向的结论替换旧结论。"
                 "只问有没有说过时，简短承认或说明没找到就够了。保留当时的条件和玩笑语境，别解释自己当时为什么说。"
                 "别为自己编动机、查证经过或故障原因，"
@@ -321,10 +321,10 @@ class Dialogue:
     def _reply_text(cls, value):
         reply = cls._unwrap_reply(value)
         if not isinstance(reply, str) or any(ord(char) < 32 and char not in "\n\r\t" for char in reply):
-            raise LLMError("大模型对话结果格式不正确，请重试")
+            raise LLMFormatError("大模型对话结果格式不正确")
         reply = _ROBOT_REPLY_PREFIX.sub("", reply.strip())
         if not reply:
-            raise LLMError("大模型对话结果格式不正确，请重试")
+            raise LLMFormatError("大模型对话结果格式不正确")
         return reply
 
     @staticmethod

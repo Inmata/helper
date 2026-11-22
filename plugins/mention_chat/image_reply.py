@@ -20,7 +20,7 @@ from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget
 from wxbot_framework.messaging.mentions import strip_at_labels
 from wxbot_framework.recent_images import RECENT_IMAGES, READY
 from .image_plan import ImageProfiles, fallback_image, prepare_image
-from .image_quality import check_image, typeset_image
+from .image_quality import check_image
 
 COMMAND = "/生图"
 TASK_SECONDS = 300
@@ -385,7 +385,7 @@ class ImageReply:
                 job.clarification_until = time.monotonic() + TASK_SECONDS
                 job.ctx.reply_at(job.message, job.failure, delivery_guard=job.guard)
                 return
-            job.drawing = job.plan.drawing_prompt()
+            job.drawing = job.plan.instruction
             job.ctx.logger.info("生图要求已整理：task=%s reference=%s", job.filename, job.plan.reference is not None)
         job.stage = "submitting"
         while True:
@@ -427,7 +427,7 @@ class ImageReply:
                 if not problem:
                     break
                 job.repair_reference = picture
-                job.drawing = job.plan.drawing_prompt() + "\n请按原要求修正这一处画面问题：" + problem
+                job.drawing = job.plan.instruction + "\n请按原要求修正这一处画面问题：" + problem
                 job.task_id = ""
                 job.filename += "-repair"
                 job.stage = "submitting"
@@ -439,11 +439,6 @@ class ImageReply:
         with job.guard():
             pass
         job.path = picture
-        if job.plan.fixed:
-            try:
-                job.path = typeset_image(picture, job.plan.fixed, job.plan.position)
-            except (OSError, ValueError) as error:
-                job.ctx.logger.info("生图排版回退：task=%s error=%s", job.filename, type(error).__name__)
         job.stage = "sending"
         if not job.ctx.reply_image(job.message, job.path, delivery_guard=job.guard,
                                    source_id=job.source_id, revision=len(job.revisions)):

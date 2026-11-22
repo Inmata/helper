@@ -20,7 +20,6 @@ from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget
 from wxbot_framework.messaging.mentions import strip_at_labels
 from wxbot_framework.recent_images import RECENT_IMAGES, READY
 from .image_plan import ImageProfiles, fallback_image, prepare_image
-from .image_quality import check_image
 
 COMMAND = "/生图"
 TASK_SECONDS = 300
@@ -47,7 +46,6 @@ class ImageJob:
     personality: object
     task_id: str = ""
     stage: str = "queued"
-    path: str = ""
     failure: str = ""
     revisions: tuple = ()
     source_id: int = 0
@@ -56,8 +54,6 @@ class ImageJob:
     reference_required: bool = False
     edit: bool = False
     plan: object = None
-    drawing: str = ""
-    repair_reference: str = ""
     cancelled: object = field(default_factory=threading.Event)
 
 
@@ -117,13 +113,13 @@ class ImageReply:
             stage, failure = job.stage, job.failure
         stages = {"queued": "排队", "reference": "读取参考图", "planning": "整理绘图要求和相关资料",
                   "needs_input": "等待补充信息，尚未提交生成", "submitting": "提交生成请求",
-                  "waiting": "等待生成服务返回图片", "checking": "核对生成图片", "sending": "提交图片到群聊",
+                  "waiting": "等待生成服务返回图片", "sending": "提交图片到群聊",
                   "complete": "已发图到本群",
                   "failed": "生图失败", "expired": "等待超时", "cancelled": "任务取消",
                   "delivery_unknown": "图片发送结果不明，已停止补发"}
         if resuming:
             self._notify(job, message, ctx, {"本次操作": "已恢复查询原任务，没有再次提交生图"},
-                         stages=("queued", "reference", "submitting", "waiting", "checking", "sending"), question=text)
+                         stages=("queued", "reference", "submitting", "waiting", "sending"), question=text)
         else:
             facts = {"当前任务阶段": stages[stage]}
             if failure:
@@ -198,7 +194,7 @@ class ImageReply:
             supplied_image = addressed and job.reference is None and quote.get("ref_type") == "3"
             if time.monotonic() >= job.clarification_until or not (answered or supplied_image):
                 return False
-        elif addressed and active and job.stage in ("queued", "reference", "planning", "submitting", "waiting", "checking"):
+        elif addressed and active and job.stage in ("queued", "reference", "planning", "submitting", "waiting"):
             if text in (job.prompt, *job.revisions):
                 return False
             question = {"instructions": "判断当前发言是否明确修改或补充同一个正在做的生图任务。",
@@ -385,62 +381,30 @@ class ImageReply:
                 job.clarification_until = time.monotonic() + TASK_SECONDS
                 job.ctx.reply_at(job.message, job.failure, delivery_guard=job.guard)
                 return
-            job.drawing = job.plan.instruction
             job.ctx.logger.info("生图要求已整理：task=%s reference=%s", job.filename, job.plan.reference is not None)
         job.stage = "submitting"
         while True:
             with job.guard():
                 pass
-            remaining = job.deadline - time.monotonic()
             started = time.monotonic()
-            try:
-                if remaining <= 0:
-                    raise TimeoutError("生图任务等待超时")
-                timeout = min(REQUEST_SECONDS, remaining)
-                result = _within(lambda: self._client.result(job.task_id, filename=job.filename, timeout=timeout)
-                                 if job.task_id else self._client.submit(job.drawing, filename=job.filename,
-                                                                        reference=job.repair_reference or job.plan.reference,
-                                                                        timeout=timeout),
-                                 timeout, job.cancelled)
-            except MagpieImageRejectedError:
-                raise
-            except (MagpieToolsError, OSError, ValueError, TimeoutError) as error:
-                if not job.repair_reference:
-                    raise
-                job.ctx.logger.info("生图修正未取到图片：task=%s error=%s", job.filename, type(error).__name__)
-                picture = job.repair_reference
-                break
+            remaining = job.deadline - started
+            if remaining <= 0:
+                raise TimeoutError("生图任务等待超时")
+            timeout = min(REQUEST_SECONDS, remaining)
+            result = _within(lambda: self._client.result(job.task_id, filename=job.filename, timeout=timeout)
+                             if job.task_id else self._client.submit(job.plan.instruction, filename=job.filename,
+                                                                    reference=job.plan.reference, timeout=timeout),
+                             timeout, job.cancelled)
             if result.path is not None:
-                with job.guard():
-                    pass
-                picture = str(result.path)
-                timeout = min(20, job.deadline - time.monotonic())
-                if not job.plan.edit or job.repair_reference or timeout <= 0:
-                    break
-                job.stage = "checking"
-                try:
-                    problem = _within(lambda: check_image(job.ctx.magpie, result.path, job.plan, timeout=timeout),
-                                      timeout, job.cancelled)
-                except (LLMFormatError, MagpieToolsError, OSError, TimeoutError) as error:
-                    job.ctx.logger.info("生图核对未完成：task=%s error=%s", job.filename, type(error).__name__)
-                    break
-                if not problem:
-                    break
-                job.repair_reference = picture
-                job.drawing = job.plan.instruction + "\n请按原要求修正这一处画面问题：" + problem
-                job.task_id = ""
-                job.filename += "-repair"
-                job.stage = "submitting"
-                continue
+                break
             job.task_id = result.task_id
             job.stage = "waiting"
             job.ctx.logger.info("生图等待：task=%s remote=%s", job.filename, job.task_id)
             self.stopped.wait(max(0, 1 - (time.monotonic() - started)))
         with job.guard():
             pass
-        job.path = picture
         job.stage = "sending"
-        if not job.ctx.reply_image(job.message, job.path, delivery_guard=job.guard,
+        if not job.ctx.reply_image(job.message, str(result.path), delivery_guard=job.guard,
                                    source_id=job.source_id, revision=len(job.revisions)):
             raise RuntimeError("图片未提交")
         job.stage = "complete"

@@ -53,9 +53,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = {"_meta": {"usemagpie.ai/pending": "img_contract"},
                           "content": [{"type": "text", "text": "still being made"}], "isError": False}
             elif params["name"] == "analyze_image":
-                analysis = (next(self.server.check_results) if "只依据可见画面核对" in params["arguments"]["prompt"]
-                            else "左侧旧职业为软件开发，右侧为白底肖像")
-                result = {"content": [{"type": "text", "text": analysis}]}
+                result = {"content": [{"type": "text", "text": "左侧旧职业为软件开发，右侧为白底肖像"}]}
             else:
                 self.server.waiting.set()
                 self.server.release.wait(5)
@@ -129,7 +127,6 @@ class ImageGenerationTests(unittest.TestCase):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.calls, self.server.image, self.server.fail = [], PNG, False
         self.server.errors = {}
-        self.server.check_results = iter([r'{"通过":true,"问题":""}'])
         self.server.submitted, self.server.release = threading.Event(), threading.Event()
         self.server.waiting = threading.Event()
         self.server.release.set()
@@ -388,24 +385,19 @@ class ImageGenerationTests(unittest.TestCase):
         outputs = [
             {"工具调用": [{"名称": "read_profile", "参数": {"name": "猫老板"}},
                       {"名称": "inspect_image", "参数": {"image": "I1", "focus": "旧职业"}}]},
-            {"绘图指令": "把左侧旧资料替换成「开过球房，现在看盘」，保留右侧肖像及其白底",
-             "检查项": ["保留右侧肖像和白底"]},
+            {"绘图指令": "把左侧旧资料替换成「开过球房，现在看盘」，保留右侧肖像及其白底"},
         ]
         with patch.object(self.ctx._llm, "complete_json", side_effect=outputs) as planner:
             self.plugin.on_message(self.message("/生图 按刚才说的纠正这张图里的职业",
                 data={"quote": {"ref_type": "3", "svrid": "912"}}), self.ctx)
             self.wait_done()
         self.assertEqual([call["name"] for call in self.server.calls],
-                         ["analyze_image", "generate_image", "generation_result", "analyze_image"])
+                         ["analyze_image", "generate_image", "generation_result"])
         self.assertEqual(json.loads(planner.call_args_list[0].args[1])["任务"]["群友档案素材"], [])
         material, picture = json.loads(planner.call_args.args[1])["取材记录"][0]
         self.assertIn("以前经营台球厅", material["结果"]["档案"]["素材"]["经历"][0]["内容"])
         self.assertIn("左侧旧职业", picture["结果"]["观察"]["内容"])
         arguments = self.server.calls[1]["arguments"]
-        review = self.server.calls[3]["arguments"]
-        self.assertIn("左边是原图，右边是待发送的结果", review["prompt"])
-        with Image.open(review["image"]) as pair:
-            self.assertGreater(pair.width, pair.height * 2)
         self.assertIn("保留右侧肖像", arguments["prompt"])
         self.assertIn("开过球房，现在看盘", arguments["prompt"])
         self.assertEqual(arguments["reference_images"], [str(reference.resolve())])
@@ -492,37 +484,18 @@ class ImageGenerationTests(unittest.TestCase):
             "SELECT source_id,revision FROM reply_receipts WHERE kind='image' AND status='submitted'").fetchone()
         self.assertEqual(tuple(receipt), (self.members.message_id(original), 1))
 
-    def test_visible_mismatch_repairs_once_before_delivery(self):
-        self.poster_fixture()
-        self.server.check_results = iter([r'{"通过":false,"问题":"右侧保留项改变"}'])
+    def test_explicit_edit_delivers_first_result_without_review_or_redraw(self):
+        reference = self.poster_fixture()
+        self.server.image = PNG
         with patch.object(self.ctx._llm, "complete_json", return_value={
-            "绘图指令": "蓝底的展板，右侧留一块米白留白", "检查项": ["右侧留一块米白留白"]
+            "绘图指令": "换成蓝底，保留人物", "改图": True, "检查项": ["人物保持原样"]
         }):
-            self.plugin.on_message(self.message("/生图 把背景改成蓝色，右侧留白保留",
+            self.plugin.on_message(self.message("/生图 换个背景，保留人物",
                 data={"quote": {"ref_type": "3", "svrid": "912"}}), self.ctx)
             self.wait_done()
-        submissions = [call["arguments"] for call in self.server.calls if call["name"] == "generate_image"]
-        self.assertEqual(len(submissions), 2)
-        self.assertIn("右侧保留项改变", submissions[1]["prompt"])
-        self.assertEqual(self.backend.images, [(ROOM, self.server.image)])
-
-    def test_uncertain_invalid_or_timed_out_review_still_delivers_edit(self):
-        reference = self.poster_fixture()
-        for review, failure in ((r'{"通过":null,"问题":""}', None), ("不是 JSON", None), ("", TimeoutError())):
-            with self.subTest(review=review, failure=type(failure).__name__):
-                self.server.check_results = iter([review])
-                self.server.calls.clear()
-                self.backend.images.clear()
-                with (patch.object(self.ctx._llm, "complete_json", return_value={
-                    "绘图指令": "改成蓝底，保留人物", "检查项": ["人物保持原样"]
-                }), patch.object(self.ctx._magpie, "analyze_image", wraps=self.ctx._magpie.analyze_image,
-                                 side_effect=failure)):
-                    self.plugin.on_message(self.message("/生图 换个背景，保留人物",
-                        data={"quote": {"ref_type": "3", "svrid": "912"}}), self.ctx)
-                    self.wait_done()
-                self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(reference.resolve())])
-                self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)
-                self.assertEqual(self.backend.images, [(ROOM, self.server.image)])
+        self.assertEqual([call["name"] for call in self.server.calls], ["generate_image", "generation_result"])
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(reference.resolve())])
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
 
     def test_model_can_recover_an_earlier_sent_picture_from_its_original_request(self):
         past = self.message("/生图 画一张山谷跑团封面")

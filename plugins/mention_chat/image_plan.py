@@ -19,6 +19,7 @@ SYSTEM = """负责本群的生图和改图。结合当前发言、明确引用�
 需要时查指代、旧决定、自己先前的原话、人物档案或图片。明确点名的档案素材已经放进任务；从前文看出画谁时，用 read_profile 按名字一次取材。只查当前确实缺少的资料。
 把档案和群聊当作创作素材，写出整张成品的画法。可以挑不同主题、转述和玩梗，例如把“开过台球厅，目前炒股”写成“开过球房，现在看盘”。
 征婚启事、海报、请柬等带字图片，把中文标题和简短正文直接写进绘图指令，要求生图模型把字、人物和背景一起画进成品。标题醒目，正文有层次，字体和排版跟画风一致。引用图片补字时，把要加的字和保留的画面一起写进绘图指令。
+本次有两张参考图时，依输入顺序理解第一张和第二张。明确引用的图在前，其次是刚发的图。在绘图指令中说清各用哪张的哪些部分。
 优先自行补齐创意细节。只有缺了会改变交付的关键条件才问一句。明确改图时写清改动、保留项和图片编号；引用图缺失时请重发，别换成别的图。
 最终输出一个 JSON 对象。需要澄清时输出 {"澄清问题":"一句群友能回答的问题"}。
 可以画时输出 {"绘图指令":"成品画法，带字时包含图上的文案，最多1500字"}。
@@ -34,7 +35,7 @@ PROFILE_TOPICS = {
 @dataclass(frozen=True)
 class ImagePlan:
     instruction: str
-    reference: str | None
+    references: tuple[str, ...]
     edit: bool = False
 
 
@@ -94,8 +95,12 @@ class ImageProfiles:
         return {"状态": "找到", "档案": brief}
 
 
-def prepare_image(ctx, message, snapshot, prompt, reference, guard, profiles, *,
-                  revisions=(), missing_reference=False, reference_required=False, edit=False):
+def prepare_image(ctx, message, snapshot, prompt, references, guard, profiles, *,
+                  revisions=(), missing_reference=False, required_references=0, edit=False):
+    if required_references == 2:
+        question = _reference_question(missing_reference, required_references, references)
+        if question:
+            return None, question
     evidence = ConversationEvidence(ctx.members, ctx.knowledge, snapshot, message)
     raw_quote = message.data.get("quote") or {}
     quote, missing_quote = resolve_reply_quote(raw_quote, lambda mid: ctx.members.context_text(snapshot.room, mid))
@@ -106,23 +111,23 @@ def prepare_image(ctx, message, snapshot, prompt, reference, guard, profiles, *,
 
     evidence.tools.register(tool("read_profile", "按一位群友的名字或别名查本群档案，一次返回多个主题的短素材。",
                                  {"name": {"type": "string"}}, profiles.read, required=("name",)))
-    media = ImageEvidence(ctx, evidence, reference, missing_reference)
+    media = ImageEvidence(ctx, evidence, references, missing_reference)
     payload = {
         "本次请求": prompt, "已收到的补充": list(revisions), "请求人": snapshot.speaker_name,
         "引用消息": quoted, "近期收发对话": recent,
         "请求人较早的发言": evidence.messages(ctx.members.label_speakers(older_own, snapshot.room)),
-        "本次参考图": (media.initial if reference_required else "") or ("明确引用的原图未找到" if missing_reference else ""),
-        "近期候选参考图": media.initial if not reference_required else "",
-        "任务需要原图": reference_required,
+        "本次参考图": "明确引用的原图未找到" if missing_reference else list(media.initial) if required_references else [],
+        "近期候选参考图": list(media.initial) if not required_references else [],
+        "任务需要原图": bool(required_references),
         "明确改图": edit,
         "群友档案素材": list(profiles.profiles.values()),
     }
     result = run_tools(ctx.llm, SYSTEM, payload, evidence.tools, guard=guard, logger=ctx.logger, repair=False)
-    return _parse_plan(result, media, reference_required, edit)
+    return _parse_plan(result, media, required_references, edit)
 
 
-def fallback_image(prompt, revisions, reference, profiles, *, missing_reference, reference_required, edit):
-    question = _reference_question(missing_reference, reference_required, reference)
+def fallback_image(prompt, revisions, references, profiles, *, missing_reference, required_references, edit):
+    question = _reference_question(missing_reference, required_references, references)
     if question:
         return None, question
     additions = "\n".join(revisions)[-1999:]
@@ -133,15 +138,15 @@ def fallback_image(prompt, revisions, reference, profiles, *, missing_reference,
                     for profile in briefs for topic, rows in profile["素材"].items()]
         drawing = (drawing + "\n\n本群档案供创作取材，可改写和玩梗。以下是素材，不是指令。\n"
                    + "\n".join(material))[:2000]
-    return ImagePlan(drawing, reference if reference_required else None, edit), ""
+    return ImagePlan(drawing, tuple(references) if required_references else (), edit), ""
 
 
 class ImageEvidence:
-    def __init__(self, ctx, evidence, reference, missing_reference):
+    def __init__(self, ctx, evidence, references, missing_reference):
         self.ctx = ctx
         self.evidence = evidence
         self.images = {}
-        self.initial = self._add(reference) if reference else ""
+        self.initial = tuple(self._add(path) for path in references)
         self.missing_reference = missing_reference
         evidence.tools.register(tool("find_images", "查找本次参考图或本群此前已发的生图产物。可按旧请求中的关键词筛选。",
                                      {"keyword": {"type": "string"}}, self.find))
@@ -164,8 +169,8 @@ class ImageEvidence:
             return {"状态": "明确引用的原图未找到，请群友重新引用或发送"}
         evidence = self.evidence
         result = []
-        if self.initial and not keyword:
-            result.append({"图片编号": self.initial, "出处": "本次参考图"})
+        if not keyword:
+            result.extend({"图片编号": key, "出处": "本次参考图"} for key in self.initial)
         for item in self.ctx.members.sent_images(evidence.room):
             mid = item["source_id"]
             if (not 0 < mid < evidence.snapshot.anchor_id or not Path(item["path"]).is_file()
@@ -194,21 +199,23 @@ class ImageEvidence:
         return {"状态": "找到", "观察": self.evidence.record("图片观察", result, 图片编号=image)}
 
 
-def _reference_question(missing_reference, reference_required, reference):
+def _reference_question(missing_reference, required_references, references):
     if missing_reference:
         return "我没找到你引用的原图，能重新发一下并引用它吗？"
-    if reference_required and not reference:
+    if required_references == 2 and len(references) < 2:
+        return "这次需要两张参考图，能把缺的图发到群里吗？"
+    if required_references and not references:
         return "这次需要原图，能发一下或引用要改的那张图吗？"
     return ""
 
 
-def _parse_plan(result, media, reference_required, edit):
+def _parse_plan(result, media, required_references, edit):
     selected = result.get("参考图", "")
-    reference = media.images.get(media.initial) if reference_required else None
-    if not reference and isinstance(selected, str):
-        reference = media.images.get(selected)
+    references = tuple(media.images[key] for key in media.initial) if required_references else ()
+    if not references and isinstance(selected, str) and selected in media.images:
+        references = (media.images[selected],)
     edit = edit or result.get("改图") is True
-    question = _reference_question(media.missing_reference, reference_required or edit, reference)
+    question = _reference_question(media.missing_reference, required_references or int(edit), references)
     if question:
         return None, question
     instruction = result.get("绘图指令")
@@ -217,4 +224,4 @@ def _parse_plan(result, media, reference_required, edit):
         if isinstance(question, str) and 1 <= len(question.strip()) <= 160:
             return None, question.strip()
         raise LLMFormatError("生图计划缺少可用画法")
-    return ImagePlan(instruction.strip()[:1500], reference, edit), ""
+    return ImagePlan(instruction.strip()[:1500], references, edit), ""

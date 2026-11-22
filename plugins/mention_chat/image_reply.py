@@ -18,7 +18,7 @@ from wxbot_framework.integrations.magpie_images import MagpieImageRejectedError,
 from wxbot_framework.integrations.magpie_tools import MagpieToolsError
 from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget
 from wxbot_framework.messaging.mentions import strip_at_labels
-from wxbot_framework.recent_images import RECENT_IMAGES, READY
+from wxbot_framework.recent_images import ImageRecord, RECENT_IMAGES, READY
 from .image_plan import ImageProfiles, fallback_image, prepare_image
 
 COMMAND = "/生图"
@@ -26,6 +26,11 @@ TASK_SECONDS = 300
 PLAN_SECONDS = 75
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / ".runtime" / "generated_images"
 REFERENCE_HINT = re.compile(r"这[张幅个].{0,6}(?:图|照)|(?:原图|这张|这幅|改图)|(?:背景|画风).{0,3}(?:改|换)|(?:改|换).{0,3}(?:背景|画风)")
+PAIR_HINT = re.compile(r"(?:这|那|上面|前面|刚(?:刚|才)?发)(?:的)?[两二2]\s*[张幅]|"
+                       r"(?:参考|用|结合|合并|融合|把|将)\s*[两二2]\s*[张幅](?:(?:参考)?[图照]|都)")
+FIRST_IMAGE = re.compile(r"第\s*[一1]\s*[张幅]|图\s*[一1](?!\d)")
+SECOND_IMAGE = re.compile(r"第\s*[二2]\s*[张幅]|图\s*[二2](?!\d)")
+RECENT_REFERENCE = re.compile(r"(?:我|刚(?:刚|才)?|我刚(?:刚|才)?)发(?:过)?[的那这一]")
 EDIT_HINT = re.compile(r"这[张幅个].{0,8}(?:图|照)?.{0,8}(?:改|换|调整|重绘|去掉|保留)|"
                        r"(?:改|换|调整|重绘|纠正|修复).{0,12}(?:这[张幅]|原图)|"
                        r"^(?:请|帮我|给我)?(?:把|给|只)?(?:改图|(?:改|换|调整)(?:一下|个)?(?:背景|画风)|"
@@ -37,7 +42,7 @@ class ImageJob:
     message: object
     ctx: object
     prompt: str
-    reference: object
+    references: tuple[ImageRecord, ...]
     snapshot: object
     guard: object
     key: tuple
@@ -51,7 +56,7 @@ class ImageJob:
     source_id: int = 0
     clarification_until: float = 0
     missing_reference: bool = False
-    reference_required: bool = False
+    required_references: int = 0
     edit: bool = False
     plan: object = None
     cancelled: object = field(default_factory=threading.Event)
@@ -191,7 +196,7 @@ class ImageReply:
         if job.stage == "needs_input":
             author_is_bot = ctx.members.account in (quote.get("fromusr"), quote.get("chatusr"))
             answered = author_is_bot and strip_at_labels(quote.get("text") or "").strip() == job.failure
-            supplied_image = addressed and job.reference is None and quote.get("ref_type") == "3"
+            supplied_image = addressed and len(job.references) < max(1, job.required_references) and quote.get("ref_type") == "3"
             if time.monotonic() >= job.clarification_until or not (answered or supplied_image):
                 return False
         elif addressed and active and job.stage in ("queued", "reference", "planning", "submitting", "waiting"):
@@ -243,28 +248,40 @@ class ImageReply:
             inform({"原因": "当前微信连接不支持发图，本次未受理"})
             return
         quote = message.data.get("quote") or {}
+        if prior and prior.required_references == 2 and prior.stage == "needs_input" and quote.get("ref_type") != "3":
+            original_quote = prior.message.data.get("quote") or {}
+            if original_quote.get("ref_type") == "3":
+                quote = original_quote
         quoted = quote.get("ref_type") == "3"
-        edit = mode == "edit" or bool((prior is None or quoted) and EDIT_HINT.search(supplement or prompt))
-        wants_reference = quoted or edit or (mode == "command" and REFERENCE_HINT.search(prompt))
-        reference = prior.reference if prior else None
+        text = supplement or prompt
+        edit = mode == "edit" or bool((prior is None or quoted) and EDIT_HINT.search(text))
+        paired = bool(PAIR_HINT.search(text) or (FIRST_IMAGE.search(text) and SECOND_IMAGE.search(text))
+                      or (quoted and RECENT_REFERENCE.search(text)))
+        required_references = max(2 if paired else int(quoted or edit), prior.required_references if prior else 0)
+        wants_reference = required_references or (mode == "command" and REFERENCE_HINT.search(prompt))
+        references = prior.references if prior else ()
         missing_reference = prior.missing_reference if prior else False
-        if wants_reference and (prior is None or quoted):
+        if wants_reference and (prior is None or quoted or (required_references == 2 and prior.stage == "needs_input")):
             if "group.image.receive" not in ctx.capabilities:
                 inform({"原因": "当前连接收不到参考图", "可用操作": "改用纯文字描述新图"})
                 return
+            candidates = RECENT_IMAGES.recent(message.chat_id, message.sender_id, before=message.received_at,
+                                               within=120) if required_references == 2 or not quoted else ()
             if quoted:
                 RECENT_IMAGES.restore_sent(ctx.members, message.chat_id, quote=quote, source_id=ctx.members.message_id(message))
-                reference = RECENT_IMAGES.quoted(message.chat_id, svrid=quote.get("svrid") or "",
-                                                  md5=quote.get("image_md5") or "")
-                missing_reference = reference is None
-            else:
-                candidates = RECENT_IMAGES.recent(message.chat_id, message.sender_id,
-                                                   before=message.received_at, within=120)
-                if len(candidates) == 1:
-                    reference = candidates[0]
+                primary = RECENT_IMAGES.quoted(message.chat_id, svrid=quote.get("svrid") or "",
+                                               md5=quote.get("image_md5") or "")
+                missing_reference = primary is None
+                references = (primary,) if primary else ()
+                if primary and required_references == 2:
+                    references += tuple(record for record in candidates if record.key != primary.key)[-1:]
+            elif required_references == 2:
+                references = candidates[-2:]
+            elif len(candidates) == 1:
+                references = candidates
         member = message.session_id, message.chat_id, message.sender_id
         revisions = (*prior.revisions, supplement) if prior else ()
-        key = (*member, prompt.strip(), reference.key if reference else "", revisions)
+        key = (*member, prompt.strip(), tuple(record.key for record in references), revisions)
 
         with self._lock:
             previous = self._pending.get(key)
@@ -282,11 +299,11 @@ class ImageReply:
                 self._members.add(member)
                 self._pending[key] = None
                 self._pending.move_to_end(key)
-                job = ImageJob(message, ctx, prompt.strip(), reference, snapshot, guard, key, uuid4().hex,
+                job = ImageJob(message, ctx, prompt.strip(), references, snapshot, guard, key, uuid4().hex,
                                time.monotonic() + TASK_SECONDS, personality,
                                revisions=revisions, source_id=prior.source_id if prior else snapshot.anchor_id,
                                missing_reference=missing_reference,
-                               reference_required=quoted or edit or bool(prior and prior.reference_required),
+                               required_references=required_references,
                                edit=edit or bool(prior and (prior.edit or (prior.plan and prior.plan.edit))))
                 if prior is not None:
                     prior.cancelled.set()
@@ -347,30 +364,33 @@ class ImageReply:
     def _generate(self, job):
         with job.guard():
             pass
-        reference = None
         if job.plan is None:
-            if job.reference is not None:
+            ready_references = []
+            if job.references:
                 job.stage = "reference"
-                record = RECENT_IMAGES.wait(job.reference, 6, stopped=job.cancelled)
-                if record.status == READY:
-                    reference = record.path
-                elif job.reference_required:
-                    job.reference = None
-                    job.missing_reference = (job.message.data.get("quote") or {}).get("ref_type") == "3"
+                download_deadline = time.monotonic() + 6
+                for index, image in enumerate(job.references):
+                    record = RECENT_IMAGES.wait(image, max(0, download_deadline - time.monotonic()), stopped=job.cancelled)
+                    if record.status == READY:
+                        ready_references.append(record)
+                    elif index == 0 and (job.message.data.get("quote") or {}).get("ref_type") == "3":
+                        job.missing_reference = True
+                job.references = tuple(ready_references)
+            references = tuple(record.path for record in ready_references)
             job.stage = "planning"
             profiles = ImageProfiles(job.ctx, job.snapshot, "\n".join((job.prompt, *job.revisions)))
-            options = {"missing_reference": job.missing_reference, "reference_required": job.reference_required,
+            options = {"missing_reference": job.missing_reference, "required_references": job.required_references,
                        "edit": job.edit}
             now = time.monotonic()
             budget = ReplyBudget(now, min(PLAN_SECONDS, job.deadline - now))
             token = CURRENT.set(budget)
             try:
                 job.plan, question = _within(lambda: prepare_image(
-                    job.ctx, job.message, job.snapshot, job.prompt, reference, job.guard, profiles,
+                    job.ctx, job.message, job.snapshot, job.prompt, references, job.guard, profiles,
                     revisions=job.revisions, **options), PLAN_SECONDS, job.cancelled)
             except (LLMConnectionError, LLMFormatError, TimeoutError) as error:
                 job.ctx.logger.info("生图整理回退：task=%s error=%s", job.filename, type(error).__name__)
-                job.plan, question = fallback_image(job.prompt, job.revisions, reference, profiles, **options)
+                job.plan, question = fallback_image(job.prompt, job.revisions, references, profiles, **options)
             finally:
                 CURRENT.reset(token)
             with job.guard():
@@ -381,7 +401,7 @@ class ImageReply:
                 job.clarification_until = time.monotonic() + TASK_SECONDS
                 job.ctx.reply_at(job.message, job.failure, delivery_guard=job.guard)
                 return
-            job.ctx.logger.info("生图要求已整理：task=%s reference=%s", job.filename, job.plan.reference is not None)
+            job.ctx.logger.info("生图要求已整理：task=%s references=%d", job.filename, len(job.plan.references))
         job.stage = "submitting"
         while True:
             with job.guard():
@@ -393,7 +413,7 @@ class ImageReply:
             timeout = min(REQUEST_SECONDS, remaining)
             result = _within(lambda: self._client.result(job.task_id, filename=job.filename, timeout=timeout)
                              if job.task_id else self._client.submit(job.plan.instruction, filename=job.filename,
-                                                                    reference=job.plan.reference, timeout=timeout),
+                                                                    references=job.plan.references, timeout=timeout),
                              timeout, job.cancelled)
             if result.path is not None:
                 break

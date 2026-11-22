@@ -358,6 +358,58 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(reference.resolve())])
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
 
+    def reference_fixture(self, native_id, *, sender="wxid_member", status="ready"):
+        path = self.root / f"reference-{native_id}.png"
+        path.write_bytes(PNG)
+        data = {"chat_id": ROOM, "sender_id": sender, "native_message_id": native_id,
+                "image_status": status, "image_path": str(path)}
+        RECENT_IMAGES.note(data)
+        return path, data
+
+    def test_two_recent_references_keep_send_order_when_first_download_finishes_last(self):
+        self.reference_fixture("old")
+        first, first_data = self.reference_fixture("person", status="pending")
+        second, _ = self.reference_fixture("clothes")
+        self.reference_fixture("bystander", sender="wxid_other")
+        with patch.object(self.ctx._llm, "complete_json", return_value={
+            "绘图指令": "保留第一张的人和姿势，换上第二张的衣服", "参考图": "I2"
+        }) as planner:
+            self.plugin.on_message(self.message("/生图 让第一张的人穿上第二张的衣服"), self.ctx)
+            RECENT_IMAGES.note({**first_data, "image_status": "ready"})
+            self.wait_done()
+        task = json.loads(planner.call_args.args[1])["任务"]
+        self.assertEqual(task["本次参考图"], ["I1", "I2"])
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(first), str(second)])
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
+    def test_quoted_image_and_recent_own_image_reach_magpie_even_with_planning_failure(self):
+        quoted, _ = self.reference_fixture("old-person", sender="wxid_other")
+        recent, _ = self.reference_fixture("clothes")
+        self.reference_fixture("bystander", sender="wxid_other")
+        with patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError):
+            self.plugin.on_message(self.message("/生图 让这张图里的人穿上我刚发的衣服",
+                data={"quote": {"ref_type": "3", "svrid": "old-person"}}), self.ctx)
+            self.wait_done()
+        self.assertEqual([call["name"] for call in self.server.calls], ["generate_image", "generation_result"])
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(quoted), str(recent)])
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
+    def test_missing_second_reference_asks_for_image_and_resumes_after_upload(self):
+        first, _ = self.reference_fixture("person")
+        self.reference_fixture("bystander", sender="wxid_other")
+        self.plugin.on_message(self.message("/生图 把这两张图合在一起"), self.ctx)
+        self.wait_done()
+        self.assertEqual(self.server.calls, [])
+        question = self.backend.texts[-1][1]
+        self.assertIn("能把缺的图发到群里吗", question)
+        second, _ = self.reference_fixture("clothes")
+        self.plugin.on_message(self.message("/生图 补好了", data={
+            "quote": {"ref_type": "1", "fromusr": self.members.account, "text": question}
+        }), self.ctx)
+        self.wait_done()
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(first), str(second)])
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
     def test_named_profile_and_poster_copy_reach_image_model(self):
         self.profile_fixture()
         self.poster_fixture()

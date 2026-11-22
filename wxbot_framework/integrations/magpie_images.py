@@ -38,12 +38,12 @@ class MagpieImages:
         self.endpoint = _McpEndpoint(magpie.base_url + IMAGE_ENDPOINT, timeout=REQUEST_SECONDS,
                                      max_response_bytes=32 * 1024 * 1024)
 
-    def submit(self, prompt, *, filename, reference=None, timeout=REQUEST_SECONDS):
+    def submit(self, prompt, *, filename, references=(), timeout=REQUEST_SECONDS):
         if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 2000:
             raise ValueError("生图描述应为 1–2000 字")
         arguments = {"prompt": prompt.strip(), "n": 1}
-        if reference:
-            arguments["reference_images"] = [self.magpie._image_path(str(reference))]
+        if references:
+            arguments["reference_images"] = [self.magpie._image_path(str(path)) for path in references]
         return self._call("generate_image", arguments, filename, timeout)
 
     def result(self, task_id, *, filename, timeout=REQUEST_SECONDS):

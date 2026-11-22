@@ -46,6 +46,7 @@ class ImageJob:
     path: str = ""
     failure: str = ""
     revisions: tuple = ()
+    source_id: int = 0
     clarification_until: float = 0
     missing_reference: bool = False
     reference_required: bool = False
@@ -281,7 +282,8 @@ class ImageReply:
                 self._pending.move_to_end(key)
                 job = ImageJob(message, ctx, prompt.strip(), reference, snapshot, guard, key, uuid4().hex,
                                time.monotonic() + TASK_SECONDS, personality,
-                               revisions=revisions, missing_reference=missing_reference,
+                               revisions=revisions, source_id=prior.source_id if prior else snapshot.anchor_id,
+                               missing_reference=missing_reference,
                                reference_required=quoted or mode == "edit" or bool(prior and prior.reference_required))
                 if prior is not None:
                     prior.cancelled.set()
@@ -407,7 +409,8 @@ class ImageReply:
                     continue
                 job.path = typeset_image(result.path, job.plan.fixed, job.plan.position) if job.plan.fixed else str(result.path)
                 job.stage = "sending"
-                if not job.ctx.reply_image(job.message, job.path, delivery_guard=job.guard):
+                if not job.ctx.reply_image(job.message, job.path, delivery_guard=job.guard,
+                                           source_id=job.source_id, revision=len(job.revisions)):
                     raise RuntimeError("图片未提交")
                 job.stage = "complete"
                 job.ctx.logger.info("生图已发送：task=%s remote=%s", job.filename, job.task_id)

@@ -7,6 +7,7 @@ from contextlib import contextmanager, nullcontext
 from types import MappingProxyType
 
 from ..messaging.message import CapabilityError
+from ..integrations.reply_budget import CURRENT
 
 
 class PluginContext:
@@ -115,31 +116,21 @@ class PluginContext:
             yield
 
     def reply(self, message, text, *, delivery_guard=None):
-        sent = self._service.send_text(message.chat_id, text, expected_session=message.session_id,
-                                       delivery_guard=delivery_guard)
-        if sent:
-            self._record_bot_reply(message.chat_id, text)
-        return sent
+        return self._service.send_text(message.chat_id, text, expected_session=message.session_id,
+                                       delivery_guard=delivery_guard, receipt=self._receipt(message, "text", text=text))
 
-    def reply_image(self, message, path, *, delivery_guard=None):
+    def reply_image(self, message, path, *, delivery_guard=None, source_id=0, revision=0):
         if "group.image.send" not in self.capabilities:
             raise CapabilityError("当前后端尚未开放群图片发送")
-        sent = self._service.send_image(message.chat_id, path, expected_session=message.session_id,
-                                         delivery_guard=delivery_guard)
-        if sent:
-            from ..recent_images import RECENT_IMAGES
-            record = RECENT_IMAGES.sent(message.chat_id, self.members.account, path)
-            self.members.record_sent_image(message.chat_id, record.path, record.md5,
-                                           self.members.message_id(message))
-        return sent
+        return self._service.send_image(message.chat_id, path, expected_session=message.session_id,
+                                        delivery_guard=delivery_guard, receipt=self._receipt(
+                                            message, "image", path=path, source_id=source_id, revision=revision))
 
     def reply_voice(self, message, path, *, transcript="", delivery_guard=None):
         if "voice.send" not in self.capabilities:
             raise CapabilityError("当前后端尚未开放语音条发送")
         sent = self._service.send_voice(message.chat_id, path, expected_session=message.session_id,
-                                        delivery_guard=delivery_guard)
-        if sent and transcript:
-            self._record_bot_reply(message.chat_id, transcript, voice_id=sent.client_message_id)
+                                        delivery_guard=delivery_guard, receipt=self._receipt(message, "voice", text=transcript))
         return bool(sent)
 
     def reply_at(self, message, text, *, display_name=None, delivery_guard=None):
@@ -151,10 +142,42 @@ class PluginContext:
                 display_name = member.display_name
             elif display_name is None:
                 display_name = self._members.wechat_name(message.sender_id)
-        sent = self._service.send_at_text(message.chat_id, text, [message.sender_id],
-                                         expected_session=message.session_id,
-                                         display_names=[display_name] if display_name is not None else None,
-                                         delivery_guard=delivery_guard)
-        if sent:
-            self._record_bot_reply(message.chat_id, text)
-        return sent
+        return self._service.send_at_text(message.chat_id, text, [message.sender_id],
+                                          expected_session=message.session_id,
+                                          display_names=[display_name] if display_name is not None else None,
+                                          delivery_guard=delivery_guard, receipt=self._receipt(message, "text", text=text))
+
+    def _receipt(self, message, kind, *, text="", path=None, source_id=0, revision=0):
+        def record(result):
+            budget = CURRENT.get()
+            if result and budget is not None:
+                budget.submitted()
+            members = self._members
+            if members is None or message.chat_id not in members.groups:
+                return
+            room = message.chat_id
+            try:
+                with members.transaction() as db:
+                    target = members.message_id(message) or 0
+                    source = source_id or (budget.source_id if budget is not None else 0) or target
+                    state = db.execute(
+                        "SELECT generation,context_floor FROM chat_buffers WHERE account=? AND room=?",
+                        (members.account, room)).fetchone()
+                    generation, floor = state if state is not None else (0, 0)
+                    output = text if result else ""
+                    if result and (not source or source > floor):
+                        if kind == "image":
+                            from ..recent_images import RECENT_IMAGES
+                            image = RECENT_IMAGES.sent(room, members.account, path)
+                            members.record_sent_image(room, image.path, image.md5, source)
+                            output = image.md5
+                        elif text:
+                            members.record_bot_reply(room, text, voice_id=result.client_message_id if kind == "voice" else "",
+                                                     source_id=target)
+                    db.execute("""INSERT INTO reply_receipts(account,room,source_id,generation,revision,kind,status,output,created_at)
+                        VALUES(?,?,?,?,?,?,?,?,?)""", (members.account, room, source, generation,
+                        budget.revision if budget is not None else revision, kind, "submitted" if result else "unconfirmed",
+                        output, members.now().isoformat()))
+            except Exception:
+                self.logger.exception("发送结果未能登记：会话=%s 类型=%s 接口确认=%s", room, kind, bool(result))
+        return record

@@ -430,7 +430,8 @@ class ImageGenerationTests(unittest.TestCase):
         self.server.release.clear()
         with patch.object(self.ctx._llm, "complete_json",
                           side_effect=[{"绘图指令": "绿底橘猫"}, {"绘图指令": "蓝底橘猫"}]):
-            self.plugin.on_message(self.message("/生图 绿底橘猫"), self.ctx)
+            original = self.message("/生图 绿底橘猫")
+            self.plugin.on_message(original, self.ctx)
             self.assertTrue(self.server.waiting.wait(2))
             self.plugin.on_message(self.message("/生图 正在做的这张把背景改成蓝色"), self.ctx)
             self.server.release.set()
@@ -438,6 +439,9 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual([call["arguments"]["prompt"] for call in self.server.calls if call["name"] == "generate_image"],
                          ["绿底橘猫", "蓝底橘猫"])
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        receipt = self.members.connection().execute(
+            "SELECT source_id,revision FROM reply_receipts WHERE kind='image' AND status='submitted'").fetchone()
+        self.assertEqual(tuple(receipt), (self.members.message_id(original), 1))
 
     def test_visible_mismatch_repairs_once_before_delivery(self):
         self.server.check_results = iter([r'{"通过":false,"问题":"右侧保留项改变"}', r'{"通过":true,"问题":""}'])

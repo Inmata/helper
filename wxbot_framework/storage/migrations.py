@@ -4,6 +4,11 @@ from __future__ import annotations
 from .database import backup_before_migration, backup_database
 
 BASE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS reply_receipts (
+        id INTEGER PRIMARY KEY, account TEXT NOT NULL, room TEXT NOT NULL,
+        source_id INTEGER NOT NULL, generation INTEGER NOT NULL, revision INTEGER NOT NULL,
+        kind TEXT NOT NULL, status TEXT NOT NULL, output TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS reply_receipts_by_source ON reply_receipts(account,room,source_id,id);
     CREATE TABLE IF NOT EXISTS sent_images (
         account TEXT NOT NULL, room TEXT NOT NULL, md5 TEXT NOT NULL, path TEXT NOT NULL,
         created_at TEXT NOT NULL, source_id INTEGER NOT NULL DEFAULT 0,
@@ -133,6 +138,8 @@ def initialize_base_schema(db):
         db.execute("ALTER TABLE messages ADD COLUMN context_kind TEXT NOT NULL DEFAULT ''")
         if "voice_message_id" in columns:
             db.execute("UPDATE messages SET context_kind='voice' WHERE context_message_id IS NOT NULL")
+    if "reply_to" not in columns:
+        db.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER NOT NULL DEFAULT 0")
     db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS messages_by_context ON messages(account, room, context_message_id)
                   WHERE context_message_id IS NOT NULL""")
     if "context_floor" not in {row["name"] for row in db.execute("PRAGMA table_info(chat_buffers)")}:

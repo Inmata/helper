@@ -233,7 +233,7 @@ class ConversationHistory:
                 (members.account, room, message_id)).fetchone()
             return row[0] if row else ""
 
-    def record_bot_reply(self, room, text, *, voice_id=""):
+    def record_bot_reply(self, room, text, *, voice_id="", source_id=0):
         """把成功发出的机器人回复按真实时间落库，供多轮对话承接自己刚才的话。"""
         members = self.members
         if not members.history_enabled or room not in members.groups:
@@ -248,8 +248,8 @@ class ConversationHistory:
                 if voice_id:
                     result = db.execute("""INSERT OR IGNORE INTO messages
                         (account,room,sender_id,text,received_at,session_id,sequence,is_self,bot_generated,
-                         context_message_id,context_kind) VALUES(?,?,?,?,?,'bot-reply',0,1,1,?,'voice')""",
-                        (members.account, room, members.account, text.strip(), now, voice_id))
+                         context_message_id,context_kind,reply_to) VALUES(?,?,?,?,?,'bot-reply',0,1,1,?,'voice',?)""",
+                        (members.account, room, members.account, text.strip(), now, voice_id, source_id))
                     return result.rowcount > 0
                 # 原生回显可能先于这里落库；已有回显时不再补一条裸正文。
                 # 逐行取回再按去空白后的正文比对，避免尾部换行或 LIKE 通配符误判。
@@ -266,9 +266,9 @@ class ConversationHistory:
                     if candidate == wanted:
                         return False
                 result = db.execute("""INSERT INTO messages
-                    (account,room,sender_id,text,received_at,session_id,sequence,is_self,bot_generated)
-                    VALUES(?,?,?,?,?,?,0,1,1)""",
-                    (members.account, room, members.account, text.strip(), now, "bot-reply"))
+                    (account,room,sender_id,text,received_at,session_id,sequence,is_self,bot_generated,reply_to)
+                    VALUES(?,?,?,?,?,?,0,1,1,?)""",
+                    (members.account, room, members.account, text.strip(), now, "bot-reply", source_id))
                 return result.rowcount > 0
 
     def message_id(self, message):
@@ -370,7 +370,7 @@ class ConversationHistory:
             db = self.members.connection()
             stamp, = db.execute("SELECT received_at FROM messages WHERE id=?", (snapshot.anchor_id,)).fetchone()
             since = iso_utc(parse_utc(stamp) - timedelta(days=14))
-            rows = db.execute("""SELECT id, received_at, text, context_kind, context_message_id FROM messages
+            rows = db.execute("""SELECT id, received_at, text, context_kind, context_message_id, reply_to FROM messages
                 WHERE account=? AND room=? AND sender_id=? AND bot_generated=1 AND id<?
                 AND id>(SELECT context_floor FROM chat_buffers WHERE account=? AND room=?)
                 AND replace(received_at,'+00:00','Z')>=? ORDER BY id DESC""",

@@ -321,8 +321,8 @@ class MemberStore:
                 self.turns.observe(message)
         return inserted
 
-    def record_bot_reply(self, room, text, *, voice_id=""):
-        return self.transcript.record_bot_reply(room, text, voice_id=voice_id)
+    def record_bot_reply(self, room, text, *, voice_id="", source_id=0):
+        return self.transcript.record_bot_reply(room, text, voice_id=voice_id, source_id=source_id)
 
     def message_id(self, message):
         return self.transcript.message_id(message)

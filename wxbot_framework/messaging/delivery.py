@@ -12,6 +12,18 @@ from .text import validate_mentions, validate_target
 logger = logging.getLogger("TextSend")
 
 
+def _complete(send, receipt):
+    try:
+        result = send()
+    except (OSError, RuntimeError):
+        if receipt is not None:
+            receipt(False)
+        raise
+    if receipt is not None:
+        receipt(result)
+    return result
+
+
 class ServiceFacade:
     """序列化发送与连接切换，避免卸载正在使用的原生桥接。"""
 
@@ -41,7 +53,7 @@ class ServiceFacade:
         with self._lock:
             return self._backend.session_id if self._backend is not None and self._available else None
 
-    def send_text(self, to_wxid, content, *, expected_session=None, _mentions=(), delivery_guard=None):
+    def send_text(self, to_wxid, content, *, expected_session=None, _mentions=(), delivery_guard=None, receipt=None):
         validate_target(to_wxid)
         if not isinstance(content, str):
             raise ValueError("文本正文必须是字符串")
@@ -70,10 +82,11 @@ class ServiceFacade:
                 # 在文本节奏等待之后检查记录版本，清空后不发送旧总结。
                 with delivery_guard() if delivery_guard is not None else nullcontext():
                     if _mentions:
-                        return backend.send_at_text(to_wxid, content, _mentions)
-                    return backend.send_text(to_wxid, content)
+                        return _complete(lambda: backend.send_at_text(to_wxid, content, _mentions), receipt)
+                    return _complete(lambda: backend.send_text(to_wxid, content), receipt)
 
-    def send_at_text(self, room_wxid, content, at_list, *, expected_session=None, display_names=None, delivery_guard=None):
+    def send_at_text(self, room_wxid, content, at_list, *, expected_session=None, display_names=None, delivery_guard=None,
+                     receipt=None):
         members = validate_mentions(room_wxid, at_list)
         if not isinstance(content, str) or not content:
             raise ValueError("文本正文必须是非空字符串")
@@ -85,16 +98,16 @@ class ServiceFacade:
         # 标签用于显示；真实通知始终使用 members 中的微信 ID。
         labels = " ".join("@" + name + " " for name in names)
         return self.send_text(room_wxid, labels + "\n" + content,
-                              expected_session=expected_session, _mentions=members, delivery_guard=delivery_guard)
+                              expected_session=expected_session, _mentions=members, delivery_guard=delivery_guard, receipt=receipt)
 
-    def send_image(self, room_wxid, path, *, expected_session, delivery_guard=None):
+    def send_image(self, room_wxid, path, *, expected_session, delivery_guard=None, receipt=None):
         with self._send_lock, self._lock:
             if not self._available or self._backend.session_id != expected_session:
                 raise RuntimeError("消息所属的微信连接已结束，跳过旧会话回复")
             with delivery_guard() if delivery_guard is not None else nullcontext():
-                return self._backend.send_image(room_wxid, path)
+                return _complete(lambda: self._backend.send_image(room_wxid, path), receipt)
 
-    def send_voice(self, chat_id, path, *, expected_session=None, delivery_guard=None):
+    def send_voice(self, chat_id, path, *, expected_session=None, delivery_guard=None, receipt=None):
         validate_target(chat_id)
         with self._send_lock, self._lock:
             if not self._available:
@@ -105,7 +118,7 @@ class ServiceFacade:
             if not callable(send):
                 raise CapabilityError("当前后端尚未开放语音条发送")
             with delivery_guard() if delivery_guard is not None else nullcontext():
-                return send(chat_id, path)
+                return _complete(lambda: send(chat_id, path), receipt)
 
     def _check_pending(self, backend, cancel):
         if cancel.is_set() or not self._available or self._backend is not backend or self._cancel is not cancel:

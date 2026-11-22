@@ -20,7 +20,8 @@ def run_tools(model, system, task, tools, *, guard, logger, rounds=2, max_tokens
         with guard():
             pass
         payload = {"任务": task, "可用工具": schemas, "取材记录": results, "剩余取材次数": rounds - index}
-        result = model.complete_json(system + PROTOCOL, json.dumps(payload, ensure_ascii=False), max_tokens=max_tokens)
+        options = {} if max_tokens is None else {"max_tokens": max_tokens}
+        result = model.complete_json(system + PROTOCOL, json.dumps(payload, ensure_ascii=False), **options)
         if "工具调用" not in result:
             return result
         calls = result["工具调用"]

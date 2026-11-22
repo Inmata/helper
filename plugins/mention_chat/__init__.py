@@ -1,4 +1,5 @@
 """真正艾特机器人后，用本群人格回复当前发言者。"""
+import json
 import re
 import threading
 import time
@@ -20,9 +21,10 @@ from .voice_reply import (COMMAND as VOICE_COMMAND, READ_COMMAND as VOICE_READ_C
                           VOICE_PROMPT, VoiceReply, voice_reply_format)
 
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue, resolve_reply_quote
-from wxbot_framework.conversation.context_tools import SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
+from wxbot_framework.conversation.context_tools import MentionContext, SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
+from wxbot_framework.conversation.answer_material import gather_answer_material, material_needs, supports_current_answer
 from wxbot_framework.conversation.mention_tools import (IMAGE_WINDOW_SECONDS,
-                                                        SEARCH_RETRY_SECONDS, MentionTools, ToolOutcome,
+                                                        SEARCH_RETRY_SECONDS, MentionTools, ToolOutcome, ToolResult,
                                                         previous_question, public_search_topic, read_tool_options,
                                                         strip_links)
 from wxbot_framework.conversation.repetition import too_similar
@@ -558,6 +560,7 @@ class Plugin:
                     yield from self._reply_once(turn.message, ctx, turn.question, game, before_send=before_send,
                                                 needs_review=lambda: turns.has_addition(turn),
                                                 sent=lambda text, **facts: turns.sent(turn, text, **facts),
+                                                fallback_sent=lambda text: turns.sent(turn, text, allow_closed=True),
                                                 previous=previous, plain=source == "follow")
                 except TurnChanged:
                     if turn.replanned:
@@ -568,7 +571,7 @@ class Plugin:
         finally:
             turns.close(turn)
 
-    def _reply_once(self, message, ctx, clean_query, game, *, before_send=None, needs_review=None, sent=None,
+    def _reply_once(self, message, ctx, clean_query, game, *, before_send=None, needs_review=None, sent=None, fallback_sent=None,
                     previous=None, plain=False):
         if self._slow is not None and self._slow.stopped.is_set():
             return
@@ -657,6 +660,8 @@ class Plugin:
                     delivered = dispatch(lambda: ctx.reply(message, part, delivery_guard=send_guard))
                 if delivered and sent is not None:
                     sent(part, reading_offer=reading_offer, voice_action=voice_action)
+                if delivered and active_budget is not None:
+                    active_budget.submitted()
                 return delivered
 
             def send_at(part, send_guard=guard):
@@ -677,6 +682,8 @@ class Plugin:
                             active_budget.stage = "合成语音"
                     def record_voice(part):
                         result.sent.append(part)
+                        if active_budget is not None:
+                            active_budget.submitted()
                         if sent is not None:
                             sent(part, voice_action="已提交朗读语音")
                     def record_outcome(outcome):
@@ -708,7 +715,36 @@ class Plugin:
                 if result.interrupted:
                     ctx.logger.info("闲聊拆分发送中有人插话，丢弃剩余 %d 条：room=%s", result.dropped, message.chat_id)
 
-            if catch_up and not missing_quote and not self_facts:
+            investigation = None
+            fresh = False
+            try:
+                planning_model = getattr(ctx, "llm", None)
+            except ValueError:
+                planning_model = None
+            if (callable(getattr(planning_model, "complete_json", None))
+                    and not (offer_reading or read_accepted or missing_quote)):
+                if "correction" in intents and quote_is_bot:
+                    target_quote = {"已核对的机器人原话": originals} if originals else None
+                else:
+                    target_quote = quote or quote_hint
+                fresh, needs_local = material_needs(judge, clean_query, snapshot, target_quote, previous)
+                if fresh or needs_local or "correction" in intents:
+                    if active_budget is not None:
+                        with active_budget.lock:
+                            active_budget.llm_limit = 5
+                    lookup = self._tools(ctx).search if fresh and self.tools is not None else None
+                    try:
+                        yield  # 与原有联网流程一样，让同群其他人的任务先运行。
+                        investigation = gather_answer_material(
+                            planning_model, self.members, ctx.knowledge, message, snapshot, clean_query, target_quote,
+                            current=fresh, search=lookup, guard=lambda: ctx.response_guard(snapshot, personality),
+                            logger=ctx.logger)
+                    except (LLMError, TimeoutError) as error:
+                        ctx.logger.info("群聊取材未完成：%s", type(error).__name__)
+                    if fresh and not (investigation and investigation.public):
+                        yield from respond("这条近期消息我还没查到能确认的资料，先不下结论。", QA)
+                        return
+            if catch_up and not missing_quote and not self_facts and investigation is None:
                 rows = snapshot.group_messages
                 reply = Dialogue(ctx.llm_for(message, personality=personality, for_reply=True),
                                  display_timezone=ctx.display_timezone).catch_up(rows, clean_query, quote=quote)
@@ -719,11 +755,16 @@ class Plugin:
 
             detail = wants_detail(clean_query)
             tools = build_default_tools(ctx.knowledge, self.members)
-            context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
+            if investigation is not None:
+                context = MentionContext([], tools.call("speaker_style", room=message.chat_id, wxid=message.sender_id),
+                    tools.call("speaker_profile", room=message.chat_id, wxid=message.sender_id), [],
+                    [] if fresh else tools.call("speech_examples", room=message.chat_id))
+            else:
+                context = prefetch_mention_context(tools, message.chat_id, message.sender_id, clean_query)
             reviewer = self._tools(ctx).router.jev if self.tools is not None else None
             if self_facts:
                 reviewer = judge
-            material = person_context(self.members, ctx.knowledge, reviewer, message.chat_id, clean_query,
+            material = [] if investigation is not None else person_context(self.members, ctx.knowledge, reviewer, message.chat_id, clean_query,
                                       history=snapshot.history, before_id=self.members.message_id(message), quote=quote,
                                       sender_id=message.sender_id)
             context = replace(context, person_messages=material)
@@ -736,6 +777,9 @@ class Plugin:
                     ("管理员固定语音仍生效，须说明该冲突，不能承诺本轮只发文字。" if fixed_voice else "后续默认文字回复。"))
             if offer_reading or read_accepted:
                 outcome = ToolOutcome()
+            elif fresh and investigation is not None:
+                outcome = ToolOutcome(results=[ToolResult("search", True, text=item["内容"])
+                                               for item in investigation.public])
             elif missing_quote:
                 outcome = ToolOutcome(ask=missing_quote)
             else:
@@ -748,6 +792,10 @@ class Plugin:
                 options["tool_results"] = outcome.payload()
             if outcome.context or outcome.ask:
                 options["turn_context"] = "\n".join(filter(None, (options.get("turn_context"), outcome.context, outcome.ask)))
+            if investigation is not None and investigation.local:
+                options["turn_context"] = "\n".join(filter(None, (options.get("turn_context"),
+                    "本轮已找到的群聊资料（引用时看清发言人、时间和类别）：" +
+                    json.dumps(investigation.local, ensure_ascii=False))))
             if not (self_facts or outcome.used or outcome.context or outcome.ask) and MEANING_QUESTION.search(clean_query):
                 reference = self._meaning_reference(message, ctx, clean_query, snapshot, quote, quote_is_bot=quote_is_bot)
                 if reference:
@@ -761,6 +809,10 @@ class Plugin:
                 options["system"] = SYSTEM + VOICE_PROMPT
                 if fixed_voice:
                     options["system"] += FIXED_VOICE_PROMPT
+            if fresh:
+                options["system"] = options.get("system", SYSTEM) + (
+                    "\n本轮核实的是近期可能变动的公开状态。以本轮可核对的公开资料为准，"
+                    "直说结果并写出处和事件时间。群友转述或自己之前的话不能用作公开事实的证据。")
 
             def generate(avoid=None, *, guidance="", revision=None):
                 self._ensure_running()
@@ -797,12 +849,17 @@ class Plugin:
                                 decision.status, decision.local, decision.public, decision.search, decision.own, decision.error)
                 search_needed = (self.tools is not None and decision.needs_search and not (offer_reading or read_accepted)
                                  and not any(item.tool == "search" for item in outcome.results))
+                current_supported = not fresh or supports_current_answer(
+                    judge, clean_query, reply, investigation.public_text, now=self.members.now())
                 repeated = voice_preference is not True and too_similar(reply, recent_bot)
-                if decision.status != REJECTED and not search_needed and (not repeated or attempt == 1):
+                if current_supported and decision.status != REJECTED and not search_needed and (not repeated or attempt == 1):
                     if review_model is not None and decision.error:
                         raise LLMError("本轮未能完成依据核对")
                     break
                 if attempt == 1:
+                    if fresh:
+                        reply, voice_preference = "这条近期消息我还没核实清楚，先不下结论。", False
+                        break
                     raise LLMError("回复修订后仍未满足问题与依据要求")
                 if search_needed and self.tools is not None:
                     query = Dialogue(ctx.llm_for(message, personality=personality)).search_followup(
@@ -819,6 +876,7 @@ class Plugin:
                         "按当前问题与资料修订。先回答具体内容，人物话题用相关成员原话归纳，避免空泛接梗。"
                         "删掉没有对应来源的具体发言、动作、剧情、公众反应和病因；保留时间及说话者。"
                         "缺少必要条件时只问一个关键问题。不要描述核对流程。"
+                        + ("核对公开资料中的主体、发生时间和当前状态。采用有直接来源的结论，删去旧信息。" if fresh else "")
                         + ("先承认已找到的原话或说明证据不足，再更正结论。只说原话、证据和更正，"
                            "删掉‘当时就是为了……’之类的动机及任何解释，即使原话带玩笑。"
                            "证据不足时别下新结论，涉及语音时只说程序确认的能力和动作。" if review_facts else "")))
@@ -836,7 +894,7 @@ class Plugin:
             if active_budget is not None and not (offer_reading or read_accepted):
                 with active_budget.lock:
                     if not active_budget.closed and active_budget.revision == revision:
-                        active_budget.ready = ReplyDraft(revision, reply, needs_review)
+                        active_budget.ready = ReplyDraft(revision, reply, needs_review, fallback_sent)
             yield from respond(reply, tier, preference=voice_preference if can_voice else False)
             ctx.logger.info("艾特对话完成：room=%s persona=%s context=%d", message.chat_id,
                             personality.name, len(snapshot.messages))

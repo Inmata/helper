@@ -160,6 +160,7 @@ class LastReply:
     depth: int
     reading_offer: str = ""
     voice_action: str = ""
+    request_at: float = 0
 
 
 class ConversationTurns:
@@ -229,17 +230,22 @@ class ConversationTurns:
                 self._condition.wait(left)
             return ()
 
-    def sent(self, turn, text, *, reading_offer="", voice_action=""):
+    def sent(self, turn, text, *, reading_offer="", voice_action="", allow_closed=False):
         with self._condition:
             key = turn_key(turn.message)
-            if self._active.get(key) is not turn:
+            active = self._active.get(key)
+            if active is not turn and not (allow_closed and active is None):
+                return
+            previous = self._replied.get(key)
+            if allow_closed and previous is not None and previous.request_at > turn.message.received_at:
                 return
             if text:
                 turn.sent.append(text)
             now = monotonic()
             self._replied = {k: value for k, value in self._replied.items()
                              if now - value.sent_at <= FOLLOW_SECONDS}
-            self._replied[key] = LastReply(turn.question, "\n".join(turn.sent), now, turn.depth, reading_offer, voice_action)
+            self._replied[key] = LastReply(turn.question, "\n".join(turn.sent), now, turn.depth, reading_offer, voice_action,
+                                           turn.message.received_at)
 
     def continuation(self, message):
         with self._condition:

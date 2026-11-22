@@ -18,6 +18,7 @@ class ReplyDraft:
     revision: int
     text: str
     needs_review: Callable[[], bool] | None
+    on_sent: Callable[[str], None] | None = None
 
 
 class ReplyBudget:
@@ -26,9 +27,12 @@ class ReplyBudget:
         self.deadline = arrived + seconds
         self.notice_at = arrived + 30
         self.calls = {}
+        self.llm_limit = 3
+        self.source_id = 0
         self.stage = "排队"
         self.closed = False
         self.sending = False
+        self.attempted = False
         self.sent = False
         self.progress = False
         self.revision = 0
@@ -55,7 +59,7 @@ class ReplyBudget:
             if self.closed or remaining <= 0:
                 raise ReplyExpired("本轮回复已到截止时间")
             if kind:
-                limit = {"llm": 3, "jev": 8, "search": 2}[kind]
+                limit = {"llm": self.llm_limit, "jev": 8, "search": 2}[kind]
                 if self.calls.get(kind, 0) >= limit:
                     raise ReplyExpired("本轮调用额度已用完")
                 self.calls[kind] = self.calls.get(kind, 0) + 1
@@ -69,12 +73,16 @@ class ReplyBudget:
                     (revision is not None and revision != self.revision)):
                 raise ReplyExpired("本轮回复已结束")
             self.sending = True
+            self.attempted = True
         try:
             yield
         finally:
             with self.lock:
-                self.sent = True
                 self.sending = False
+
+    def submitted(self):
+        with self.lock:
+            self.sent = True
 
 
 def remaining(cap, *, kind=None):

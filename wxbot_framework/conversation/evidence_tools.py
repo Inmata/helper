@@ -55,6 +55,8 @@ class ConversationEvidence:
                 entry = self.record("机器人已发原话" if row.get("bot_generated") else "群友原话",
                                     row["text"][:800], 发言人=row.get("speaker_name", "群友"),
                                     时间=row["received_at"], 消息编号=mid)
+                if row.get("reply_to"):
+                    entry["回复目标消息编号"] = row["reply_to"]
                 self._message_ids[mid] = entry
             result.append(self._message_ids[mid])
         return result
@@ -123,8 +125,16 @@ class ConversationEvidence:
         before = self.members.recent_rows(self.room, before_id=mid, since=since, context=True, include_bot=True, limit=8)
         after = self.members.recent_rows(self.room, before_id=self.snapshot.anchor_id, after_id=mid, since=since,
                                          context=True, include_bot=True, earliest=True, limit=12)
-        return {"状态": "找到", "焦点": self.records[source],
-                "前后文": self.messages(self.members.label_speakers([*before, *after], self.room))}
+        entry = self.records[source]
+        reply_to = entry.get("回复目标消息编号")
+        result = {"状态": "找到", "焦点": entry,
+                  "前后文": self.messages(self.members.label_speakers([*before, *after], self.room))}
+        if reply_to:
+            target = self.members.recent_rows(self.room, before_id=reply_to + 1, after_id=reply_to - 1,
+                                             since=since, context=True, include_commands=True, limit=1)
+            if target:
+                result["实际回复对象"] = self.messages(self.members.label_speakers(target, self.room))[0]
+        return result
 
     def read_memory(self, person="", topic=""):
         if (not isinstance(person, str) or not isinstance(topic, str) or len(topic) > 180

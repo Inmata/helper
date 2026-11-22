@@ -23,6 +23,7 @@ class ReplyWait:
         budget = ReplyBudget(message.received_at, seconds)
         personality = ctx.personality(message)
         snapshot = ctx.members.conversation_snapshot(message)
+        budget.source_id = snapshot.anchor_id
         with self.lock:
             self.jobs[id(budget)] = (budget, message, ctx, snapshot, personality, retryable)
         return budget
@@ -75,9 +76,12 @@ class ReplyWait:
                     self.outcomes.pop(key, None)
                 if budget.sent or budget.sending:
                     return
+                if budget.attempted:
+                    draft = None
+                    reason = "回复发送结果未确认，已停止补发"
             if draft is None:
                 facts = {"结果": reason}
-                if retryable and not blocked:
+                if retryable and not blocked and not budget.attempted:
                     facts["可用操作"] = "艾特机器人说「重试」，可重新处理原问题"
                 self.outcomes[key] = (job, facts, time.monotonic(), blocked)
                 self.outcomes.move_to_end(key)
@@ -157,8 +161,20 @@ class ReplyWait:
         try:
             from .utterance import QA, speak
             display = ctx.members.at_display_name(message.sender_id, message.chat_id) or "群友"
+            def send_at(part):
+                token = CURRENT.set(budget)
+                try:
+                    submitted = ctx.reply_at(message, part, delivery_guard=guard)
+                finally:
+                    CURRENT.reset(token)
+                if submitted:
+                    budget.submitted()
+                    if draft.on_sent is not None:
+                        with self._guard(job)():
+                            draft.on_sent(part)
+                return submitted
             speak(draft.text, tier=QA, byte_budget=1023 - len(("@" + display + "\u2005\n").encode("utf-8")),
-                  send_at=lambda part: ctx.reply_at(message, part, delivery_guard=guard))
+                  send_at=send_at)
         except (SnapshotExpired, RuntimeError):
             ctx.logger.info("回复状态未提交")
 
@@ -171,7 +187,7 @@ class ReplyWait:
                 with budget.lock:
                     now = budget.clock()
                     expired = now >= budget.deadline
-                    notice = not (budget.closed or budget.sent or budget.sending or budget.progress) and now >= budget.notice_at
+                    notice = not (budget.closed or budget.sent or budget.sending or budget.attempted or budget.progress) and now >= budget.notice_at
                     if notice:
                         budget.progress = True
                         stage = budget.stage

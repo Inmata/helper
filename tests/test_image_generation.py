@@ -19,7 +19,7 @@ from wxbot_framework.authorization import LOCAL_EDITOR
 from wxbot_framework.conversation.members import MemberStore
 from wxbot_framework.conversation.status_replies import StatusReplies
 from wxbot_framework.integrations.jev import JevError
-from wxbot_framework.integrations.llm import LLMError
+from wxbot_framework.integrations.llm import LLMClient, LLMContentBlocked, LLMError
 from wxbot_framework.integrations.magpie_images import MagpieImages
 from wxbot_framework.integrations.magpie_tools import MagpieTools, MagpieToolsToolError
 from wxbot_framework.memory.knowledge import KnowledgeStore
@@ -192,6 +192,31 @@ class ImageGenerationTests(unittest.TestCase):
             time.sleep(0.02)
         self.assertTrue(done())
 
+    def profile_fixture(self):
+        self.members.register("老猫子", ROOM, "wxid_cat")
+        self.message("老猫子报道", sender="wxid_cat")
+        person = self.knowledge.member_entity(ROOM, "wxid_cat")
+        self.knowledge.add_memory(ROOM, person["id"], "人物背景", "人工确认", "老猫子是北京人，三十多岁。", LOCAL_EDITOR)
+        self.knowledge.add_memory(ROOM, person["id"], "台球厅与近况", "人工确认",
+                                  "以前经营台球厅，店已倒闭。只作群聊背景。", LOCAL_EDITOR)
+        with self.knowledge.connection() as db:
+            for slot, kind, content in [
+                ("战锤设定讨论", "本人陈述", "喜欢讨论战锤40K的设定"),
+                ("宝可梦对战讨论", "本人陈述", "玩宝可梦双打"),
+                ("AI配对", "群内玩笑", "群友调侃和机器人配CP"),
+                *(("炒股近况", "本人陈述", f"目前在炒股，第{n}次讨论股价") for n in range(25)),
+            ]:
+                self.knowledge.put(ROOM, person["id"], slot, kind, content)
+            db.execute("UPDATE knowledge_entities SET aliases=? WHERE id=?", (json.dumps(["猫老板"]), person["id"]))
+
+    def poster_fixture(self):
+        path = self.root / "poster.png"
+        Image.new("RGB", (512, 512), color="white").save(path)
+        self.server.image = path.read_bytes()
+        RECENT_IMAGES.note({"chat_id": ROOM, "sender_id": "wxid_member", "native_message_id": "912",
+                            "image_status": "ready", "image_path": str(path)})
+        return path
+
     def test_mcp_pending_then_large_image_keeps_binary_and_one_submission(self):
         self.server.image = PNG + b"\0" * (2 * 1024 * 1024)
         first = self.client.submit("水彩橘猫", filename="large")
@@ -338,46 +363,46 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(reference.resolve())])
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
 
-    def test_reference_and_actual_profile_reach_plan_before_edit(self):
-        target = "wxid_example"
-        self.members.register("松子", ROOM, target)
-        self.message("我最近在做木工", sender=target)
-        person = self.knowledge.member_entity(ROOM, target)
-        self.knowledge.add_memory(ROOM, person["id"], "职业", "人工确认", "木工师傅", LOCAL_EDITOR)
-        self.knowledge.add_memory(ROOM, person["id"], "头衔", "群内玩笑", "月球球长", LOCAL_EDITOR)
-        reference = self.root / "poster.png"
-        Image.new("RGB", (512, 512), color="white").save(reference)
-        RECENT_IMAGES.note({"chat_id": ROOM, "sender_id": target, "native_message_id": "912",
-                            "image_status": "ready", "image_path": str(reference)})
-        seen = []
+    def test_named_profile_reaches_first_plan_and_rewritten_copy_is_delivered(self):
+        self.profile_fixture()
+        poster = self.poster_fixture()
+        result = {"绘图指令": "画复古的台球厅广告", "依据": ["本次请求", "E32", "E33"],
+                  "固定文字": [None, "", {}, {"文字": "三十来岁", "来源": "E32"}, "开过球房，现在看盘"],
+                  "排版位置": {"写错了": True}, "检查项": ["用了复古风格"]}
+        with patch.object(self.ctx._llm, "complete_json", return_value=result) as planner:
+            self.plugin.on_message(self.message("/生图 老猫子征婚图"), self.ctx)
+            self.wait_done()
+        planner.assert_called_once()
+        people = json.loads(planner.call_args.args[1])["任务"]["群友档案素材"]
+        self.assertEqual([person["人物"] for person in people], ["老猫子"])
+        self.assertEqual(set(people[0]["素材"]), {"基本情况", "经历", "近况", "兴趣", "群梗"})
+        material = json.dumps(people, ensure_ascii=False)
+        for word in ("北京人", "三十多岁", "台球厅", "倒闭", "炒股", "战锤", "宝可梦"):
+            self.assertIn(word, material)
+        self.assertEqual([call["name"] for call in self.server.calls], ["generate_image", "generation_result"])
+        self.assertIn("底部", self.server.calls[0]["arguments"]["prompt"])
+        expected = Path(typeset_image(poster, [("", "三十来岁"), ("", "开过球房，现在看盘")], "bottom")).read_bytes()
+        self.assertEqual(self.backend.images, [(ROOM, expected)])
 
-        def plan(system, user, **options):
-            payload = json.loads(user)
-            seen.append(payload)
-            steps = payload["取材记录"]
-            if not steps:
-                return lookup("find_people", name="松子")
-            if len(steps) == 1:
-                number = steps[0][0]["结果"]["候选"][0]["人物编号"]
-                return {"工具调用": [{"名称": "read_memory", "参数": {"person": number, "topic": "职业"}},
-                                  {"名称": "inspect_image", "参数": {"image": "I1", "focus": "旧职业"}}]}
-            records = steps[1][0]["结果"]["资料"]
-            source = next(row["来源编号"] for row in records if row["类别"] == "人工确认")
-            return {"绘图指令": "除去左侧的旧资料，保留右侧肖像及其白底，下方留空",
-                    "依据": [source], "固定文字": [{"标签": "职业", "文字": "木工师傅", "来源": source}]}
-
-        bitmap = io.BytesIO()
-        Image.new("RGB", (512, 512), color="white").save(bitmap, format="PNG")
-        self.server.image = bitmap.getvalue()
-        with patch.object(self.ctx._llm, "complete_json", side_effect=plan):
-            self.plugin.on_message(self.message("/生图 按松子的档案纠正这张图里的职业",
+    def test_context_can_lookup_full_profile_by_alias_and_inspect_exact_edit_reference(self):
+        self.profile_fixture()
+        self.message("帮猫老板更新下面这张人物卡。")
+        reference = self.poster_fixture()
+        outputs = [
+            {"工具调用": [{"名称": "read_profile", "参数": {"name": "猫老板"}},
+                      {"名称": "inspect_image", "参数": {"image": "I1", "focus": "旧职业"}}]},
+            {"绘图指令": "除去左侧的旧资料，保留右侧肖像及其白底，下方留空",
+             "固定文字": "开过球房，现在看盘", "检查项": ["保留右侧肖像和白底"]},
+        ]
+        with patch.object(self.ctx._llm, "complete_json", side_effect=outputs) as planner:
+            self.plugin.on_message(self.message("/生图 按刚才说的纠正这张图里的职业",
                 data={"quote": {"ref_type": "3", "svrid": "912"}}), self.ctx)
             self.wait_done()
         self.assertEqual([call["name"] for call in self.server.calls],
                          ["analyze_image", "generate_image", "generation_result", "analyze_image"])
-        material, picture = seen[2]["取材记录"][1]
-        records = material["结果"]["资料"]
-        self.assertTrue(any(row["内容"] == "木工师傅" and row["类别"] == "人工确认" for row in records))
+        self.assertEqual(json.loads(planner.call_args_list[0].args[1])["任务"]["群友档案素材"], [])
+        material, picture = json.loads(planner.call_args.args[1])["取材记录"][0]
+        self.assertIn("以前经营台球厅", material["结果"]["档案"]["素材"]["经历"][0]["内容"])
         self.assertIn("左侧旧职业", picture["结果"]["观察"]["内容"])
         arguments = self.server.calls[1]["arguments"]
         review = self.server.calls[3]["arguments"]
@@ -385,11 +410,10 @@ class ImageGenerationTests(unittest.TestCase):
         with Image.open(review["image"]) as pair:
             self.assertGreater(pair.width, pair.height * 2)
         self.assertIn("保留右侧肖像", arguments["prompt"])
-        self.assertNotIn("木工师傅", arguments["prompt"])
+        self.assertNotIn("开过球房", arguments["prompt"])
         self.assertEqual(arguments["reference_images"], [str(reference.resolve())])
-        self.assertNotEqual(self.backend.images[0][1], self.server.image)
-        with Image.open(io.BytesIO(self.backend.images[0][1])) as delivered:
-            self.assertEqual(delivered.size, (512, 512))
+        expected = Path(typeset_image(reference, [("", "开过球房，现在看盘")], "bottom")).read_bytes()
+        self.assertEqual(self.backend.images, [(ROOM, expected)])
 
     def test_clarification_interrupts_generation_and_keeps_quoted_text(self):
         self.message("请沿用绿底", sender="wxid_member")
@@ -403,8 +427,37 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(self.server.calls, [])
         self.assertIn("这张卡片要画哪位群友？", self.backend.texts[-1][1])
 
-    def test_planning_failure_does_not_forward_original_prompt(self):
-        with patch.object(self.ctx._llm, "complete_json", side_effect=LLMError("本机测试模型异常")):
+    def test_bad_json_does_not_ask_model_again_and_draws_with_prefetched_profile(self):
+        self.profile_fixture()
+        self.ctx._llm = LLMClient({"base_url": "http://127.0.0.1:1/v1", "model": "test", "api_key": "test"})
+        with (patch.object(self.ctx._llm, "_post", return_value="不是 JSON") as post,
+              patch.object(self.ctx._llm, "complete_text", return_value="已受理")):
+            self.plugin.on_message(self.message("/生图 猫老板征婚图"), self.ctx)
+            self.wait_done()
+        post.assert_called_once()
+        prompt = self.server.calls[0]["arguments"]["prompt"]
+        self.assertIn("猫老板征婚图", prompt)
+        self.assertIn("以前经营台球厅", prompt)
+        self.assertIn("玩宝可梦双打", prompt)
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
+    def test_planning_timeout_draws_original_request(self):
+        with patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError()) as planner:
+            self.plugin.on_message(self.message(), self.ctx)
+            self.wait_done()
+        planner.assert_called_once()
+        self.assertEqual(self.server.calls[0]["arguments"]["prompt"], "水彩橘猫")
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
+    def test_planning_timeout_with_missing_edit_reference_asks_for_image(self):
+        with patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError()):
+            self.plugin.on_message(self.message("/生图 把这张图换个背景"), self.ctx)
+            self.wait_done()
+        self.assertEqual(self.server.calls, [])
+        self.assertIn("需要原图", self.backend.texts[-1][1])
+
+    def test_planning_content_block_does_not_forward_original_prompt(self):
+        with patch.object(self.ctx._llm, "complete_json", side_effect=LLMContentBlocked("模型审核拦截")):
             self.plugin.on_message(self.message(), self.ctx)
             self.wait_done()
         self.assertEqual(self.server.calls, [])
@@ -444,16 +497,36 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(tuple(receipt), (self.members.message_id(original), 1))
 
     def test_visible_mismatch_repairs_once_before_delivery(self):
-        self.server.check_results = iter([r'{"通过":false,"问题":"右侧保留项改变"}', r'{"通过":true,"问题":""}'])
+        self.poster_fixture()
+        self.server.check_results = iter([r'{"通过":false,"问题":"右侧保留项改变"}'])
         with patch.object(self.ctx._llm, "complete_json", return_value={
             "绘图指令": "蓝底的展板，右侧留一块米白留白", "检查项": ["右侧留一块米白留白"]
         }):
-            self.plugin.on_message(self.message(), self.ctx)
+            self.plugin.on_message(self.message("/生图 把背景改成蓝色，右侧留白保留",
+                data={"quote": {"ref_type": "3", "svrid": "912"}}), self.ctx)
             self.wait_done()
         submissions = [call["arguments"] for call in self.server.calls if call["name"] == "generate_image"]
         self.assertEqual(len(submissions), 2)
         self.assertIn("右侧保留项改变", submissions[1]["prompt"])
-        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        self.assertEqual(self.backend.images, [(ROOM, self.server.image)])
+
+    def test_uncertain_invalid_or_timed_out_review_still_delivers_edit(self):
+        reference = self.poster_fixture()
+        for review, failure in ((r'{"通过":null,"问题":""}', None), ("不是 JSON", None), ("", TimeoutError())):
+            with self.subTest(review=review, failure=type(failure).__name__):
+                self.server.check_results = iter([review])
+                self.server.calls.clear()
+                self.backend.images.clear()
+                with (patch.object(self.ctx._llm, "complete_json", return_value={
+                    "绘图指令": "改成蓝底，保留人物", "检查项": ["人物保持原样"]
+                }), patch.object(self.ctx._magpie, "analyze_image", wraps=self.ctx._magpie.analyze_image,
+                                 side_effect=failure)):
+                    self.plugin.on_message(self.message("/生图 换个背景，保留人物",
+                        data={"quote": {"ref_type": "3", "svrid": "912"}}), self.ctx)
+                    self.wait_done()
+                self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(reference.resolve())])
+                self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)
+                self.assertEqual(self.backend.images, [(ROOM, self.server.image)])
 
     def test_fixed_title_uses_requested_region_and_does_not_print_field_label(self):
         bitmap = self.root / "title-base.png"

@@ -13,14 +13,16 @@ PROTOCOL = """
 """
 
 
-def run_tools(model, system, task, tools, *, guard, logger, rounds=2, max_tokens=1800):
+def run_tools(model, system, task, tools, *, guard, logger, rounds=2, max_tokens=1800, repair=True):
     results, cache = [], {}
     schemas = tools.schemas()
+    options = {} if max_tokens is None else {"max_tokens": max_tokens}
+    if not repair:
+        options["repair"] = False
     for index in range(rounds + 1):
         with guard():
             pass
         payload = {"任务": task, "可用工具": schemas, "取材记录": results, "剩余取材次数": rounds - index}
-        options = {} if max_tokens is None else {"max_tokens": max_tokens}
         result = model.complete_json(system + PROTOCOL, json.dumps(payload, ensure_ascii=False), **options)
         if "工具调用" not in result:
             return result

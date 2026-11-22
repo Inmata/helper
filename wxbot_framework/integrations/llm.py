@@ -144,7 +144,7 @@ class LLMClient:
             choice = result["choices"][0]
             finish_reason = choice.get("finish_reason")
             if finish_reason == "length":
-                raise LLMError("大模型响应被截断，请增加 max_tokens")
+                raise LLMFormatError("大模型响应被截断，请增加 max_tokens")
             if finish_reason == "content_filter":
                 # 上游过滤可能留下非空残文，不能当正常回复发送，也不自动重试或续写。
                 raise LLMContentBlocked("大模型响应被内容过滤中断")
@@ -158,7 +158,7 @@ class LLMClient:
             raise LLMContentBlocked("上游返回内容过滤控制信息，未作为正文发送")
         return content
 
-    def complete_json(self, system, user, *, history=(), max_tokens=None):
+    def complete_json(self, system, user, *, history=(), max_tokens=None, repair=True):
         budget = self.max_tokens if max_tokens is None else max_tokens
         if type(budget) is not int or not 128 <= budget <= 4096:
             raise ValueError("任务 max_tokens 应为128—4096的整数")
@@ -172,14 +172,16 @@ class LLMClient:
             data = None
         if isinstance(data, dict):
             return data
+        if not repair:
+            raise LLMFormatError("大模型输出不是合法的 JSON 对象")
         # 只补救一次，且与首次调用共享总的等待预算。
         remaining = deadline - time.monotonic()
         if remaining >= 1:
-            repair = [*messages, {"role": "assistant", "content": content},
+            repair_messages = [*messages, {"role": "assistant", "content": content},
                       {"role": "user", "content": "上一次输出不是合法的 JSON 对象。请只输出一个 JSON 对象，"
                                                    "不要代码块、注释或解释文字。"}]
             try:
-                repaired = self._post(repair, budget, json_mode=True, timeout=remaining,
+                repaired = self._post(repair_messages, budget, json_mode=True, timeout=remaining,
                                       reasoning_effort=self.reasoning_effort)
             except LLMContentBlocked:
                 raise

@@ -53,6 +53,18 @@ BASE_SCHEMA = """
 """
 
 MEMORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS verified_corrections (
+    id INTEGER PRIMARY KEY, account TEXT NOT NULL, room TEXT NOT NULL,
+    scope TEXT NOT NULL, subject_key TEXT NOT NULL, subject TEXT NOT NULL,
+    relation TEXT NOT NULL, kind TEXT NOT NULL, statement TEXT NOT NULL,
+    names TEXT NOT NULL, phrases TEXT NOT NULL, effective_on TEXT NOT NULL, observed_on TEXT NOT NULL,
+    source TEXT NOT NULL, correction_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+    UNIQUE(account,room,scope,subject_key,relation,effective_on));
+CREATE INDEX IF NOT EXISTS verified_corrections_room
+    ON verified_corrections(account,room,status,subject_key,relation);
+CREATE TABLE IF NOT EXISTS correction_reply_uses (
+    account TEXT NOT NULL, room TEXT NOT NULL, source_id INTEGER NOT NULL, fact_id INTEGER NOT NULL,
+    PRIMARY KEY(account,room,source_id,fact_id));
 CREATE TABLE IF NOT EXISTS knowledge_entities (
     id INTEGER PRIMARY KEY, account TEXT NOT NULL, room TEXT NOT NULL, entity_key TEXT NOT NULL,
     name TEXT NOT NULL, aliases TEXT NOT NULL DEFAULT '[]', wxid TEXT, pinned INTEGER NOT NULL DEFAULT 0,

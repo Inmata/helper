@@ -43,22 +43,24 @@ def _recent(snapshot):
 
 def material_needs(judge, question, snapshot, quote, previous):
     if judge is None:
-        return False, False
+        return False, False, False
     state = {"这轮要回答的问题": question, "明确引用": quote, "本群前文": _recent(snapshot),
              "同一人的上一轮": {"问题": previous.question, "已发回答": previous.text} if previous else None}
     try:
         scores = judge.noul(state, ROUTING, timeout=2)
-    except (JevError, OSError, ValueError):
-        return False, False
+    except (JevError, OSError, ValueError, TimeoutError):
+        return False, False, False
     if len(scores) != len(ROUTING):
-        return False, False
-    return scores[0] >= 0.55 or scores[2] >= 0.52, scores[1] >= 0.65
+        return False, False, False
+    correction = scores[2] >= 0.52
+    return scores[0] >= 0.55 or correction, scores[1] >= 0.65, correction
 
 
 @dataclass(frozen=True)
 class AnswerMaterial:
     local: tuple
     public: tuple
+    sources: tuple = ()
 
     @property
     def public_text(self):
@@ -100,7 +102,7 @@ def gather_answer_material(model, members, knowledge, message, snapshot, questio
     public = tuple(row for row in records if row["类别"] == "公开搜索结果")
     logger.info("群聊取材定稿：锚点=%s 原话=%s 公开来源组=%d 时效=%s", snapshot.anchor_id,
                 [row.get("消息编号") or row.get("条目编号") for row in local], len(public), current)
-    return AnswerMaterial(local, public)
+    return AnswerMaterial(local, public, tuple(evidence.records.values()))
 
 
 def supports_current_answer(judge, question, reply, sources, *, now):

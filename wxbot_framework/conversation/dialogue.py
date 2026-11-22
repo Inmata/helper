@@ -161,6 +161,8 @@ def _render(payload):
         lines.append("【本轮接话】\n" + payload["turn_context"])
     if payload.get("self_facts"):
         lines.append("【程序确认的聊天证据与动作】\n" + json.dumps(payload["self_facts"], ensure_ascii=False))
+    if payload.get("corrections"):
+        lines.append("【本轮命中的已核实纠错】\n" + json.dumps(payload["corrections"], ensure_ascii=False))
     if payload.get("revision"):
         lines.append("【待修订候选（包含无依据说法，不作为事实）】\n" + payload["revision"])
     quote = payload.get("quote")
@@ -250,7 +252,7 @@ class Dialogue:
 
     def reply(self, snapshot, *, knowledge=(), style=None, speaker_profile=None, people=(), room_game=None,
               detail=False, examples=(), system=None, quote=None, avoid=None, question=None, tool_results=(), turn_context="",
-              revision=None, person_messages=(), self_facts=None):
+              revision=None, person_messages=(), self_facts=None, corrections=()):
         """``quote`` 为本次提问引用的消息 ``{"name", "text"}``；``avoid`` 为刚说过、这次要换个角度的那句。
 
         ``question`` 是清理过手打 @ 标签的提问；缺省用快照里的原文。原文仍作为上下文锚点。
@@ -288,6 +290,11 @@ class Dialogue:
             payload["tools"] = [dict(item) for item in tool_results]
         if turn_context:
             payload["turn_context"] = turn_context
+        if corrections:
+            payload["corrections"] = corrections
+            system = (system or SYSTEM) + ("\n已核实纠错用于匹配对象、关系及时点。直接答案用来回答，承接前提只供承接。"
+                                          "注意正文问的是历史还是现状。事实只适用于某次活动、版本、时间或条件时，保留这个限定。"
+                                          "问这次茶歇留哪杯，直接答这次留什么。提到公开状态时保留资料所确认的日期。")
         if self_facts:
             payload["self_facts"] = self_facts
             system = (system or SYSTEM) + (

@@ -52,6 +52,7 @@ HELP = """管理员快捷命令（群聊与私聊通用，含空格时用英文�
 /管理 记忆 新增 人物 主题 类别 正文
 /管理 记忆 修改|移动|分类 编号 参数
 /管理 记忆 停用|恢复|来源|修订 编号 [页码]
+/管理 纠错 列表 [页码]｜来源|停用 编号
 /管理 学习 开启|关闭|立即处理
 /管理 定时 开启|关闭|设置 开始小时 结束小时 最近条数
 /管理 插件 列表|启用 名称|停用 名称|重载 [名称]
@@ -119,11 +120,39 @@ class MaintenanceService:
                 return self._alias_command(room, words[1:], editor)
             if words[:1] == ["记忆"]:
                 return self._memory(room, words[1:], editor)
+            if words[:1] == ["纠错"]:
+                return self._corrections(room, words[1:])
             if words[:1] == ["成员"]:
                 return self._members(room, words[1:], editor)
         # 启停线程、等待插件退出与发送公告均不能占数据库锁。
         with self._lock:
             return self._runtime(room, words)
+
+    def _corrections(self, room, words):
+        store = self.knowledge.corrections
+        rows = store.list(room, include_revoked=True)
+        marks = {"active": "生效", "superseded": "历史", "revoked": "停用"}
+        if words[:1] == ["列表"] and len(words) in (1, 2):
+            page = self.page(words[1]) if len(words) == 2 else 1
+            selected = rows[(page - 1) * 4:page * 4]
+            return "\n".join(f"#{fact.id} [{marks[fact.status]}] {fact.statement[:150]}" for fact in selected
+                             ) if selected else "这一页没有已核实纠错。"
+        if len(words) == 2 and words[0] in ("来源", "停用") and words[1].strip("#").isdigit():
+            number = int(words[1].strip("#"))
+            fact = next((row for row in rows if row.id == number), None)
+            if fact is None:
+                raise MemberError("本群没有这个纠错编号")
+            if words[0] == "停用":
+                return f"已停用纠错 #{number}。" if store.revoke(room, number) else f"纠错 #{number} 已停用。"
+            location = fact.source.get("网址") or f"群消息 #{fact.source['消息编号']}"
+            bounds = []
+            if fact.observed_on:
+                bounds.append(f"资料确认至 {fact.observed_on}")
+            if fact.source.get("适用范围"):
+                bounds.append(f"适用范围 {fact.source['适用范围']}")
+            return "\n".join([f"#{number} [{marks[fact.status]}] {fact.statement}", *bounds,
+                              location, fact.source["正文"][:220]])
+        raise MemberError("用法：/管理 纠错 列表 [页码]，或 纠错 来源|停用 编号")
 
     def _status_text(self, room):
         """维护状态用中文分组展示，不直接输出内部字段字典。"""

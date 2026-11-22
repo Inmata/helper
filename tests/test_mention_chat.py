@@ -438,6 +438,7 @@ class FakeCtx:
         self.guard_calls, self.expire_at_call, self.fail_at_send = 0, None, None
         self.completions = 0
         self.knowledge = MagicMock()
+        self.knowledge.corrections = None
         self.knowledge.member_entity.return_value = {"id": 1}
         self.knowledge.speaker_profile.return_value = None
         self.knowledge.search.return_value = []

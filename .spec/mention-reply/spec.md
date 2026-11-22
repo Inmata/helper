@@ -24,12 +24,17 @@ code:
   - wxbot_framework/conversation/tool_loop.py
   - wxbot_framework/conversation/evidence_tools.py
   - wxbot_framework/conversation/answer_material.py
+  - wxbot_framework/conversation/correction_capture.py
+  - wxbot_framework/conversation/correction_lookup.py
+  - wxbot_framework/memory/corrections.py
   - wxbot_framework/conversation/reply_review.py
   - wxbot_framework/integrations/magpie_tools.py
   - wxbot_framework/integrations/deadline_http.py
   - wxbot_framework/integrations/voice_local.py
   - wxbot_framework/recent_images.py
 related:
+  - tests/test_verified_corrections.py
+  - tools/replay_verified_correction.py
   - tests/test_image_generation.py
   - tests/test_mention_tools.py
   - tests/test_tool_router.py
@@ -189,6 +194,14 @@ Jev 按这次答复是否依赖近期公开事实来判断搜索；现价、优�
 - 明确引用图片时先看该图，需要核实聊天归因时先读双方原话。普通问答确需取材时可用一轮工具选择，超时或格式错误沿用已经找到的资料。公开近况按对应话题查证。常规接话直接使用现有回复通道。
 - 对可能已变化的公开状态，当前提问与反驳旧说法的短句分别判断是否需要查证。使用本轮检索的资料，核对主体、日期、出处和答案内容。检索返回文字、机器人旧说法或过期资料不能当作现状证据。资料不足时简短说明未能确认。
 - 明确引用的翻译和改写以引用原文为对象。截止收口的正文在原生接口确认后登记到实际回合，并供下一句继续承接。失败或未确认的部分不作为原话、不自动补发。
+
+## 已核实纠错
+
+- 艾特回复及已经承接的追问在联网路由前读本群纠错清单。候选来自当前对象、明确引用及其原问题、前文和问法。一个对象和关系的多个版本共用候选名额。语义判断分别看对象、直接答案、承接前提、时点和并行话题的歧义。
+- 纠正公开事实时，抓取实际出现的来源正文并核对主体、关系与日期。群内本人资料来自已绑定本人，群内决定用管理员的确认原话，发言记录保留说话人。引用预览和机器人原话用于定位。已核实记录按机器人账号和群保存。
+- 历史事件保留有效日期，公开现状按资料确认日期复查。明确历史日期找当时版本。记录可在授权维护命令中查看来源和停用；停用的相同事实键保留，避免旧转述自动加回。
+- 对固定版本、版次或其他有明确适用范围的事实，证据直接支持时可按范围保存，缺的日期留空。群内决定由程序核对发言账号的权限，证据判断只核对原话确实作出了决定。直接命中已核实答案时跳过重复取材。
+- 已核实记录交给回复生成和同轮发送核对。草稿自行加入的事实也按对象找已核实纠错，明确冲突时修订。实际发送成功的回答保留使用过的纠错编号，便于引用续问。近期上下文清空后继续使用已核实记录。
 
 ## 群生图
 

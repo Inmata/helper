@@ -13,6 +13,7 @@ from ..conversation.members import MemberError, name_key, parse_aliases, parse_j
 from ..storage.migrations import initialize_database
 from ..timeutil import iso_utc
 from .admin import KnowledgeAdminMixin
+from .corrections import VerifiedCorrections
 from .learning import LearningBatch
 
 KINDS = frozenset({"人工确认", "本人陈述", "他人提及", "群内玩笑", "存在争议", "语言习惯"})
@@ -74,6 +75,7 @@ class KnowledgeStore(KnowledgeAdminMixin):
         self.members = members
         self.account = members.account
         self.learning = LearningBatch(self)
+        self.corrections = VerifiedCorrections(members)
         self.display_timezone = display_timezone or "Asia/Shanghai"
 
     @property

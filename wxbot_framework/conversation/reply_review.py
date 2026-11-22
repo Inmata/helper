@@ -75,6 +75,12 @@ UNVERIFIED_REPLACEMENT = {
     "false": "说明原判断太确定，并承认现有资料不足；只讨论明确的假设或按给出的榜单事实作有限判断。"
              "确认自己说过哪句话、复述原话或描述能确定的前提，也不属于无依据的新判断。",
 }
+CORRECTION_CONFLICT = {
+    "instructions": "候选答复是否与已核实纠错实质冲突，或者把纠错事实擅自扩展到了别的版本、活动、地区或时间？",
+    "true": "沿用被纠正的旧事实、否认已核实的历史事件，把旧状态当实时状态。"
+            "把某次茶歇的饮料选择扩大成再也不喝某种饮料，把某个版本支持的功能说成其他版本也支持，也判真。",
+    "false": "上下文已明确限定，口语转述仍然保留原意。转述旧话、翻译、假设、玩笑、讨论下一步或省掉不必要的前提，也判否。",
+}
 
 
 def _speech_terms(text):
@@ -128,6 +134,7 @@ class ReplyReview:
     search: float | None = None
     error: str | None = None
     own: float | None = None
+    correction: float | None = None
 
     @property
     def needs_search(self):
@@ -171,9 +178,13 @@ def review_reply(jev, question, answer, evidence):
         checks.append(UNSUPPORTED_SELF)
     if "原话核对" in facts:
         checks.extend((UNSUPPORTED_EXPLANATION, CORRECTION_EVADED, UNVERIFIED_REPLACEMENT))
+    check_correction = bool(evidence.get("已核实纠错"))
+    if check_correction:
+        checks.append(CORRECTION_CONFLICT)
     try:
         local, public, search, *own = jev.noul({"提问": question, "拟发送的回答": answer, "依据": evidence}, checks, timeout=2)
+        correction = own.pop() if check_correction else None
     except Exception as error:
         return ReplyReview(UNAVAILABLE, error=type(error).__name__)
-    return ReplyReview(REJECTED if max(local, public, *own) >= 0.7 else ACCEPTED,
-                       local, public, search, own=max(own) if own else None)
+    return ReplyReview(REJECTED if max(local, public, correction or 0, *own) >= 0.7 else ACCEPTED,
+                       local, public, search, own=max(own) if own else None, correction=correction)

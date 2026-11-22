@@ -23,6 +23,8 @@ from .voice_reply import (COMMAND as VOICE_COMMAND, READ_COMMAND as VOICE_READ_C
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue, resolve_reply_quote
 from wxbot_framework.conversation.context_tools import MentionContext, SELF_QUERY_HINTS, build_default_tools, prefetch_mention_context
 from wxbot_framework.conversation.answer_material import gather_answer_material, material_needs, supports_current_answer
+from wxbot_framework.conversation.correction_capture import capture_corrections
+from wxbot_framework.conversation.correction_lookup import CorrectionMatches, candidates as correction_candidates, route as route_corrections
 from wxbot_framework.conversation.mention_tools import (IMAGE_WINDOW_SECONDS,
                                                         SEARCH_RETRY_SECONDS, MentionTools, ToolOutcome, ToolResult,
                                                         previous_question, public_search_topic, read_tool_options,
@@ -79,7 +81,8 @@ def wants_detail(query):
 
 
 def reply_seconds(query):
-    return 120 if wants_detail(query) or any(word in query for word in ("联网", "核实", "查证", "搜一下")) else 90
+    lookup_hints = ("联网", "核实", "查证", "搜一下", "https://", "http://")
+    return 120 if wants_detail(query) or any(word in query for word in lookup_hints) else 90
 
 
 def _tool_followup(cache, key, received_at, window):
@@ -611,6 +614,7 @@ class Plugin:
                         with active_budget.delivery(revision):
                             yield
             raw_quote = message.data.get("quote") or {}
+            routing_snapshot = snapshot
             quote_is_bot = self.members.account in (raw_quote.get("fromusr"), raw_quote.get("chatusr"))
             quote_hint = {"text": raw_quote.get("text") or "", "作者": "机器人" if quote_is_bot else "群友"} if raw_quote else None
             display = self.members.at_display_name(message.sender_id, message.chat_id) or snapshot.speaker_name
@@ -655,6 +659,13 @@ class Plugin:
                 if previous and previous.voice_action and (not raw_quote or any(r["形式"] == "朗读语音" for r in own_lines)):
                     self_facts["同一发言者上一轮的语音结果"] = previous.voice_action
 
+            corrections = getattr(ctx.knowledge, "corrections", None)
+            matches = CorrectionMatches()
+
+            def remember_fact_use():
+                if corrections is not None and matches.facts:
+                    corrections.record_use(snapshot.room, snapshot.anchor_id, matches.facts)
+
             def send_part(part, send_guard=guard, *, use_at=False):
                 if use_at and not plain:
                     delivered = dispatch(lambda: ctx.reply_at(message, part, display_name=display, delivery_guard=send_guard))
@@ -664,6 +675,8 @@ class Plugin:
                     sent(part, reading_offer=reading_offer, voice_action=voice_action)
                 if delivered and active_budget is not None:
                     active_budget.submitted()
+                if delivered:
+                    remember_fact_use()
                 return delivered
 
             def send_at(part, send_guard=guard):
@@ -690,6 +703,7 @@ class Plugin:
                             active_budget.stage = "合成语音"
                     def record_voice(part):
                         result.sent.append(part)
+                        remember_fact_use()
                         if active_budget is not None:
                             active_budget.submitted()
                         if sent is not None:
@@ -727,6 +741,36 @@ class Plugin:
             investigation = None
             fresh = False
             quoted_image = raw_quote.get("ref_type") in ("3", "47")
+            learned = False
+            facts = corrections.list(snapshot.room) if corrections is not None and not (offer_reading or read_accepted) else []
+            chain = ()
+            quoted_text = ""
+            recent = [{"消息编号": row["id"], "发言人": row.get("speaker_name"), "内容": row["text"][:300]}
+                      for row in routing_snapshot.history[-8:]] if facts else []
+            used = ()
+
+            def find_corrections(found, more=()):
+                if not found:
+                    return CorrectionMatches()
+                with work("查已核实的纠错", prepare_until):
+                    return route_corrections(found, clean_query, judge if can_prepare() else None,
+                                             quote=quoted_text, recent=(*recent, *more), used=used,
+                                             now=self.members.now(), logger=ctx.logger, anchor_id=snapshot.anchor_id)
+
+            if facts:
+                preview = strip_at_labels(raw_quote.get("text") or "").strip()
+                native_id = raw_quote.get("svrid") or ""
+                if native_id or preview:
+                    chain = self.members.reference_chain(routing_snapshot, native_id, preview)
+                quoted_text = "\n".join(row["text"][:350] for row in chain) or preview
+                used = corrections.used(snapshot.room, tuple(row["id"] for row in chain))
+                if previous and previous.question:
+                    recent.append({"发言人": "同一发言者上一轮", "内容": previous.question[:300]})
+                if not quoted_image:
+                    matches = find_corrections(facts)
+                if matches.ambiguous:
+                    yield from respond(matches.clarification(), QA)
+                    return
             try:
                 planning_model = getattr(ctx, "llm", None)
             except ValueError:
@@ -734,12 +778,40 @@ class Plugin:
             if (callable(getattr(planning_model, "complete_json", None))
                     and not (offer_reading or read_accepted or missing_quote or quoted_image) and can_prepare()):
                 target_quote = quote or quote_hint
+                if "correction" in intents and (quote_is_bot or (not target_quote and originals)):
+                    target_quote = {"已核对的聊天原话": originals} if originals else None
                 with work("理解问题", prepare_until):
-                    fresh, needs_local = material_needs(judge, clean_query, snapshot, target_quote, previous)
-                if fresh or (needs_local and "correction" not in intents and classify_tier(clean_query) != CHAT):
+                    fresh, needs_local, *signals = material_needs(judge, clean_query, snapshot, target_quote, previous)
+                correcting_public = bool(signals and signals[0])
+                fresh = bool(matches.refresh) or (fresh and (not matches.answers or correcting_public))
+                learning = corrections is not None and (correcting_public or "correction" in intents or matches.refresh)
+                has_link = "https://" in message.text or "http://" in message.text
+
+                def verify_correction(sources):
+                    nonlocal facts, matches
+                    if active_budget is not None:
+                        with active_budget.lock:
+                            active_budget.llm_limit = 6
+                    with work("核对纠错来源", prepare_until):
+                        ids = capture_corrections(planning_model, judge, ctx, message, snapshot, clean_query, target_quote,
+                                                  sources, matches,
+                                                  guard=lambda: ctx.response_guard(snapshot, personality), store=corrections)
+                    if not ids:
+                        return False
+                    facts = corrections.list(snapshot.room)
+                    matches = find_corrections(facts)
+                    return any(row.id in ids for row in matches.answers)
+
+                if learning and (has_link or "correction" in intents) and can_prepare():
+                    yield
+                    learned = verify_correction(())
+                    if learned:
+                        fresh = False
+                gather_local = needs_local and "correction" not in intents and classify_tier(clean_query) != CHAT
+                if not learned and can_prepare() and (fresh or (gather_local and not matches.answers)):
                     if fresh and active_budget is not None:
                         with active_budget.lock:
-                            active_budget.llm_limit = 5
+                            active_budget.llm_limit = max(5, active_budget.llm_limit)
                     lookup = self._tools(ctx).search if fresh and self.tools is not None else None
                     try:
                         yield  # 与原有联网流程一样，让同群其他人的任务先运行。
@@ -752,10 +824,33 @@ class Plugin:
                         raise
                     except (LLMError, TimeoutError) as error:
                         ctx.logger.info("群聊取材未完成：%s", type(error).__name__)
-                    if fresh and not (investigation and investigation.public):
+                    if investigation is not None and facts and not matches.facts and not matches.refresh:
+                        more = [{"消息编号": item.get("消息编号"), "发言人": item.get("发言人"),
+                                 "内容": item["内容"][:300]} for item in investigation.local
+                                if item.get("消息编号")]
+                        if more:
+                            matches = find_corrections(facts, more)
+                if learning and not learned and can_prepare():
+                    sources = investigation.sources if investigation else ()
+                    has_search_link = any(row.get("类别") == "公开搜索结果" and "http" in row["内容"] for row in sources)
+                    history_ids = {row["id"] for row in snapshot.history[-10:]}
+                    has_new_local = "correction" in intents and any(
+                        item.get("类别") == "群友原话" and item.get("消息编号") not in history_ids for item in sources)
+                    if has_search_link or has_new_local:
+                        learned = verify_correction(sources)
+                if fresh and not (investigation and investigation.public):
+                    if matches.answers and not matches.refresh:
+                        yield from respond("；".join(row.statement.rstrip("。") for row in matches.answers) + "。", QA)
+                    elif matches.refresh:
+                        when = matches.refresh[0].observed_on
+                        yield from respond(f"这条现状目前只核实到 {when}，最新情况还没查到。", QA)
+                    else:
                         yield from respond("这条近期消息我还没查到能确认的出处。", QA)
-                        return
-            if catch_up and not missing_quote and not self_facts and investigation is None:
+                    return
+            if matches.ambiguous:
+                yield from respond(matches.clarification(), QA)
+                return
+            if catch_up and not missing_quote and not self_facts and investigation is None and not matches.facts:
                 rows = snapshot.group_messages
                 with work("写回复", answer_until):
                     reply = Dialogue(ctx.llm_for(message, personality=personality, for_reply=True),
@@ -790,6 +885,8 @@ class Plugin:
                                                for item in investigation.public])
             elif missing_quote:
                 outcome = ToolOutcome(ask=missing_quote)
+            elif matches.answers and not quoted_image:
+                outcome = ToolOutcome()
             else:
                 if active_budget is not None and quoted_image:
                     with active_budget.lock:
@@ -799,7 +896,7 @@ class Plugin:
             material = []
             if can_prepare():
                 with work("查群聊资料", prepare_until):
-                    if investigation is None and not quoted_image and "correction" not in intents:
+                    if investigation is None and not quoted_image and "correction" not in intents and not matches.answers:
                         material = person_context(self.members, ctx.knowledge, reviewer, message.chat_id, clean_query,
                                                   history=snapshot.history, before_id=self.members.message_id(message),
                                                   quote=quote, sender_id=message.sender_id)
@@ -810,6 +907,9 @@ class Plugin:
                 before_send()
             if outcome.used:
                 options["tool_results"] = outcome.payload()
+            if learned:
+                options["turn_context"] = "\n".join(filter(None, (options.get("turn_context"),
+                    "本轮已核实纠正。适用时简洁交代更正和出处，不清楚的动机或后续省略。")))
             if outcome.context or outcome.ask:
                 options["turn_context"] = "\n".join(filter(None, (options.get("turn_context"), outcome.context, outcome.ask)))
             if investigation is not None and investigation.local:
@@ -835,6 +935,9 @@ class Plugin:
                 options["system"] = options.get("system", SYSTEM) + (
                     "\n本轮核实的是近期可能变动的公开状态。以本轮可核对的公开资料为准，"
                     "直说结果并写出处和事件时间。群友转述或自己之前的话不能用作公开事实的证据。")
+            correction_material = [{**fact.material(), "用途": use}
+                                   for use, rows in (("直接答案", matches.answers), ("承接前提", matches.premises))
+                                   for fact in rows]
 
             correction_reply = ""
             if "correction" in intents and originals and not fresh:
@@ -854,7 +957,8 @@ class Plugin:
                         snapshot, knowledge=context.knowledge, style=context.style,
                         speaker_profile=context.speaker_profile, people=context.people, person_messages=context.person_messages,
                         room_game=self.game_context(game) if game else None, quote=quote,
-                        question=clean_query, revision=revision, self_facts=self_facts, **prompt_options),
+                        question=clean_query, revision=revision, self_facts=self_facts,
+                        corrections=correction_material, **prompt_options),
                         personality.name)
                 text, preference = voice_reply_format(text) if can_voice else (text, None)
                 if not text:
@@ -868,43 +972,61 @@ class Plugin:
                 review_facts = {"语音能力": VOICE_CAPABILITY}
             checked_search = any(item.tool == "search" and item.ok for item in outcome.results)
             group_attribution = bool(GROUP_ATTRIBUTION.search(clean_query))
-            if fresh or review_facts or checked_search or group_attribution:
-                evidence = reply_evidence(snapshot, context, quote=quote,
-                    quote_is_bot=quote_is_bot,
-                    tools=outcome.payload(), room_game=self.game_context(game) if game else None,
-                    turn_context=outcome.context, self_facts=review_facts)
-                for attempt in range(2):
-                    with work("核对回复", active_budget.deadline if active_budget else None):
-                        if fresh:
-                            accepted = supports_current_answer(judge, clean_query, reply, investigation.public_text,
-                                                               now=self.members.now())
-                        else:
-                            decision = review_reply(judge if review_facts else reviewer, clean_query, reply, evidence)
-                            accepted = decision.status != REJECTED
-                            ctx.logger.info("回复依据核对：status=%s local=%s public=%s own=%s error=%s",
-                                            decision.status, decision.local, decision.public, decision.own, decision.error)
-                    if accepted:
-                        break
-                    if attempt == 0 and (active_budget is None or active_budget.clock() + 8 < answer_until):
-                        try:
-                            reply, voice_preference = generate(revision=reply, guidance=(
-                                "按已有资料答当前问题，删掉没有依据的细节。纠错时区分群友和机器人各自说过的话，"
-                                "公开近况注明出处和时间，没查到的部分直说。"))
-                            continue
-                        except LLMContentBlocked:
-                            raise
-                        except (LLMError, ReplyExpired):
-                            pass
-                    if correction_reply:
-                        reply = correction_reply
-                    else:
-                        reply = ("这条消息我还没核实清楚，先不下结论。" if fresh or checked_search else
-                                 "我刚才没对上这句是谁说的，现有记录里还没找到。" if group_attribution or "correction" in intents else
-                                 VOICE_CAPABILITY)
-                    voice_preference = False
+            for attempt in range(2):
+                verified = {row["编号"]: row for row in correction_material}
+                if facts and not quoted_image and not fresh:
+                    for group in correction_candidates(facts, reply):
+                        if group["name"] or group["exact"]:
+                            fact = next((row for row in group["records"] if row.status == "active"), None)
+                            if fact is not None:
+                                verified.setdefault(fact.id, fact.material())
+                if not (fresh or review_facts or checked_search or group_attribution or verified):
                     break
+                with work("核对回复", active_budget.deadline if active_budget else None):
+                    if fresh:
+                        accepted = supports_current_answer(judge, clean_query, reply, investigation.public_text,
+                                                           now=self.members.now())
+                        contradicts = False
+                    else:
+                        evidence = reply_evidence(snapshot, context, quote=quote, quote_is_bot=quote_is_bot,
+                            tools=outcome.payload(), room_game=self.game_context(game) if game else None,
+                            turn_context=outcome.context, self_facts=review_facts)
+                        if verified:
+                            evidence["已核实纠错"] = list(verified.values())[:9]
+                            evidence["本轮日期"] = self.members.now().date().isoformat()
+                        decision = review_reply(judge if review_facts or verified else reviewer, clean_query, reply, evidence)
+                        accepted = decision.status != REJECTED
+                        contradicts = (decision.correction or 0) >= 0.7
+                        ctx.logger.info("回复依据核对：status=%s local=%s public=%s own=%s correction=%s ids=%s error=%s",
+                                        decision.status, decision.local, decision.public, decision.own,
+                                        decision.correction, list(verified), decision.error)
+                if accepted:
+                    break
+                if attempt == 0 and (active_budget is None or active_budget.clock() + 8 < answer_until):
+                    try:
+                        reply, voice_preference = generate(revision=reply, guidance=(
+                            "按已有资料答当前问题，删掉没有依据的细节。纠错时区分群友和机器人各自说过的话，"
+                            "公开近况注明出处和时间，没查到的部分直说。"
+                            + ("用已核实纠错对齐同一对象、关系和时间，删改明确冲突的断言。" if verified else "")))
+                        continue
+                    except LLMContentBlocked:
+                        raise
+                    except (LLMError, ReplyExpired):
+                        pass
+                if contradicts and matches.answers:
+                    reply = "；".join(row.statement.rstrip("。") for row in matches.answers) + "。"
+                elif correction_reply:
+                    reply = correction_reply
+                elif fresh or checked_search or verified:
+                    reply = "这条消息我还没核实清楚，先不下结论。"
+                elif group_attribution or "correction" in intents:
+                    reply = "我刚才没对上这句是谁说的，现有记录里还没找到。"
+                else:
+                    reply = VOICE_CAPABILITY
+                voice_preference = False
+                break
             # 用了工具的回复按问答单条发出；带网址的消息容易触发微信风控，模型照抄了网址也在这里去掉。
-            if outcome.used:
+            if outcome.used or correction_material:
                 reply = strip_links(reply) or reply
             tier = QA if self_facts else ((DETAIL if detail else QA) if outcome.used or outcome.ask or material
                                          else classify_tier(clean_query, detail=detail))

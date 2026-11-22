@@ -233,6 +233,22 @@ class ConversationHistory:
                 (members.account, room, message_id)).fetchone()
             return row[0] if row else ""
 
+    def reference_chain(self, snapshot, native_id, text):
+        """明确引用优先匹配真实消息编号，其次匹配唯一原文，带回实际被答的问题。"""
+        if not native_id and not text:
+            return ()
+        options = dict(before_id=snapshot.anchor_id, context=True, limit=2, include_bot=True)
+        matched = self.recent_rows(snapshot.room, reference=(native_id, ""), **options) if native_id else []
+        if not matched and text:
+            matched = self.recent_rows(snapshot.room, reference=("", text), **options)
+        if len(matched) != 1:
+            return ()
+        selected = matched[0]
+        parent = selected["reply_to"]
+        parents = self.recent_rows(snapshot.room, before_id=parent + 1, after_id=parent - 1, context=True,
+                                   include_bot=True, limit=1) if parent else ()
+        return (*parents, selected)
+
     def record_bot_reply(self, room, text, *, voice_id="", source_id=0):
         """把成功发出的机器人回复按真实时间落库，供多轮对话承接自己刚才的话。"""
         members = self.members
@@ -289,7 +305,7 @@ class ConversationHistory:
 
     def recent_rows(self, room, *, limit=200, sender_id=None, before_id=None, since=None, until=None,
                     context=False, include_bot=False, continuity_seconds=None, include_commands=False, keywords=(),
-                    after_id=None, earliest=False):
+                    after_id=None, earliest=False, reference=None):
         members = self.members
         if room not in members.groups or type(limit) is not int or not 1 <= limit <= 5000:
             raise MemberError("查询需要已启用的群，条数应为 1—5000")
@@ -299,6 +315,10 @@ class ConversationHistory:
             if not include_bot:
                 sql += " AND bot_generated=0"
             values = [members.account, room]
+            if reference is not None:
+                native_id, text = reference
+                sql += " AND ((?<>'' AND context_message_id=?) OR (?<>'' AND text=?))"
+                values.extend((native_id, native_id, text, text))
             if sender_id is not None:
                 sql += " AND sender_id=?"
                 values.append(sender_id)

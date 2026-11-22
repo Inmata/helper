@@ -9,6 +9,7 @@ import threading
 import time
 from uuid import uuid4
 
+from wxbot_framework.commands import command_text
 from wxbot_framework.conversation.members import SnapshotExpired
 from wxbot_framework.conversation.mention_tools import _within
 from wxbot_framework.conversation.tool_router import JevToolRouter
@@ -19,9 +20,8 @@ from wxbot_framework.integrations.magpie_tools import MagpieToolsError
 from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget
 from wxbot_framework.messaging.mentions import strip_at_labels
 from wxbot_framework.recent_images import ImageRecord, RECENT_IMAGES, READY
-from .image_plan import ImageProfiles, fallback_image, prepare_image
+from .image_plan import ImageProfiles, fallback_image, prepare_image, recent_image_commands
 
-COMMAND = "/生图"
 TASK_SECONDS = 300
 PLAN_SECONDS = 75
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / ".runtime" / "generated_images"
@@ -53,6 +53,7 @@ class ImageJob:
     stage: str = "queued"
     failure: str = ""
     revisions: tuple = ()
+    previous_prompt: str = ""
     source_id: int = 0
     clarification_until: float = 0
     missing_reference: bool = False
@@ -93,8 +94,9 @@ class ImageReply:
             job = self._jobs.get(member)
         if job is None:
             return False
-        question = {"instructions": "当前发言是否在询问、催促或重试自己已有的生图任务？新的独立画图描述不算。",
-                    "true": "询问已有图片在哪、是否完成、任务进度或重试原任务。", "false": "其他聊天或新的生图要求。"}
+        question = {"instructions": "判断当前发言是否在查询或恢复查询自己已有的生图任务。",
+                    "true": "询问已有图片在哪、是否完成、任务进度，或简短要求重试原任务。",
+                    "false": "要求重新画一张、再出一版、换参考图重画、修改图片或进行其他聊天。"}
         try:
             with job.guard():
                 pass
@@ -157,7 +159,7 @@ class ImageReply:
 
     def intent(self, message, ctx, text):
         if self._thread is None or not text or len(text) > 2000:
-            return ""
+            return None
         identity = ((message.dispatch_epoch, message.dispatch_sequence) if message.dispatch_sequence
                     else (message.session_id, id(message)))
         with self._intent_lock:
@@ -166,17 +168,21 @@ class ImageReply:
             try:
                 snapshot = ctx.members.conversation_snapshot(message)
                 quote = message.data.get("quote") or {}
+                commands = recent_image_commands(ctx.members, message, snapshot)
+                last = command_text(commands[-1]["text"]).split(maxsplit=1) if commands else ()
+                previous_prompt = last[1] if len(last) == 2 and len(last[1]) <= 2000 else ""
                 context = {
-                    "引用": {key: quote.get(key) for key in ("name", "text", "ref_type")},
+                    "引用": {"作者": quote.get("name"), "正文": quote.get("text"), "是图片": quote.get("ref_type") == "3"},
                     "近期": [{"作者": row["speaker_name"], "内容": row["text"][:220]} for row in snapshot.history[-6:]],
                 }
-                mode = _within(lambda: JevToolRouter(ctx.jev).image_request(text, context=context), 3, self.stopped)
+                intent = _within(lambda: JevToolRouter(ctx.jev).image_request(
+                    text, context=context, previous_prompt=previous_prompt), 3, self.stopped)
             except (ValueError, TimeoutError, SnapshotExpired):
-                mode = ""
-            self._intents[identity] = mode
+                intent = None
+            self._intents[identity] = intent
             if len(self._intents) > 128:
                 self._intents.popitem(last=False)
-            return mode
+            return intent
 
     def followup(self, message, ctx, text, *, addressed=False, cold=None):
         if message.is_self or not text or len(text) > 2000:
@@ -217,7 +223,7 @@ class ImageReply:
         self.request(message, ctx, job.prompt, cold=cold, prior=job, supplement=text)
         return True
 
-    def request(self, message, ctx, prompt, *, mode="command", cold=None, prior=None, supplement=""):
+    def request(self, message, ctx, prompt, *, mode="command", cold=None, prior=None, supplement="", previous_prompt=""):
         if message.is_self or self.stopped.is_set() or (cold is not None and cold.active(message)):
             return
         try:
@@ -302,6 +308,7 @@ class ImageReply:
                 job = ImageJob(message, ctx, prompt.strip(), references, snapshot, guard, key, uuid4().hex,
                                time.monotonic() + TASK_SECONDS, personality,
                                revisions=revisions, source_id=prior.source_id if prior else snapshot.anchor_id,
+                               previous_prompt=prior.previous_prompt if prior else previous_prompt,
                                missing_reference=missing_reference,
                                required_references=required_references,
                                edit=edit or bool(prior and (prior.edit or (prior.plan and prior.plan.edit))))
@@ -390,7 +397,8 @@ class ImageReply:
                     revisions=job.revisions, **options), PLAN_SECONDS, job.cancelled)
             except (LLMConnectionError, LLMFormatError, TimeoutError) as error:
                 job.ctx.logger.info("生图整理回退：task=%s error=%s", job.filename, type(error).__name__)
-                job.plan, question = fallback_image(job.prompt, job.revisions, references, profiles, **options)
+                revisions = (job.prompt, *job.revisions) if job.previous_prompt else job.revisions
+                job.plan, question = fallback_image(job.previous_prompt or job.prompt, revisions, references, profiles, **options)
             finally:
                 CURRENT.reset(token)
             with job.guard():

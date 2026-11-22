@@ -96,8 +96,12 @@ class Backend:
 
 class Jev:
     def noul(self, state, questions, **options):
-        if "拟发送回复" in state:
-            return [0.99, 0.01]
+        text = state.get("当前艾特正文")
+        if text:
+            values = [0.01, 0.01] if text in ("画不出来？", "图呢？", "画好了吗？") else [0.99, 0.01]
+            if "请求人上一次生图要求" in state:
+                values.append(0.95 if text == "以这个为准再生成一次" else 0.05)
+            return values
         return [0.99, 0.01]
 
 
@@ -357,6 +361,41 @@ class ImageGenerationTests(unittest.TestCase):
         self.wait_done()
         self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(reference.resolve())])
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
+    def test_quoted_redraw_starts_new_generation_after_previous_image_was_sent(self):
+        original = "/生图 画一张漫画，主角在台上领奖"
+        self.plugin.on_message(self.message(original), self.ctx)
+        self.wait_done()
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        reference, _ = self.reference_fixture("new-portrait")
+        self.reference_fixture("other-portrait", sender="wxid_other")
+        self.message("/生图 画一张别的海报", sender="wxid_other")
+        noul = self.ctx._jev.noul
+        prepare = self.ctx._llm.complete_json
+
+        def judge(state, questions, **options):
+            if "当前话语" in state:
+                return [0.9]
+            return noul(state, questions, **options)
+
+        def plan_timeout(system, user, **options):
+            prepare(system, user, **options)
+            raise TimeoutError
+
+        with (patch.object(self.ctx._jev, "noul", side_effect=judge),
+              patch.object(self.ctx._llm, "complete_json", side_effect=plan_timeout)):
+            self.plugin.on_message(self.message("@机器人\u2005以这个为准再生成一次", data={
+                "is_at_self": True, "at_members": ["wxid_robot"],
+                "quote": {"ref_type": "3", "svrid": "new-portrait", "fromusr": "wxid_member"},
+            }), self.ctx)
+            self.wait_done()
+
+        submissions = [call["arguments"] for call in self.server.calls if call["name"] == "generate_image"]
+        self.assertEqual(len(submissions), 2)
+        self.assertEqual(submissions[-1]["reference_images"], [str(reference)])
+        self.assertEqual([row["内容"] for row in self.ctx._llm.plans[-1]["任务"]["请求人近期生图命令"]], [original])
+        self.assertEqual(submissions[-1]["prompt"], "画一张漫画，主角在台上领奖\n以这个为准再生成一次")
+        self.assertEqual(self.backend.images, [(ROOM, PNG), (ROOM, PNG)])
 
     def reference_fixture(self, native_id, *, sender="wxid_member", status="ready"):
         path = self.root / f"reference-{native_id}.png"

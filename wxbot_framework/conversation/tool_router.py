@@ -76,6 +76,12 @@ class ToolDecision:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class ImageDecision:
+    mode: str
+    previous_prompt: str = ""
+
+
 def _threshold(value, name):
     if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
         raise ValueError(f"{name} 应为 0–1 的数值")
@@ -131,25 +137,35 @@ class JevToolRouter:
             state["补充语境"] = _summary(context)
         return self._decide(VISION, state, VISION_QUESTION, self.vision_threshold, timeout)
 
-    def image_request(self, question, *, context=None, timeout=2):
-        """一次判断生图意图与是否依赖参考图，返回 create / edit / 空串。"""
+    def image_request(self, question, *, context=None, previous_prompt="", timeout=2):
+        """一次判断出图、参考图以及能否沿用上一条生图要求。"""
         if self.jev is None:
-            return ""
+            return None
+        questions = [
+            {"instructions": "结合当前艾特、引用和它实际承接的话题，判断用户是否要求机器人现在交付一张新生成或编辑后的图片。",
+             "true": "要求画图、接受前文的画图方案、编辑已有图片或重新出图。引用图片并说‘照这张再来一版’属于用引用图再生成。",
+             "false": "查进度、问旧图在哪、只说‘重试’、问怎么画、索要提示词、分析或评价图片、讨论生图模型、禁止画图或转述他人的要求。"},
+            {"instructions": "结合当前话语和明确关联的前文判断画图是否必须使用已有图片作为参考。",
+             "true": "指定已有照片作为新图的参考，或要求修改已有图，例如按引用图片保留人物长相、换背景、改画风。",
+             "false": "从文字描述画一张新图，不依赖已有图片。"},
+        ]
         try:
-            values = self.jev.noul({"当前艾特正文": _question(question), "前文与引用": context}, [
-                {"instructions": "结合当前艾特和它实际承接的提议，判断用户是否要求机器人现在生成或编辑一张实际图片。",
-                 "true": "明确要求画图，或当前话语明确接受、继续或修改前文中尚待执行的画图方案。",
-                 "false": "问怎么画、索要绘画步骤或提示词、分析已有图片、夸图、讨论生图模型、否定或禁止画图、转述他人的画图要求，或只是提到画图。"},
-                {"instructions": "结合当前话语和明确关联的前文判断画图是否必须使用已有图片作为参考。",
-                 "true": "要修改这张照片、原图、已发图片，例如换背景、改画风、修改图中对象。",
-                 "false": "从文字描述画一张新图，不依赖已有图片。"},
-            ], timeout=timeout)
+            state = {"当前艾特正文": _question(question), "前文与引用": context}
+            if previous_prompt:
+                state["请求人上一次生图要求"] = previous_prompt
+                questions.append({
+                    "instructions": "判断当前发言出图时，是否应沿用「请求人上一次生图要求」的主题或画面设定。核对近期对话里有没有换题。",
+                    "true": "当前话题仍承接这项任务，要再画一遍、按刚才说的来，或仅改变参考图和部分条件。换参考图可以保留原任务的场景。",
+                    "false": "明确指定了另一套主题、指向不同的旧图、近期并行话题无法确定要接哪一个、仅问进度或闲聊。",
+                })
+            values = self.jev.noul(state, questions, timeout=timeout)
         except Exception:
-            return ""
-        if (len(values) != 2 or any(type(value) not in (int, float) or not math.isfinite(value)
-                                    or not 0 <= value <= 1 for value in values) or values[0] < 0.8):
-            return ""
-        return "edit" if values[1] >= 0.7 else "create"
+            return None
+        if (len(values) != len(questions) or any(type(value) not in (int, float) or not math.isfinite(value)
+                                                or not 0 <= value <= 1 for value in values) or values[0] < 0.8):
+            return None
+        return ImageDecision("edit" if values[1] >= 0.7 else "create",
+                             previous_prompt if previous_prompt and values[2] >= 0.8 else "")
 
     def decide_search(self, *, question, vision_text=None, context="", group_context=None, timeout=None):
         question = _question(question)

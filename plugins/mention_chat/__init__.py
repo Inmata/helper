@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
-from .image_reply import COMMAND as IMAGE_COMMAND, ImageReply
+from .image_reply import ImageReply
 from wxbot_framework.conversation.slow_replies import SlowReplies
 from wxbot_framework.conversation.person_context import person_context
 from wxbot_framework.conversation.reply_wait import ReplyWait, timeout_reason
@@ -40,7 +40,7 @@ from wxbot_framework.messaging.mentions import addressed_elsewhere, at_source, b
 from wxbot_framework.conversation.personality import personality_text
 from wxbot_framework.conversation.utterance import (CHAT, DETAIL, QA, InterjectionGate, SpeakResult, classify_tier,
                                                     interjection_probe, speak)
-from wxbot_framework.commands import command_text, is_control
+from wxbot_framework.commands import IMAGE_COMMAND, command_text, is_control
 
 GAME_FEATURE = "idiom_chain"
 USED_SAMPLE = 10
@@ -435,24 +435,24 @@ class Plugin:
         if game and self.is_move(clean_query, game):
             return
         image_target = not message.is_self and source in ("structural", "typed")
-        if image_target and self.image_reply.status(message, ctx, clean_query):
+        image_intent = self.image_reply.intent(message, ctx, clean_query) if image_target else None
+        if image_target and image_intent is None and self.image_reply.status(message, ctx, clean_query):
             return
         if self.image_reply.followup(message, ctx, clean_query, addressed=image_target, cold=self.cold):
             if turns is not None:
                 turns.claim(message)
+            return
+        if image_intent is not None:
+            if turns is not None:
+                turns.claim(message)
+            self.image_reply.request(message, ctx, clean_query, mode=image_intent.mode,
+                                     previous_prompt=image_intent.previous_prompt, cold=self.cold)
             return
         if (self._wait is not None and (source or not addressed_elsewhere(message)) and
                 self._wait.followup(message, ctx, clean_query, addressed=source is not None)):
             if turns is not None:
                 turns.claim(message)
             return
-        if image_target:
-            image_mode = self.image_reply.intent(message, ctx, clean_query)
-            if image_mode:
-                if turns is not None:
-                    turns.claim(message)
-                self.image_reply.request(message, ctx, clean_query, mode=image_mode, cold=self.cold)
-                return
         depth = 0
         if source is None:
             if turns is None or not clean_query or turns.active(message) or addressed_elsewhere(message):

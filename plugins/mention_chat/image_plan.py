@@ -4,6 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 import re
 
+from wxbot_framework.commands import IMAGE_COMMAND, command_text
 from wxbot_framework.conversation.context_tools import ContextToolError
 from wxbot_framework.conversation.dialogue import resolve_reply_quote
 from wxbot_framework.conversation.evidence_tools import ConversationEvidence, tool
@@ -15,7 +16,7 @@ from wxbot_framework.integrations.reply_budget import remaining
 from wxbot_framework.timeutil import parse_utc
 
 
-SYSTEM = """负责本群的生图和改图。结合当前发言、明确引用及近期对话理解整项任务。当前发言可能只修改前文的一项，要继承其余已定要求。分清正在并行聊的话题。
+SYSTEM = """负责本群的生图和改图。结合当前发言、明确引用及近期对话理解整项任务。当前发言可能只修改前文的一项，要继承其余已定要求。只有本次明确承接旧任务时才沿用请求人近期的生图命令。分清正在并行聊的话题。
 需要时查指代、旧决定、自己先前的原话、人物档案或图片。明确点名的档案素材已经放进任务；从前文看出画谁时，用 read_profile 按名字一次取材。只查当前确实缺少的资料。
 把档案和群聊当作创作素材，写出整张成品的画法。可以挑不同主题、转述和玩梗，例如把“开过台球厅，目前炒股”写成“开过球房，现在看盘”。
 征婚启事、海报、请柬等带字图片，把中文标题和简短正文直接写进绘图指令，要求生图模型把字、人物和背景一起画进成品。标题醒目，正文有层次，字体和排版跟画风一致。引用图片补字时，把要加的字和保留的画面一起写进绘图指令。
@@ -95,6 +96,13 @@ class ImageProfiles:
         return {"状态": "找到", "档案": brief}
 
 
+def recent_image_commands(members, message, snapshot):
+    rows = members.recent_rows(snapshot.room, sender_id=message.sender_id, before_id=snapshot.anchor_id,
+                               since=members.now() - timedelta(minutes=30), context=True, include_commands=True,
+                               keywords=(IMAGE_COMMAND,), limit=3)
+    return [row for row in rows if command_text(row["text"]).split(maxsplit=1)[0] == IMAGE_COMMAND]
+
+
 def prepare_image(ctx, message, snapshot, prompt, references, guard, profiles, *,
                   revisions=(), missing_reference=False, required_references=0, edit=False):
     if required_references == 2:
@@ -115,6 +123,8 @@ def prepare_image(ctx, message, snapshot, prompt, references, guard, profiles, *
     payload = {
         "本次请求": prompt, "已收到的补充": list(revisions), "请求人": snapshot.speaker_name,
         "引用消息": quoted, "近期收发对话": recent,
+        "请求人近期生图命令": evidence.messages(ctx.members.label_speakers(
+            recent_image_commands(ctx.members, message, snapshot), snapshot.room)),
         "请求人较早的发言": evidence.messages(ctx.members.label_speakers(older_own, snapshot.room)),
         "本次参考图": "明确引用的原图未找到" if missing_reference else list(media.initial) if required_references else [],
         "近期候选参考图": list(media.initial) if not required_references else [],

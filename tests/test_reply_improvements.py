@@ -64,6 +64,39 @@ class ReplyImprovements(unittest.TestCase):
         index.restore_sent(self.store, daily.ROOM)
         self.assertIsNone(index.quoted(daily.ROOM, md5=record.md5))
 
+    def test_restoring_bot_images_preserves_all_48_group_images_for_quotes_and_recent_lookup(self):
+        message = self.message('画图', sequence=1)
+        self.store.record(message)
+        source = self.store.message_id(message)
+        digests = []
+        for number in range(64):
+            self.now += timedelta(seconds=1)
+            path = self.root / f'generated-{number}.png'
+            path.write_bytes(str(number).encode())
+            digests.append(hashlib.md5(path.read_bytes()).hexdigest())
+            self.store.record_sent_image(daily.ROOM, path, digests[-1], source)
+
+        index = RecentImages()
+        index.restore_sent(self.store, daily.ROOM)
+        for number in range(49):
+            index.note(dict(chat_id=daily.ROOM, sender_id=daily.CAT, native_message_id=str(100 + number),
+                            image_status='ready', image_path=str(self.root / f'group-{number}.png')))
+        index.restore_sent(self.store, daily.ROOM)
+        self.assertIsNotNone(index.quoted(daily.ROOM, svrid='148'))
+        self.assertIsNone(index.quoted(daily.ROOM, svrid='100'))
+        recent = index.recent(daily.ROOM, daily.OTHER, before=time.monotonic(), within=120, from_others=True)
+        self.assertEqual([item.native_message_id for item in recent], [str(i) for i in range(101, 149)])
+        self.assertIsNone(index.quoted(daily.ROOM, md5=digests[-17]))
+        for digest in digests[-16:]:
+            self.assertIsNotNone(index.quoted(daily.ROOM, md5=digest))
+        # 微信补回服务器编号，同一张出图仍只占一格；下次按摘要恢复也保留编号。
+        last = index.quoted(daily.ROOM, md5=digests[-1])
+        index.sent(daily.ROOM, self.store.account, last.path, md5=last.md5, svrid='900')
+        quote = dict(ref_type='3', svrid='900', image_md5=last.md5, chatusr=self.store.account)
+        index.restore_sent(self.store, daily.ROOM, quote=quote, source_id=source)
+        self.assertEqual(index.quoted(daily.ROOM, svrid='900').path, last.path)
+        self.assertIsNotNone(index.quoted(daily.ROOM, md5=digests[-16]))
+
     def test_text_preference_persists_and_single_turn_voice_does_not_clear_it(self):
         voice = VoiceReply()
         ctx = Mock(members=self.store, room_state=self.store.room_state)

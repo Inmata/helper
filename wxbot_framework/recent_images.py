@@ -16,7 +16,9 @@ from dataclasses import dataclass, replace
 
 PENDING, READY, FAILED, SKIPPED = "pending", "ready", "failed", "skipped"
 STATUSES = (PENDING, READY, FAILED, SKIPPED)
-MAX_PER_ROOM = 64
+GROUP_IMAGES_PER_ROOM = 48
+SENT_IMAGES_PER_ROOM = 16
+STICKERS_PER_ROOM = 64
 MAX_ROOMS = 256
 GENERATED_IMAGES = Path(__file__).resolve().parents[1] / ".runtime" / "generated_images"
 # 文本与图片分属不同轮询批次，允许图片比提问晚一点被看到。
@@ -36,6 +38,8 @@ class ImageRecord:
     error: str = ""
     used: bool = False  # 已被一次看图成功用过：不再算“刚发的图”，仍可被引用
     wx_type: int = 3
+    outgoing: bool = False
+    registered: bool = False  # 机器人发送并登记的产物，清空上下文后按数据库记录失效
 
 
 def _key(data):
@@ -55,12 +59,11 @@ def _md5(data):
 
 
 class RecentImages:
-    def __init__(self, *, per_room=MAX_PER_ROOM, rooms=MAX_ROOMS, clock=time.monotonic):
-        self.per_room = per_room
+    def __init__(self, *, per_room=GROUP_IMAGES_PER_ROOM, rooms=MAX_ROOMS, clock=time.monotonic):
         self.rooms = rooms
         self.clock = clock
-        # 群里连发表情时，普通图片的最近记录仍有原来的容量。
-        self._rooms = {3: OrderedDict(), 47: OrderedDict()}
+        self._limits = {(3, False): per_room, (3, True): SENT_IMAGES_PER_ROOM, (47, False): STICKERS_PER_ROOM}
+        self._rooms = {channel: OrderedDict() for channel in self._limits}
         self._changed = threading.Condition()
 
     def note(self, data):
@@ -71,53 +74,72 @@ class RecentImages:
         if not isinstance(room, str) or not room or not key or status not in STATUSES:
             return None
         wx_type = data.get("wx_type", 3)
-        rooms = self._rooms.get(wx_type)
+        outgoing = wx_type == 3 and bool(data.get("is_self"))
+        channel = (wx_type, outgoing)
+        rooms = self._rooms.get(channel)
         if rooms is None:
             return None
         path = data.get("image_path") if status == READY else ""
         error = data.get("image_error") if status in (FAILED, SKIPPED) else ""
+        native_id = key[3:] if key.startswith("id:") else ""
+        md5 = _md5(data)
+        registered = bool(data.get("sent_md5"))
         with self._changed:
             records = rooms.get(room)
             if records is None:
-                records = rooms[room] = deque(maxlen=self.per_room)
+                records = rooms[room] = deque(maxlen=self._limits[channel])
                 while len(rooms) > self.rooms:
                     rooms.popitem(last=False)
             else:
                 rooms.move_to_end(room)
             for index, old in enumerate(records):
-                if old.key == key:
-                    record = replace(old, status=status, md5=_md5(data) or old.md5, path=str(path or ""),
+                # 发送回执可能比本地登记晚到；恢复同一张图时保留已关联的微信编号。
+                same_sent = outgoing and md5 and old.md5 == md5 and (not native_id or not old.native_message_id)
+                if old.key == key or same_sent:
+                    record = replace(old, key=key if native_id else old.key,
+                                     native_message_id=native_id or old.native_message_id,
+                                     status=status, md5=md5 or old.md5, path=str(path or ""),
+                                     registered=old.registered or registered,
                                      error=str(error or ""))
                     records[index] = record
                     break
             else:
                 record = ImageRecord(room=room, sender=str(data.get("sender_id") or ""), key=key, status=status,
-                                     seen_at=self.clock(), native_message_id=key[3:] if key.startswith("id:") else "",
-                                     md5=_md5(data), path=str(path or ""), error=str(error or ""), wx_type=wx_type)
+                                     seen_at=self.clock(), native_message_id=native_id, used=outgoing,
+                                     md5=md5, path=str(path or ""), error=str(error or ""), wx_type=wx_type,
+                                     outgoing=outgoing, registered=registered)
                 records.append(record)
             self._changed.notify_all()
         return record
 
-    def _records(self, room, wx_type=3):
+    def _records(self, room, wx_type=3, *, include_sent=False):
         with self._changed:
-            return tuple(self._rooms[wx_type].get(room, ()))
+            received = tuple(self._rooms[wx_type, False].get(room, ()))
+            if include_sent and wx_type == 3:
+                return tuple(self._rooms[3, True].get(room, ())) + received
+            return received
 
     def sent(self, room, sender, path, *, md5="", svrid=""):
         path = Path(path).resolve()
         md5 = md5 or hashlib.md5(path.read_bytes()).hexdigest()
-        record = self.note({"chat_id": room, "sender_id": sender, "sent_md5": md5,
+        return self.note({"chat_id": room, "sender_id": sender, "is_self": True, "sent_md5": md5,
                           "native_message_id": svrid, "image_status": READY, "image_path": str(path),
                           "image_metadata": {"md5": md5}})
-        return self.mark_used(record)
 
     def restore_sent(self, members, room, *, quote=None, source_id=0):
-        rows = members.sent_images(room)
+        if quote and quote.get("chatusr") and members.account not in (quote["chatusr"], quote.get("fromusr")):
+            return
+        rows = members.sent_images(room)[:SENT_IMAGES_PER_ROOM]
         allowed = {row["md5"] for row in rows}
         with self._changed:
-            records = self._rooms[3].get(room)
+            sent = self._rooms[3, True]
+            records = sent.get(room)
             if records is not None:
-                self._rooms[3][room] = deque((r for r in records if r.sender != members.account or r.md5 in allowed),
-                                             maxlen=self.per_room)
+                sent[room] = deque((r for r in records if not r.registered or r.md5 in allowed),
+                                   maxlen=SENT_IMAGES_PER_ROOM)
+        if quote:
+            digest = (quote.get("image_md5") or "").lower()
+            rows = [row for row in rows if row["md5"] == digest]
         for row in reversed(rows):
             if Path(row["path"]).is_file():
                 self.sent(room, members.account, row["path"], md5=row["md5"])
@@ -135,7 +157,7 @@ class RecentImages:
 
     def quoted(self, room, *, svrid="", md5="", wx_type=3):
         """按引用里的原消息编号找图，找不到再按 md5 找本群最近一张。"""
-        records = self._records(room, wx_type)
+        records = self._records(room, wx_type, include_sent=True)
         if svrid:
             for record in reversed(records):
                 if record.native_message_id == svrid:
@@ -156,7 +178,7 @@ class RecentImages:
     def mark_used(self, record):
         """这张图已被看过：之后不再按“刚发的图”选中，引用它仍然找得到。"""
         with self._changed:
-            records = self._rooms[record.wx_type].get(record.room, ())
+            records = self._rooms[record.wx_type, record.outgoing].get(record.room, ())
             for index, old in enumerate(records):
                 if old.key == record.key:
                     records[index] = replace(old, used=True)
@@ -168,7 +190,7 @@ class RecentImages:
         deadline = self.clock() + timeout
         with self._changed:
             while True:
-                current = next((item for item in self._rooms[record.wx_type].get(record.room, ())
+                current = next((item for item in self._rooms[record.wx_type, record.outgoing].get(record.room, ())
                                 if item.key == record.key), record)
                 remaining = deadline - self.clock()
                 if current.status != PENDING or remaining <= 0 or (stopped is not None and stopped.is_set()):

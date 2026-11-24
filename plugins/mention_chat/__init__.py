@@ -899,8 +899,8 @@ class Plugin:
             reviewer = self._tools(ctx).router.jev if self.tools is not None else None
             if self_facts:
                 reviewer = judge
-            RECENT_IMAGES.restore_sent(self.members, message.chat_id, quote=message.data.get("quote"),
-                                       source_id=self.members.message_id(message))
+            if raw_quote.get("ref_type") == "3":
+                RECENT_IMAGES.restore_sent(self.members, message.chat_id, quote=raw_quote, source_id=snapshot.anchor_id)
             options = {"detail": True} if detail else {"examples": context.examples}
             if self.voice_reply.text_only(message, self.room_state):
                 options["turn_context"] = ("本人持续文字偏好已保存。" +

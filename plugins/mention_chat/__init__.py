@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
+from .image_intent import FORMAT_SECONDS
 from .image_reply import ImageReply
 from wxbot_framework.conversation.slow_replies import SlowReplies
 from wxbot_framework.conversation.person_context import person_context
@@ -322,8 +323,13 @@ class Plugin:
             if quote or (source is None and (incoming.data.get("at_members") or incoming.text.startswith("@"))):
                 continue
             text = self._clean_query(incoming, source)
-            if source in ("structural", "typed") and self.image_reply.intent(incoming, ctx, text):
-                continue
+            if (source in ("structural", "typed") and text and not incoming.is_self
+                    and "group.image.send" in getattr(ctx, "capabilities", ())):
+                budget = CURRENT.get()
+                if budget and budget.deadline - budget.clock() < FORMAT_SECONDS:
+                    continue  # 留给新消息自己的预算，避免旧轮收尾时把生图要求并掉。
+                if self.image_reply.intent(incoming, ctx, text):
+                    continue
             if source and (not text or text == turn.question):
                 turns.merge(incoming)
             elif text and self._turn_judge(ctx, "merge", turn.question, new=text):
@@ -434,11 +440,21 @@ class Plugin:
         game = self.room_game(message.chat_id, ctx, message=message)
         if game and self.is_move(clean_query, game):
             return
+        answer = self.image_reply.format_answer(message, ctx, clean_query, source)
+        if answer:
+            message, original, mode = answer
+            if mode == "create":
+                if turns is not None:
+                    turns.claim(message)
+                self.image_reply.request(message, ctx, original, mode=mode, cold=self.cold)
+                return
+            clean_query = original + "\n请写成文字。"
+            source = "format"
         image_target = not message.is_self and source in ("structural", "typed")
         image_intent = self.image_reply.intent(message, ctx, clean_query) if image_target else None
         if image_target and image_intent is None and self.image_reply.status(message, ctx, clean_query):
             return
-        if self.image_reply.followup(message, ctx, clean_query, addressed=image_target, cold=self.cold):
+        if not answer and self.image_reply.followup(message, ctx, clean_query, addressed=image_target, cold=self.cold):
             if turns is not None:
                 turns.claim(message)
             return
@@ -448,7 +464,7 @@ class Plugin:
             self.image_reply.request(message, ctx, clean_query, mode=image_intent.mode,
                                      previous_prompt=image_intent.previous_prompt, cold=self.cold)
             return
-        if (self._wait is not None and (source or not addressed_elsewhere(message)) and
+        if (not answer and self._wait is not None and (source or not addressed_elsewhere(message)) and
                 self._wait.followup(message, ctx, clean_query, addressed=source is not None)):
             if turns is not None:
                 turns.claim(message)

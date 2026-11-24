@@ -80,6 +80,8 @@ class ToolDecision:
 class ImageDecision:
     mode: str
     previous_prompt: str = ""
+    probability: float | None = None
+    error: str = ""
 
 
 def _threshold(value, name):
@@ -140,7 +142,7 @@ class JevToolRouter:
     def image_request(self, question, *, context=None, previous_prompt="", timeout=2):
         """一次判断出图、参考图以及能否沿用上一条生图要求。"""
         if self.jev is None:
-            return None
+            return ImageDecision("undecided", error="not-configured")
         questions = [
             {"instructions": "结合当前艾特、引用和它实际承接的话题，判断用户是否要求机器人现在交付一张新生成或编辑后的图片。",
              "true": "要求画图、接受前文的画图方案、编辑已有图片或重新出图。引用图片并说‘照这张再来一版’属于用引用图再生成。",
@@ -159,13 +161,16 @@ class JevToolRouter:
                     "false": "明确指定了另一套主题、指向不同的旧图、近期并行话题无法确定要接哪一个、仅问进度或闲聊。",
                 })
             values = self.jev.noul(state, questions, timeout=timeout)
-        except Exception:
-            return None
-        if (len(values) != len(questions) or any(type(value) not in (int, float) or not math.isfinite(value)
-                                                or not 0 <= value <= 1 for value in values) or values[0] < 0.8):
-            return None
+        except Exception as error:
+            return ImageDecision("undecided", error=type(error).__name__)
+        if (not isinstance(values, (list, tuple)) or len(values) != len(questions)
+                or any(type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1
+                       for value in values)):
+            return ImageDecision("undecided", error="invalid-probability")
+        if values[0] < 0.8:
+            return ImageDecision("undecided", probability=values[0])
         return ImageDecision("edit" if values[1] >= 0.7 else "create",
-                             previous_prompt if previous_prompt and values[2] >= 0.8 else "")
+                             previous_prompt if previous_prompt and values[2] >= 0.8 else "", values[0])
 
     def decide_search(self, *, question, vision_text=None, context="", group_context=None, timeout=None):
         question = _question(question)

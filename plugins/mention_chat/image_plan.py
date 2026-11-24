@@ -104,7 +104,7 @@ def recent_image_commands(members, message, snapshot):
 
 
 def prepare_image(ctx, message, snapshot, prompt, references, guard, profiles, *,
-                  revisions=(), missing_reference=False, required_references=0, edit=False):
+                  revisions=(), missing_reference=False, required_references=0, edit=False, previous_prompt=""):
     if required_references == 2:
         question = _reference_question(missing_reference, required_references, references)
         if question:
@@ -132,6 +132,8 @@ def prepare_image(ctx, message, snapshot, prompt, references, guard, profiles, *
         "明确改图": edit,
         "群友档案素材": list(profiles.profiles.values()),
     }
+    if previous_prompt:
+        payload["本轮承接的上次绘图要求"] = previous_prompt
     result = run_tools(ctx.llm, SYSTEM, payload, evidence.tools, guard=guard, logger=ctx.logger, repair=False)
     return _parse_plan(result, media, required_references, edit)
 

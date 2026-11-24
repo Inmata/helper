@@ -14,6 +14,7 @@ from PIL import Image
 from support.recyclable_tempdir import RecyclableTemporaryDirectory
 from plugins.mention_chat import Plugin
 from wxbot_framework.authorization import LOCAL_EDITOR
+from wxbot_framework.messaging.mentions import strip_at_labels
 from wxbot_framework.conversation.members import MemberStore
 from wxbot_framework.conversation.status_replies import StatusReplies
 from wxbot_framework.integrations.jev import JevError
@@ -351,6 +352,99 @@ class ImageGenerationTests(unittest.TestCase):
         self.plugin.on_message(incoming, self.ctx)
         self.wait_done()
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
+    def test_low_image_score_routes_comic_once_and_keeps_only_requester_context(self):
+        prior = self.message("我想做侦探题材")
+        self.message("今晚练二头", sender="wxid_other")
+        mention = {"is_at_self": True, "at_members": ["wxid_robot"]}
+        msg = self.message("@机器人\u2005做个四格悬置漫画，侦探调查失踪的泡面", data=mention,
+                           dispatch_epoch="epoch", dispatch_sequence=2)
+        plan = self.ctx._llm.complete_json
+        choices = []
+
+        def model(system, user, **options):
+            payload = json.loads(user)
+            if "当前发言" in payload:
+                choices.append(payload)
+                return {"动作": "create"}
+            return plan(system, user, **options)
+
+        with (patch.object(self.ctx._jev, "noul", return_value=[0.60, 0.05]),
+              patch.object(self.ctx._llm, "complete_json", side_effect=model),
+              self.assertLogs(self.ctx.logger, level="INFO") as log):
+            turns = self.members.turns
+            turn = turns.open(prior, prior.text, 0)
+            turns.observe(msg)
+            self.assertFalse(self.plugin._advance_turn(turns, turn, self.ctx))
+            turns.close(turn)
+            self.plugin.on_message(msg, self.ctx)
+            self.wait_done()
+        self.assertEqual([p["与请求人的近期往来"] for p in choices], [[{"作者": "请求人", "内容": prior.text}]])
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        source = self.members.message_id(msg)
+        self.assertTrue(any(f"消息={source} Jev=0.6" in row for row in log.output))
+        self.assertTrue(any(f"消息={source} 来源=主模型 动作=create" in row for row in log.output))
+        receipt = self.members.connection().execute("SELECT source_id,status FROM reply_receipts WHERE kind='image'").fetchone()
+        self.assertEqual(tuple(receipt), (source, "submitted"))
+
+    def test_format_clarification_resumes_original_request_and_reference(self):
+        reference, _ = self.reference_fixture("source-picture")
+        mention = {"is_at_self": True, "at_members": ["wxid_robot"], "quote": {"ref_type": "3", "svrid": "source-picture"}}
+        original = self.message("@机器人\u2005生成这个故事", data=mention)
+        with (patch.object(self.ctx._jev, "noul", side_effect=JevError("timeout")),
+              patch.object(self.ctx._llm, "complete_json", return_value={"动作": "clarify"})):
+            self.plugin.on_message(original, self.ctx)
+        question = strip_at_labels(self.backend.texts[-1][1])
+        self.assertIn("图片", question)
+        self.assertEqual(self.server.calls, [])
+        other = self.message("图片", sender="wxid_other")
+        self.plugin.on_message(other, self.ctx)
+        self.assertEqual(self.server.calls, [])
+        reply = self.message("图片", data={"quote": {"fromusr": "wxid_robot", "ref_type": "1", "text": question}})
+        self.plugin.on_message(reply, self.ctx)
+        self.wait_done()
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        self.assertEqual(self.ctx._llm.plans[-1]["任务"]["本次请求"], "生成这个故事")
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(reference)])
+
+    def test_answer_text_to_format_question_uses_chat_with_original_prompt(self):
+        original = self.message("@机器人\u2005生成这段冒险", data={"is_at_self": True, "at_members": ["wxid_robot"]})
+        with (patch.object(self.ctx._jev, "noul", return_value=[0.27, 0.05]),
+              patch.object(self.ctx._llm, "complete_json", return_value={"动作": "clarify"})):
+            self.plugin.on_message(original, self.ctx)
+        reply = self.message("我想要文字版")
+        answer = "旅人终于找到了公主"
+        with (patch.object(self.ctx._jev, "noul", side_effect=lambda state, questions, **kw: [0.01] * len(questions)),
+              patch.object(self.ctx._llm, "complete_text", return_value=answer) as write):
+            self.plugin.on_message(reply, self.ctx)
+        self.assertTrue(any("生成这段冒险" in call.args[1] and "写成文字" in call.args[1]
+                            for call in write.call_args_list))
+        self.assertIn(answer, self.backend.texts[-1][1])
+        self.assertEqual(self.server.calls, [])
+
+    def test_likely_image_asks_instead_of_chat_when_second_opinion_times_out(self):
+        mention = {"is_at_self": True, "at_members": ["wxid_robot"]}
+        with (patch.object(self.ctx._jev, "noul", return_value=[0.60, 0.05]),
+              patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError)):
+            self.plugin.on_message(self.message("@机器人\u2005做个四格漫画", data=mention), self.ctx)
+        self.assertIn("图片", self.backend.texts[-1][1])
+        self.assertEqual(self.server.calls, [])
+
+    def test_rejected_and_unavailable_format_choices_leave_drawing_idle(self):
+        mention = {"is_at_self": True, "at_members": ["wxid_robot"]}
+        with patch.object(self.ctx._jev, "noul", return_value=[0.05, 0.04]):
+            for query, result in (("怎么画漫画？", {"动作": "text"}), ("别生成", {"动作": "text"}),
+                                  ("生成这个", {"动作": "未知"})):
+                msg = self.message("@机器人\u2005" + query, data=mention)
+                with (patch.object(self.ctx._llm, "complete_json", return_value=result),
+                      patch.object(self.plugin, "_reply_turn", return_value=iter(())) as chat):
+                    self.plugin.on_message(msg, self.ctx)
+                    chat.assert_called_once()
+            with (patch.object(self.ctx._llm, "complete_json", side_effect=LLMError("timeout")),
+                  patch.object(self.plugin, "_reply_turn", return_value=iter(())) as chat):
+                self.plugin.on_message(self.message("@机器人\u2005聊会儿", data=mention), self.ctx)
+                chat.assert_called_once()
+        self.assertEqual(self.server.calls, [])
 
     def test_quoted_image_is_forwarded_as_exact_local_reference(self):
         reference = self.root / "reference.png"

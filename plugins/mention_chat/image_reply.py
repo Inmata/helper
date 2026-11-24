@@ -1,7 +1,7 @@
 """群生图的独立任务：请求归属、参考图、后台生成与图片交付。"""
 from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import queue
 import re
@@ -9,10 +9,9 @@ import threading
 import time
 from uuid import uuid4
 
-from wxbot_framework.commands import command_text
 from wxbot_framework.conversation.members import SnapshotExpired
 from wxbot_framework.conversation.mention_tools import _within
-from wxbot_framework.conversation.tool_router import JevToolRouter
+from wxbot_framework.conversation.turns import turn_key
 from wxbot_framework.integrations.jev import JevError
 from wxbot_framework.integrations.llm import LLMConnectionError, LLMContentBlocked, LLMFormatError
 from wxbot_framework.integrations.magpie_images import MagpieImageRejectedError, MagpieImages, REQUEST_SECONDS
@@ -20,10 +19,12 @@ from wxbot_framework.integrations.magpie_tools import MagpieToolsError
 from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget
 from wxbot_framework.messaging.mentions import strip_at_labels
 from wxbot_framework.recent_images import ImageRecord, RECENT_IMAGES, READY
-from .image_plan import ImageProfiles, fallback_image, prepare_image, recent_image_commands
+from .image_intent import FORMAT_SECONDS, choose_format
+from .image_plan import ImageProfiles, fallback_image, prepare_image
 
 TASK_SECONDS = 300
 PLAN_SECONDS = 75
+FORMAT_QUESTION = "你想把刚才那段内容画成图，还是写成文字？回我「图片」或「文字」就行。"
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / ".runtime" / "generated_images"
 REFERENCE_HINT = re.compile(r"这[张幅个].{0,6}(?:图|照)|(?:原图|这张|这幅|改图)|(?:背景|画风).{0,3}(?:改|换)|(?:改|换).{0,3}(?:背景|画风)")
 PAIR_HINT = re.compile(r"(?:这|那|上面|前面|刚(?:刚|才)?发)(?:的)?[两二2]\s*[张幅]|"
@@ -69,6 +70,7 @@ class ImageReply:
         self._lock = threading.RLock()
         self._intent_lock = threading.Lock()
         self._intents = OrderedDict()
+        self._format_questions = OrderedDict()
         self._pending = OrderedDict()
         self._members = set()
         self._queue = queue.Queue()
@@ -165,24 +167,70 @@ class ImageReply:
         with self._intent_lock:
             if identity in self._intents:
                 return self._intents[identity]
+        snapshot = ctx.members.conversation_snapshot(message)
+        member = turn_key(message)
+        with self._lock:
+            last_job = self._jobs.get(member)
+        previous = ""
+        if last_job and 0 < message.received_at - last_job.message.received_at <= 1800:
             try:
-                snapshot = ctx.members.conversation_snapshot(message)
-                quote = message.data.get("quote") or {}
-                commands = recent_image_commands(ctx.members, message, snapshot)
-                last = command_text(commands[-1]["text"]).split(maxsplit=1) if commands else ()
-                previous_prompt = last[1] if len(last) == 2 and len(last[1]) <= 2000 else ""
-                context = {
-                    "引用": {"作者": quote.get("name"), "正文": quote.get("text"), "是图片": quote.get("ref_type") == "3"},
-                    "近期": [{"作者": row["speaker_name"], "内容": row["text"][:220]} for row in snapshot.history[-6:]],
-                }
-                intent = _within(lambda: JevToolRouter(ctx.jev).image_request(
-                    text, context=context, previous_prompt=previous_prompt), 3, self.stopped)
-            except (ValueError, TimeoutError, SnapshotExpired):
-                intent = None
+                with last_job.guard():
+                    previous = "\n".join(filter(None, (last_job.previous_prompt, last_job.prompt, *last_job.revisions)))[-2000:]
+            except SnapshotExpired:
+                pass
+        # 预判补话时可能身处上一轮预算；路由单独限时，正文仍有完整调用额度。
+        outer = CURRENT.get()
+        seconds = outer.remaining(FORMAT_SECONDS) if outer else FORMAT_SECONDS
+        token = CURRENT.set(ReplyBudget(time.monotonic(), seconds))
+        try:
+            decision, origin, error = choose_format(ctx, message, snapshot, text, previous, self.stopped)
+            intent = decision if decision.mode != "text" else None
+            ctx.logger.info("生图分流：消息=%s 来源=%s 动作=%s 异常=%s",
+                            snapshot.anchor_id, origin, decision.mode, error or "-")
+        finally:
+            CURRENT.reset(token)
+        if outer:
+            outer.remaining(1)
+        with self._intent_lock:
             self._intents[identity] = intent
             if len(self._intents) > 128:
                 self._intents.popitem(last=False)
-            return intent
+        return intent
+
+    def format_answer(self, message, ctx, text, source):
+        key = turn_key(message)
+        with self._lock:
+            pending = self._format_questions.get(key)
+        if pending is None or message.is_self:
+            return None
+        original, prompt, guard, asked_at = pending
+        quote = message.data.get("quote") or {}
+        if quote and (ctx.members.account not in (quote.get("fromusr"), quote.get("chatusr"))
+                      or strip_at_labels(quote.get("text") or "") != FORMAT_QUESTION):
+            return None
+        if not source and (message.data.get("at_members") or message.text.lstrip().startswith("@")):
+            return None
+        choice = re.fullmatch(r"(?:我想要|我要|要|请|就)?(?:画成|做成|生成|写成)?(图片|图|文字)(?:版|就行|就好|吧)?",
+                              text.strip(" ！!。"))
+        if not choice:
+            if source:
+                with self._lock:
+                    self._format_questions.pop(key, None)
+            return None
+        with self._lock:
+            self._format_questions.pop(key, None)
+        if not 0 <= message.received_at - asked_at <= TASK_SECONDS:
+            return None
+        try:
+            with guard():
+                pass
+        except SnapshotExpired:
+            return None
+        data = {**message.data, "quote": original.data.get("quote")}
+        mode = "text" if choice[1] == "文字" else "create"
+        ctx.logger.info("生图形式确认：消息=%s 原消息=%s 动作=%s", ctx.members.message_id(message),
+                        ctx.members.message_id(original), mode)
+        return replace(message, data=data), prompt, mode
 
     def followup(self, message, ctx, text, *, addressed=False, cold=None):
         if message.is_self or not text or len(text) > 2000:
@@ -247,6 +295,25 @@ class ImageReply:
         def inform(facts):
             self._status.submit(message, ctx, facts, personality=personality, guard=guard, at=False)
 
+        member = turn_key(message)
+        with self._lock:
+            self._format_questions.pop(member, None)
+        if mode == "clarify":
+            @contextmanager
+            def ask_guard():
+                with guard():
+                    budget = CURRENT.get()
+                    if budget is None:
+                        yield
+                    else:
+                        with budget.delivery():
+                            yield
+            if ctx.reply_at(message, FORMAT_QUESTION, delivery_guard=ask_guard):
+                with self._lock:
+                    self._format_questions[member] = (message, prompt, guard, time.monotonic())
+                    if len(self._format_questions) > 64:
+                        self._format_questions.popitem(last=False)
+            return
         if not 1 <= len(prompt.strip()) <= 2000:
             inform({"用法": "/生图 描述，描述须为 1–2000 字；引用一张图可以改图"})
             return
@@ -285,7 +352,6 @@ class ImageReply:
                 references = candidates[-2:]
             elif len(candidates) == 1:
                 references = candidates
-        member = message.session_id, message.chat_id, message.sender_id
         revisions = (*prior.revisions, supplement) if prior else ()
         key = (*member, prompt.strip(), tuple(record.key for record in references), revisions)
 
@@ -319,11 +385,13 @@ class ImageReply:
                 if len(self._jobs) > 64:
                     self._jobs.popitem(last=False)
         if busy:
+            ctx.logger.info("生图未入队：消息=%s 原因=%s", snapshot.anchor_id, busy)
             inform({"未受理原因": busy})
             return
         stages = ("queued",) if queued else ("queued", "reference", "planning", "submitting", "waiting", "sending")
         self._notify(job, message, ctx, {"本次请求": "已受理，前面还有生图任务" if queued else "已受理生图"},
                      stages=stages)
+        ctx.logger.info("生图入队：消息=%s 原消息=%s task=%s mode=%s", snapshot.anchor_id, job.source_id, job.filename, mode)
         self._queue.put(job)
 
     def _finish(self, job):
@@ -394,7 +462,7 @@ class ImageReply:
             try:
                 job.plan, question = _within(lambda: prepare_image(
                     job.ctx, job.message, job.snapshot, job.prompt, references, job.guard, profiles,
-                    revisions=job.revisions, **options), PLAN_SECONDS, job.cancelled)
+                    revisions=job.revisions, previous_prompt=job.previous_prompt, **options), PLAN_SECONDS, job.cancelled)
             except (LLMConnectionError, LLMFormatError, TimeoutError) as error:
                 job.ctx.logger.info("生图整理回退：task=%s error=%s", job.filename, type(error).__name__)
                 revisions = (job.prompt, *job.revisions) if job.previous_prompt else job.revisions
@@ -436,4 +504,4 @@ class ImageReply:
                                    source_id=job.source_id, revision=len(job.revisions)):
             raise RuntimeError("图片未提交")
         job.stage = "complete"
-        job.ctx.logger.info("生图已发送：task=%s remote=%s", job.filename, job.task_id)
+        job.ctx.logger.info("生图已发送：消息=%s task=%s remote=%s", job.source_id, job.filename, job.task_id)

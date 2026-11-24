@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import test_image_generation as fixture
 from plugins.mention_chat import reply_seconds
+from plugins.mention_chat.image_intent import FORMAT_PROMPT
 from wxbot_framework.app.maintenance import MaintenanceService
 from wxbot_framework.authorization import LOCAL_EDITOR
 from wxbot_framework.conversation.correction_capture import PROPOSE
@@ -70,6 +71,8 @@ class Model:
 
     def complete_json(self, system, user, **options):
         data = json.loads(user)
+        if system == FORMAT_PROMPT:
+            return {"动作": "text"}
         if system == PROPOSE:
             return {"纠错": [self.proposal]}
         if not any(tool["name"] == "search_public" for tool in data["可用工具"]):

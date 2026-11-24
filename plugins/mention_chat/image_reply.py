@@ -23,6 +23,7 @@ from .image_intent import FORMAT_SECONDS, choose_format
 from .image_plan import CHAT_PHOTO_SOURCE, ImageProfiles, fallback_image, image_sources, prepare_image, select_image_sources
 
 TASK_SECONDS = 300
+RECEIPT_SECONDS = 8
 PLAN_SECONDS = 75
 SOURCE_SECONDS = 15
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / ".runtime" / "generated_images"
@@ -80,7 +81,7 @@ class ImageReply:
         self._jobs = OrderedDict()
         self._status = None
 
-    def _notify(self, job, message, ctx, facts, *, stages, question=None):
+    def _notify(self, job, message, ctx, facts, *, stages, question=None, receipt_deadline=None):
         @contextmanager
         def guard():
             with job.guard():
@@ -89,7 +90,8 @@ class ImageReply:
                         raise SnapshotExpired("生图状态已变化")
                 yield
 
-        self._status.submit(message, ctx, facts, personality=job.personality, guard=guard, question=question)
+        self._status.submit(message, ctx, facts, personality=job.personality, guard=guard,
+                            question=question, receipt_deadline=receipt_deadline)
 
     def status(self, message, ctx, text):
         member = message.session_id, message.chat_id, message.sender_id
@@ -427,13 +429,16 @@ class ImageReply:
         ctx.logger.info("生图入队：消息=%s 原消息=%s task=%s mode=%s", snapshot.anchor_id, job.source_id, job.filename, mode)
         self._queue.put(job)
         if prior is None:
+            receipt_deadline = message.received_at + RECEIPT_SECONDS
             if queued:
-                self._notify(job, message, ctx, {"生图受理": "已接单，前面还有生图任务"}, stages=("queued",))
+                self._notify(job, message, ctx, {"生图受理": "已接单，前面还有生图任务"}, stages=("queued",),
+                             receipt_deadline=receipt_deadline)
             else:
                 def receipt():
                     return {"生图受理": "生图服务已接单，正在生成" if job.stage == "waiting" else "已收到本次绘图要求"}
 
-                self._notify(job, message, ctx, receipt, stages=("queued", "reference", "planning", "submitting", "waiting"))
+                self._notify(job, message, ctx, receipt, stages=("queued", "reference", "planning", "submitting", "waiting"),
+                             receipt_deadline=receipt_deadline)
 
     def _finish(self, job):
         with self._lock:

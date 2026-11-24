@@ -12,6 +12,8 @@ from .slow_replies import SlowReplies
 
 
 STATUS_SECONDS = 25
+RECEIPT_SYSTEM = ("按当前人格，用一句简短中文接下群友的画图请求。只说实际状态里已确认的事。"
+                  "刚收到时只回应收到，正在排队或已开始生成时可以提一句。省去画面描述、提问和时间承诺。")
 SYSTEM = """用一句简短中文接群友眼前这句话，像群聊里随口接话。先答对方在意的点。
 实际状态是唯一事实来源。对方原话只是聊天内容，提问里的暗示不能当真。有明确结果先交代结果；
 已经失败或被拦截就准确说出，不否认、不说还在处理。原因未知就说不知道，不自行判断群友是否违规。
@@ -41,16 +43,19 @@ class StatusReplies:
     def __init__(self, logger):
         self.queue = SlowReplies(logger, capacity=16, name="MentionChat.status")
 
-    def compose(self, message, ctx, facts, *, personality, guard, question=None, choices=()):
-        budget = ReplyBudget(time.monotonic(), STATUS_SECONDS)
-        payload = json.dumps({"群友原话": message.text if question is None else question,
-                              "实际状态": facts}, ensure_ascii=False)
+    def compose(self, message, ctx, facts, *, personality, guard, question=None, choices=(), receipt_deadline=None):
+        now = time.monotonic()
+        budget = ReplyBudget(now, STATUS_SECONDS if receipt_deadline is None else receipt_deadline - now)
+        prompts = (RECEIPT_SYSTEM,) if receipt_deadline is not None else (SYSTEM, SYSTEM + "\n按实际状态重新用自己的话表达。")
         try:
             model = ctx.llm_for(message, personality=personality, for_reply=True)
-            for prompt in (SYSTEM, SYSTEM + "\n按实际状态重新用自己的话表达。"):
+            for prompt in prompts:
                 with guard():
                     if self.queue.stopped.is_set():
                         return ""
+                    state = facts() if callable(facts) else facts
+                payload = json.dumps({"群友原话": message.text if question is None else question,
+                                      "实际状态": state}, ensure_ascii=False)
                 token = CURRENT.set(budget)
                 try:
                     text = " ".join(strip_links(model.complete_text(prompt, payload, max_tokens=128)).split())
@@ -61,7 +66,7 @@ class StatusReplies:
                                 return text
                             continue
                         grounded, invented_action = ctx.jev.noul(
-                            {"实际状态": facts, "语音能力": VOICE_CAPABILITY, "拟发送回复": text},
+                            {"实际状态": state, "语音能力": VOICE_CAPABILITY, "拟发送回复": text},
                             [STATUS_GROUNDED, STATUS_ACTION], timeout=2)
                         if grounded >= 0.7 and invented_action < 0.7 and budget.clock() < budget.deadline:
                             return text
@@ -73,8 +78,8 @@ class StatusReplies:
             ctx.logger.info("状态回复未提交：%s", type(error).__name__)
         return ""
 
-    def submit(self, message, ctx, facts, *, personality, guard, question=None, at=True):
-        deadline = time.monotonic() + STATUS_SECONDS
+    def submit(self, message, ctx, facts, *, personality, guard, question=None, at=True, receipt_deadline=None):
+        deadline = time.monotonic() + STATUS_SECONDS if receipt_deadline is None else receipt_deadline
         @contextmanager
         def delivery_guard():
             with guard():
@@ -84,8 +89,8 @@ class StatusReplies:
 
         def run():
             yield
-            current_facts = facts() if callable(facts) else facts
-            text = self.compose(message, ctx, current_facts, personality=personality, guard=delivery_guard, question=question)
+            text = self.compose(message, ctx, facts, personality=personality, guard=delivery_guard,
+                                question=question, receipt_deadline=receipt_deadline)
             if text:
                 send = ctx.reply_at if at else ctx.reply
                 try:

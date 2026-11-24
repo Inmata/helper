@@ -20,7 +20,8 @@ from wxbot_framework.messaging.mentions import strip_at_labels
 from wxbot_framework.conversation.members import MemberStore
 from wxbot_framework.conversation.status_replies import StatusReplies
 from wxbot_framework.integrations.jev import JevError
-from wxbot_framework.integrations.llm import LLMClient, LLMContentBlocked, LLMError
+from wxbot_framework.integrations.llm import LLMClient, LLMConnectionError, LLMContentBlocked, LLMError
+from wxbot_framework.integrations.reply_budget import CURRENT
 from wxbot_framework.integrations.magpie_images import MagpieImages
 from wxbot_framework.integrations.magpie_tools import MagpieTools, MagpieToolsToolError, MagpieToolsUnavailableError
 from wxbot_framework.memory.knowledge import KnowledgeStore
@@ -300,6 +301,48 @@ class ImageGenerationTests(unittest.TestCase):
         self.server.release.set()
         self.wait_done()
         self.assertEqual(len(self.backend.texts), 1)
+
+    def test_mentioned_command_drops_slow_receipt_and_keeps_generating(self):
+        self.server.release.clear()
+        remaining = []
+        def render(system, user, **options):
+            remaining.append(CURRENT.get().remaining(120))
+            raise LLMConnectionError("接单回话超时")
+
+        with patch.object(self.ctx._llm, "complete_text", side_effect=render):
+            self.plugin.on_message(self.message("@a姐\u2005/生图 画两个人的合照", data={
+                "is_at_self": True, "at_members": ["wxid_robot"]}, received_at=time.monotonic()-3), self.ctx)
+            try:
+                self.assertTrue(self.server.waiting.wait(3))
+                self.wait_for(lambda: not self.plugin._status.busy())
+                self.assertEqual(len(remaining), 1)
+                self.assertLessEqual(remaining[0], 5)
+                self.assertFalse(self.backend.texts)
+            finally:
+                self.server.release.set()
+            self.wait_done()
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        self.assertEqual(sum(call["name"] == "generate_image" for call in self.server.calls), 1)
+
+    def test_old_image_request_still_draws_without_writing_a_late_receipt(self):
+        with patch.object(self.ctx._llm, "complete_text", wraps=self.ctx._llm.complete_text) as write:
+            self.plugin.on_message(self.message(received_at=time.monotonic()-70), self.ctx)
+            self.wait_done()
+        write.assert_not_called()
+        self.assertFalse(self.backend.texts)
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
+    def test_receipt_ready_in_time_expires_while_waiting_to_send_to_wechat(self):
+        self.server.release.clear()
+        with (patch("plugins.mention_chat.image_reply.RECEIPT_SECONDS", 1),
+              patch.object(type(self.service.text_delay), "seconds_for", return_value=1.1) as pacing):
+            self.plugin.on_message(self.message(), self.ctx)
+            self.wait_for(lambda: not self.plugin._status.busy())
+            pacing.assert_called_once()
+            self.assertFalse(self.backend.texts)
+            self.server.release.set()
+            self.wait_done()
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
 
     def test_completed_image_drops_a_slow_receipt(self):
         self.server.release.clear()

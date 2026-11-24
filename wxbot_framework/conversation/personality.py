@@ -119,10 +119,13 @@ class PersonalityLLM:
             raise PersonalityExpired("当前回复已失效")
         return result
 
-    def complete_text(self, system, user, **options):
+    def complete_text(self, system, user, *, brief_persona=False, **options):
         if not self.current():
             raise PersonalityExpired("当前回复已失效")
-        system, user = self._request(system, user, options)
+        if brief_persona:
+            system = PERSONA_SUMMARIES[self.state.name] + "\n" + system
+        else:
+            system, user = self._request(system, user, options)
         result = self.client.complete_text(system, user, **options)
         if not self.current():
             raise PersonalityExpired("当前回复已失效")

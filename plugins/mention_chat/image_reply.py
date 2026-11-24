@@ -20,10 +20,11 @@ from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget
 from wxbot_framework.messaging.mentions import strip_at_labels
 from wxbot_framework.recent_images import ImageRecord, RECENT_IMAGES, READY
 from .image_intent import FORMAT_SECONDS, choose_format
-from .image_plan import CHAT_PHOTO_SOURCE, ImageProfiles, fallback_image, image_sources, prepare_image, select_image_sources
+from .image_plan import (CHAT_PHOTO_SOURCE, ImageProfiles, fallback_image, image_sources, prepare_image,
+                         select_image_sources, uses_previous_picture)
 
 TASK_SECONDS = 300
-RECEIPT_SECONDS = 8
+RECEIPT_SECONDS = 25
 PLAN_SECONDS = 75
 SOURCE_SECONDS = 15
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / ".runtime" / "generated_images"
@@ -60,6 +61,11 @@ class ImageJob:
     clarification_until: float = 0
     missing_reference: bool = False
     quoted_image: bool = False
+    previous_image: bool = False
+    recent_pictures: tuple[ImageRecord, ...] = ()
+    material_question: str = ""
+    replacement_role: str = ""
+    material_sources: dict = field(default_factory=dict)
     required_references: int = 0
     edit: bool = False
     plan: object = None
@@ -124,7 +130,8 @@ class ImageReply:
                 self._queue.put(job)
             stage, failure = job.stage, job.failure
         stages = {"queued": "排队", "reference": "读取参考图", "planning": "整理绘图要求和相关资料",
-                  "needs_input": "等待补充信息，尚未提交生成", "submitting": "提交生成请求",
+                  "needs_input": "已发出追问，等待补充信息" if job.question_text else "缺少素材，补充提示尚未确认发出",
+                  "submitting": "提交生成请求",
                   "waiting": "等待生成服务返回图片", "sending": "提交图片到群聊",
                   "complete": "已发图到本群",
                   "failed": "生图失败", "expired": "等待超时", "cancelled": "任务取消",
@@ -283,7 +290,8 @@ class ImageReply:
         if job.stage == "needs_input":
             author_is_bot = ctx.members.account in (quote.get("fromusr"), quote.get("chatusr"))
             answered = bool(job.question_text and author_is_bot and strip_at_labels(quote.get("text") or "").strip() == job.question_text)
-            supplied_image = addressed and len(job.references) < max(1, job.required_references) and quote.get("ref_type") == "3"
+            supplied_image = (addressed and quote.get("ref_type") == "3" and
+                              (job.material_question or len(job.references) < max(1, job.required_references)))
             if time.monotonic() >= job.clarification_until or not (answered or supplied_image):
                 return False
         elif can_revise and active and job.stage in ("queued", "reference", "planning", "submitting", "waiting"):
@@ -365,8 +373,13 @@ class ImageReply:
         edit = mode == "edit" or bool((prior is None or quoted) and EDIT_HINT.search(text))
         paired = bool(PAIR_HINT.search(text) or (FIRST_IMAGE.search(text) and SECOND_IMAGE.search(text))
                       or (quoted and RECENT_REFERENCE.search(text)))
-        required_references = max(2 if paired else int(quoted or edit), prior.required_references if prior else 0)
+        previous_image = not paired and uses_previous_picture(prompt)
+        required_references = max(2 if paired else int(quoted or edit or previous_image),
+                                  prior.required_references if prior else 0)
         references = prior.references if prior else ()
+        recent_pictures = prior.recent_pictures if prior else ()
+        if "group.image.receive" in ctx.capabilities and (not prior or supplement):
+            recent_pictures = RECENT_IMAGES.preceding(message.chat_id, before=message.received_at, within=120)
         missing_reference = prior.missing_reference if prior else False
         if quoted and "group.image.receive" not in ctx.capabilities:
             inform({"原因": "当前连接收不到引用的群图", "可用操作": "可使用本群档案照或文字描述"})
@@ -383,6 +396,8 @@ class ImageReply:
                 references = (primary,) if primary else ()
                 if primary and required_references == 2:
                     references += tuple(record for record in candidates if record.key != primary.key)[-1:]
+            elif previous_image:
+                references = recent_pictures[-1:]
             else:
                 references = candidates[-2:]
         revisions = prior.revisions if prior else ()
@@ -414,6 +429,13 @@ class ImageReply:
                                previous_prompt=prior.previous_prompt if prior else previous_prompt,
                                missing_reference=missing_reference,
                                quoted_image=quoted or bool(prior and prior.quoted_image),
+                               previous_image=previous_image,
+                               recent_pictures=recent_pictures,
+                               replacement_role=prior.material_question if prior and quoted else "",
+                               material_sources=(prior.material_sources.copy()
+                                                 if prior and prior.material_question and quoted and
+                                                 (not supplement or re.fullmatch(r"(?:就用|补上|补发|用)?这张(?:图|照片)?[。！!]*", supplement))
+                                                 else {}),
                                required_references=required_references,
                                edit=edit or bool(prior and (prior.edit or (prior.plan and prior.plan.edit))))
                 if prior is not None:
@@ -517,9 +539,11 @@ class ImageReply:
                 prepare_until = budget.deadline - (SOURCE_SECONDS if recover_sources else 0)
                 with budget.work("整理绘图要求", prepare_until):
                     job.plan, question = _within(lambda: prepare_image(
-                        job.ctx, job.message, job.snapshot, sources, references, job.guard, profiles, **options),
+                        job.ctx, job.message, job.snapshot, sources, references, job.guard, profiles, job=job, **options),
                         budget.remaining(PLAN_SECONDS, until=prepare_until), job.cancelled)
             except (LLMConnectionError, LLMFormatError, TimeoutError) as error:
+                if job.material_sources:
+                    raise
                 job.ctx.logger.info("生图整理回退：task=%s error=%s", job.filename, type(error).__name__)
                 selection = {}
                 if recover_sources:
@@ -528,6 +552,8 @@ class ImageReply:
                                             budget.remaining(SOURCE_SECONDS), job.cancelled)
                     except (LLMConnectionError, LLMFormatError, TimeoutError) as source_error:
                         job.ctx.logger.info("生图选材未完成：task=%s error=%s", job.filename, type(source_error).__name__)
+                        if job.previous_image and profiles.mentioned:
+                            raise RuntimeError("指定群图的人物用途尚未核实") from source_error
                         names, clarification = profiles.portraits.fallback_names(request)
                         if not job.quoted_image and job.required_references < 2:
                             if names:
@@ -548,9 +574,10 @@ class ImageReply:
                 job.clarification_until = time.monotonic() + TASK_SECONDS
                 text = self._status.compose(job.message, job.ctx, {"待确认": question},
                                             personality=job.personality, guard=job.guard)
-                if text:
+                if text and job.ctx.reply_at(job.message, text, delivery_guard=job.guard):
                     job.question_text = text
-                    job.ctx.reply_at(job.message, text, delivery_guard=job.guard)
+                else:
+                    job.ctx.logger.info("生图追问未确认发出：消息=%s", job.source_id)
                 return
             job.ctx.logger.info("生图要求已整理：task=%s references=%d", job.filename, len(job.plan.references))
         job.stage = "submitting"

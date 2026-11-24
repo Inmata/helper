@@ -134,18 +134,30 @@ class JevClient:
 
         已声明的选项必须全部给出且概率之和约为 1，否则视为格式错误。
         """
+        return self.choices(state, {"q0": (instructions, criteria)}, timeout=timeout)["q0"]
+
+    def choices(self, state, questions, *, timeout=None):
+        """在同一份事实上一并判断多个对象，保留每题的候选分布。"""
         if not isinstance(state, dict):
             raise ValueError("Jev state 必须是对象")
-        if not isinstance(instructions, str) or not instructions.strip():
-            raise ValueError("Jev choice 需要 instructions")
-        if (not isinstance(criteria, dict) or not 2 <= len(criteria) <= MAX_QUESTIONS or
-                not all(isinstance(key, str) and key.strip() and isinstance(value, str) and value.strip()
-                        for key, value in criteria.items())):
-            raise ValueError(f"Jev choice 选项应为 2–{MAX_QUESTIONS} 个非空判据")
-        answers = self._post({"model": self.model, "state": state, "questions": {
-            "q0": {"type": "choice", "instructions": instructions, "criteria": dict(criteria)}}}, timeout=timeout)
+        if not 1 <= len(questions) <= MAX_QUESTIONS:
+            raise ValueError("Jev choice 题数超出范围")
+        payload = {}
+        for key, (instructions, criteria) in questions.items():
+            if not isinstance(instructions, str) or not instructions.strip():
+                raise ValueError("Jev choice 需要 instructions")
+            if (not isinstance(criteria, dict) or not 2 <= len(criteria) <= MAX_QUESTIONS or
+                    not all(isinstance(k, str) and k.strip() and isinstance(v, str) and v.strip()
+                            for k, v in criteria.items())):
+                raise ValueError(f"Jev choice 选项应为 2–{MAX_QUESTIONS} 个非空判据")
+            payload[key] = {"type": "choice", "instructions": instructions, "criteria": criteria}
+        answers = self._post({"model": self.model, "state": state, "questions": payload}, timeout=timeout)
+        return {key: self._choice_result(answers, key, q["criteria"]) for key, q in payload.items()}
+
+    @staticmethod
+    def _choice_result(answers, key, criteria):
         try:
-            probabilities = answers["q0"]["probabilities"]
+            probabilities = answers[key]["probabilities"]
         except (KeyError, TypeError):
             raise JevFormatError("Jev 响应缺少选项概率") from None
         if not isinstance(probabilities, dict):

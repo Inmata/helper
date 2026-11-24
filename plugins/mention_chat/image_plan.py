@@ -12,10 +12,12 @@ from wxbot_framework.conversation.evidence_tools import ConversationEvidence, to
 from wxbot_framework.conversation.members import MemberError
 from wxbot_framework.conversation.tool_loop import run_tools
 from wxbot_framework.integrations.llm import LLMFormatError
+from wxbot_framework.integrations.jev import JevError
 from wxbot_framework.integrations.magpie_tools import MagpieToolsError
 from wxbot_framework.integrations.reply_budget import remaining
 from wxbot_framework.timeutil import parse_utc
 from .portraits import MAX_REFERENCES, RoomPortraits, wants_room_cast
+from .picture_selection import resolve_materials
 
 
 SOURCE_RULES = """根据原话、最新补充、引用和实际清单决定素材。群聊图片和本群档案照可以单独使用，也可以组合。修改素材来源时以最新补充为准。
@@ -42,6 +44,15 @@ PROFILE_TOPICS = {
 }
 
 CHAT_PHOTO_SOURCE = re.compile(r"(?:场景|背景|这张|那张|原|刚发的|我发的)[图照]|刚发的|上一张|参考图|第[一二12]张")
+PREVIOUS_PICTURE = r"(?:上图|上一张(?:图(?:片)?|照片)|上面(?:的|那张|这张)?(?:图(?:片)?|照片))"
+PREVIOUS_SOURCE = re.compile(r"(?:参考|参照|照着|按照|按|根据|使用|用|以)\s*" + PREVIOUS_PICTURE)
+
+
+def uses_previous_picture(text):
+    for match in PREVIOUS_SOURCE.finditer(text):
+        if not re.search(r"(?:不(?:要|用|必|再)?|别(?:再)?|无需)\s*$", text[:match.start()]):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -65,11 +76,11 @@ class ImageProfiles:
             candidates = []
         self.portraits = RoomPortraits(self.room, candidates, ctx.magpie.max_image_bytes, room_aliases)
         names = {name for person in candidates for name in (person["name"], *person["aliases"]) if len(name) >= 2}
-        if not names:
-            return
         pattern = "|".join(map(re.escape, sorted(names, key=lambda name: (-len(name), name))))
-        matches = dict.fromkeys(re.findall(pattern, request, re.IGNORECASE))
-        for name in matches:
+        self.mentioned = list(dict.fromkeys(re.findall(pattern, request, re.IGNORECASE))) if names else []
+
+    def prefetch(self):
+        for name in self.mentioned:
             self.read(name)
             if len(self.profiles) == 3:
                 break
@@ -121,7 +132,8 @@ def image_sources(job, profiles, references):
     quote = job.message.data.get("quote") or {}
     return {"本次请求": job.prompt, "已收到的补充": list(job.revisions),
             "本轮承接的上次绘图要求": job.previous_prompt,
-            "当前引用": (quote.get("text") or "")[:1000], "指定群聊图片": job.quoted_image,
+            "当前引用": (quote.get("text") or "")[:1000], "指定群聊图片": job.quoted_image or job.previous_image,
+            "正文指定上图": job.previous_image,
             "本条直接引用群图": quote.get("ref_type") == "3",
             "候选群图编号（从早到晚）": [f"I{i}" for i in range(1, len(references) + 1)], "指定的群图缺失": job.missing_reference,
             "可接收群聊图片": "group.image.receive" in job.ctx.capabilities,
@@ -131,9 +143,27 @@ def image_sources(job, profiles, references):
 
 
 def prepare_image(ctx, message, snapshot, sources, references, guard, profiles, *,
-                  missing_reference, required_references, edit):
+                  missing_reference, required_references, edit, job=None):
     request = "\n".join((sources["本轮承接的上次绘图要求"], sources["本次请求"], *sources["已收到的补充"]))
     additions = sources["已收到的补充"]
+    if job is not None and (job.recent_pictures or job.quoted_image or job.previous_image or profiles.mentioned):
+        try:
+            binding = resolve_materials(job, profiles)
+        except (JevError, ValueError) as exc:
+            if job.material_sources:
+                raise RuntimeError("未能完成指定素材的定位") from exc
+            ctx.logger.info("生图素材判断交回规划：消息=%s 原因=%s", snapshot.anchor_id, type(exc).__name__)
+            binding = None
+        if binding is not None:
+            paths, names, guide, question = binding
+            if question:
+                return None, question
+            plan = ImagePlan(guide + request.strip(), paths, edit)
+            return profiles.portraits.apply(plan, names, request=request)
+    if sources["正文指定上图"] and not additions and not sources["本轮承接的上次绘图要求"]:
+        if not references:
+            return None, "我没找到你说的上图，能引用那张图再发一次吗？"
+    profiles.prefetch()
     needs_history = sources["当前引用"] or re.search(r"前文|上次|之前|以前|商量|讨论|刚才说", request)
     editing_previous = edit and (sources["本轮承接的上次绘图要求"]
                                  or re.search(r"改图|改成|换成|替换|重画|重绘|上一?张|刚才那|调整", request))

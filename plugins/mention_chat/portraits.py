@@ -100,6 +100,13 @@ class RoomPortraits:
             return re.findall(pattern, direct[1], re.I), ""
         return [], "这张图要用谁的档案照？可以回「用某某的档案照」或「不用档案照」。"
 
+    def portrait_id(self, label):
+        try:
+            ids = self._names.get(name_key(label), ())
+        except MemberError:
+            return None
+        return next(iter(ids)) if len(ids) == 1 else None
+
     def apply(self, plan, names, *, request=""):
         selected = {}
         if names == "全部":
@@ -108,13 +115,10 @@ class RoomPortraits:
             selected = {pid: person["name"] for pid, person in self.people.items()}
         else:
             for label in names:
-                try:
-                    ids = self._names.get(name_key(label), ())
-                except MemberError:
-                    ids = ()
-                if len(ids) != 1:
+                person_id = self.portrait_id(label)
+                if person_id is None:
                     return None, "这个称呼没有唯一可用的档案照。要用哪位的照片？也可以直接引用一张。"
-                selected.setdefault(next(iter(ids)), label)
+                selected.setdefault(person_id, label)
         slots = MAX_REFERENCES - len(plan.references)
         if len(selected) > slots:
             named = [pid for pid in selected if any(re.search(_name_pattern(label), request, re.I)

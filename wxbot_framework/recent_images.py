@@ -66,7 +66,7 @@ class RecentImages:
         self._rooms = {channel: OrderedDict() for channel in self._limits}
         self._changed = threading.Condition()
 
-    def note(self, data):
+    def note(self, data, *, restored=False):
         """记下一条图片事件；同一条消息再次到达时更新状态，保留首次看到的时刻。无效事件返回 None。"""
         if not isinstance(data, dict):
             return None
@@ -105,7 +105,7 @@ class RecentImages:
                     break
             else:
                 record = ImageRecord(room=room, sender=str(data.get("sender_id") or ""), key=key, status=status,
-                                     seen_at=self.clock(), native_message_id=native_id, used=outgoing,
+                                     seen_at=0 if restored else self.clock(), native_message_id=native_id, used=outgoing,
                                      md5=md5, path=str(path or ""), error=str(error or ""), wx_type=wx_type,
                                      outgoing=outgoing, registered=registered)
                 records.append(record)
@@ -119,12 +119,12 @@ class RecentImages:
                 return tuple(self._rooms[3, True].get(room, ())) + received
             return received
 
-    def sent(self, room, sender, path, *, md5="", svrid=""):
+    def sent(self, room, sender, path, *, md5="", svrid="", restored=False):
         path = Path(path).resolve()
         md5 = md5 or hashlib.md5(path.read_bytes()).hexdigest()
         return self.note({"chat_id": room, "sender_id": sender, "is_self": True, "sent_md5": md5,
                           "native_message_id": svrid, "image_status": READY, "image_path": str(path),
-                          "image_metadata": {"md5": md5}})
+                          "image_metadata": {"md5": md5}}, restored=restored)
 
     def restore_sent(self, members, room, *, quote=None, source_id=0):
         if quote and quote.get("chatusr") and members.account not in (quote["chatusr"], quote.get("fromusr")):
@@ -142,7 +142,7 @@ class RecentImages:
             rows = [row for row in rows if row["md5"] == digest]
         for row in reversed(rows):
             if Path(row["path"]).is_file():
-                self.sent(room, members.account, row["path"], md5=row["md5"])
+                self.sent(room, members.account, row["path"], md5=row["md5"], restored=True)
         if (quote and quote.get("ref_type") == "3" and quote.get("image_md5") and
                 members.account in (quote.get("fromusr"), quote.get("chatusr")) and
                 self.quoted(room, svrid=quote.get("svrid", ""), md5=quote["image_md5"]) is None):
@@ -151,7 +151,7 @@ class RecentImages:
                 if path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
                     continue
                 if hashlib.md5(path.read_bytes()).hexdigest() == quote["image_md5"].lower():
-                    record = self.sent(room, members.account, path, md5=quote["image_md5"], svrid=quote.get("svrid", ""))
+                    record = self.sent(room, members.account, path, md5=quote["image_md5"], svrid=quote.get("svrid", ""), restored=True)
                     members.record_sent_image(room, record.path, record.md5, source_id)
                     break
 
@@ -185,6 +185,12 @@ class RecentImages:
         return tuple(record for record in self._records(room, wx_type)
                      if (record.sender != sender) == from_others and not record.used and
                      before - within <= record.seen_at <= before + ARRIVAL_SLACK_SECONDS)
+
+    def preceding(self, room, *, before, within):
+        """按消息到达时刻冻结群内候选；看过的图仍可按明确的位置再次使用。"""
+        return tuple(sorted((r for r in self._records(room, include_sent=True)
+                             if r.seen_at and before - within <= r.seen_at <= before),
+                            key=lambda r: r.seen_at))
 
     def mark_used(self, record):
         """这张图已被看过：之后不再按“刚发的图”选中，引用它仍然找得到。"""

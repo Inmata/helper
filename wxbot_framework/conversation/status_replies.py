@@ -12,6 +12,16 @@ from .slow_replies import SlowReplies
 
 
 STATUS_SECONDS = 25
+RECEIPT_CHECK = {
+    "instructions": "这是一句发给群友的画图接单回话。它是否自然表达了已收到或实际记录的进度？",
+    "true": "简短应声、接单、轻松表示交给自己，或提到已证实的排队或开画。",
+    "false": "问群友要素材、刚收到就说已经在画、编出具体进度或完成时间、答非所问，或声称已出图。",
+}
+QUESTION_CHECK = {
+    "instructions": "拟发送的问句是否准确问出了待确认的那件事，保留了指定的人物与图片来源？",
+    "true": "询问同一个缺项，允许用群友间自然的说法重述。",
+    "false": "换了素材来源、遗漏要选的对象、另提问题，或给出没有依据的进度。",
+}
 RECEIPT_SYSTEM = ("按当前人格，用一句简短中文接下群友的画图请求。只说实际状态里已确认的事。"
                   "刚收到时只回应收到，正在排队或已开始生成时可以提一句。省去画面描述、提问和时间承诺。")
 SYSTEM = """用一句简短中文接群友眼前这句话，像群聊里随口接话。先答对方在意的点。
@@ -54,21 +64,36 @@ class StatusReplies:
                     if self.queue.stopped.is_set():
                         return ""
                     state = facts() if callable(facts) else facts
-                payload = json.dumps({"群友原话": message.text if question is None else question,
-                                      "实际状态": state}, ensure_ascii=False)
+                payload = {}
+                if receipt_deadline is None:
+                    payload["群友原话"] = message.text if question is None else question
+                payload["实际状态"] = state
                 token = CURRENT.set(budget)
                 try:
-                    text = " ".join(strip_links(model.complete_text(prompt, payload, max_tokens=128)).split())
+                    clarification = "待确认" in state and not choices
+                    if clarification:
+                        prompt = "用当前人格问一句，把实际状态中需要对方确认的素材问清。保留对象和来源。"
+                    options = {"brief_persona": True} if receipt_deadline is not None or clarification else {}
+                    text = " ".join(strip_links(model.complete_text(prompt, json.dumps(payload, ensure_ascii=False),
+                                                                    max_tokens=128, **options)).split())
                     if 0 < len(text) <= 120:
                         if choices:
                             if (text.endswith(("？", "?")) and all(option in text for option in choices)
                                     and budget.clock() < budget.deadline):
                                 return text
                             continue
-                        grounded, invented_action = ctx.jev.noul(
-                            {"实际状态": state, "语音能力": VOICE_CAPABILITY, "拟发送回复": text},
-                            [STATUS_GROUNDED, STATUS_ACTION], timeout=2)
-                        if grounded >= 0.7 and invented_action < 0.7 and budget.clock() < budget.deadline:
+                        if receipt_deadline is not None:
+                            accepted = ctx.jev.noul({"实际状态": state, "拟发送回复": text},
+                                                   [RECEIPT_CHECK], timeout=2)[0] >= 0.7
+                        elif clarification:
+                            accepted = ctx.jev.noul({"待确认的事实": state["待确认"], "拟发送的问句": text},
+                                                   [QUESTION_CHECK], timeout=2)[0] >= 0.7
+                        else:
+                            grounded, invented_action = ctx.jev.noul(
+                                {"实际状态": state, "语音能力": VOICE_CAPABILITY, "拟发送回复": text},
+                                [STATUS_GROUNDED, STATUS_ACTION], timeout=2)
+                            accepted = grounded >= 0.7 and invented_action < 0.7
+                        if accepted and budget.clock() < budget.deadline:
                             return text
                 finally:
                     CURRENT.reset(token)
@@ -94,7 +119,10 @@ class StatusReplies:
             if text:
                 send = ctx.reply_at if at else ctx.reply
                 try:
-                    send(message, text, delivery_guard=delivery_guard)
+                    sent = send(message, text, delivery_guard=delivery_guard)
+                    if receipt_deadline is not None and sent:
+                        ctx.logger.info("生图接单回话已提交：消息=%s 到达至提交=%.2f秒",
+                                        ctx.members.message_id(message), time.monotonic() - message.received_at)
                 except (SnapshotExpired, RuntimeError):
                     ctx.logger.info("状态回复已失效")
 

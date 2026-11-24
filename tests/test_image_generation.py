@@ -99,6 +99,9 @@ class Backend:
 
 
 class Jev:
+    def choices(self, state, questions, **options):
+        raise JevError("本机用例默认测试素材判断离线时的规划")
+
     def noul(self, state, questions, **options):
         if "当前群的别称" in state:
             raise JevError("本机用例默认测试语义服务离线时的选材")
@@ -316,7 +319,8 @@ class ImageGenerationTests(unittest.TestCase):
                 self.assertTrue(self.server.waiting.wait(3))
                 self.wait_for(lambda: not self.plugin._status.busy())
                 self.assertEqual(len(remaining), 1)
-                self.assertLessEqual(remaining[0], 5)
+                self.assertGreater(remaining[0], 8)
+                self.assertLessEqual(remaining[0], 22)
                 self.assertFalse(self.backend.texts)
             finally:
                 self.server.release.set()
@@ -631,6 +635,93 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(task["本次参考图"], ["I1", "I2"])
         self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(first), str(second)])
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
+    def test_previous_image_binds_appearance_without_replanning_or_using_that_persons_portrait(self):
+        self.members.register("A姐", ROOM, self.members.account)
+        self.message("大家好", sender=self.members.account)
+        own = self.portrait(self.knowledge.member_entity(ROOM, self.members.account))
+        self.portrait(self.knowledge.entity(ROOM, "王成坤", pinned=True))
+        self.reference_fixture("first")
+        latest, _ = self.reference_fixture("latest")
+        decisions = [{"A姐": {"E1": 0.98}, "王成坤": {"E3": 0.99}, "任务范围": {"direct": 0.98, "plan": 0.02}},
+                     {"A姐": {"portrait": 0.96}, "王成坤": {"previous": 0.91}}]
+        with (patch.object(self.ctx._jev, "choices", side_effect=decisions) as judge,
+              patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError) as planner):
+            self.plugin.on_message(self.message("@A姐\u2005/生图 根据你自己的形象 生成一张你和王成坤结婚的图，王成坤参考上图",
+                data={"is_at_self": True, "at_members": [self.members.account]}), self.ctx)
+            self.wait_done()
+        calls = [c["arguments"] for c in self.server.calls if c["name"] == "generate_image"]
+        self.assertEqual([c["reference_images"] for c in calls], [[str(latest), str(own)]])
+        self.assertIn("王成坤", calls[0]["prompt"])
+        self.assertIn("第1张用作王成坤", calls[0]["prompt"])
+        self.assertEqual(judge.call_count, 2)
+        planner.assert_not_called()
+
+    def test_previous_image_missing_asks_only_for_picture_and_accepts_quoted_replacement(self):
+        prompt = "/生图 参考上图画一张水彩"
+        self.plugin.on_message(self.message(prompt), self.ctx)
+        self.wait_done()
+        self.assertFalse(self.server.calls)
+        self.assertIn("图", self.backend.texts[-1][1])
+        path, _ = self.reference_fixture("replacement", sender="wxid_other")
+        self.plugin.on_message(self.message(prompt, data={"quote": {"ref_type": "3", "svrid": "replacement"}}), self.ctx)
+        self.wait_done()
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(path)])
+
+    def test_missing_person_reference_resumes_only_that_role(self):
+        self.members.register("A姐", ROOM, self.members.account)
+        self.message("大家好", sender=self.members.account)
+        own = self.portrait(self.knowledge.member_entity(ROOM, self.members.account))
+        self.portrait(self.knowledge.entity(ROOM, "小岚", pinned=True))
+        prompt = "/生图 根据你自己的形象，画你和小岚骑车，小岚参照上图"
+        decisions = [{"A姐": {"E1": 1}, "小岚": {"E3": 1}, "任务范围": {"direct": 1, "plan": 0}},
+                     {"A姐": {"portrait": 1}, "小岚": {"previous": 1}}]
+        with patch.object(self.ctx._jev, "choices", side_effect=decisions) as judge:
+            self.plugin.on_message(self.message(prompt), self.ctx)
+            self.wait_done()
+            self.assertFalse(self.backend.images)
+            self.assertIn("小岚", self.backend.texts[-1][1])
+            replacement, _ = self.reference_fixture("chosen")
+            self.reference_fixture("later")
+            supplement = self.message("@机器人\u2005就用这张", data={
+                "is_at_self": True, "at_members": [self.members.account],
+                "quote": {"ref_type": "3", "svrid": "chosen"},
+            })
+            self.plugin.on_message(supplement, self.ctx)
+            self.wait_done()
+        self.assertEqual(judge.call_count, 2)
+        args = self.server.calls[0]["arguments"]
+        self.assertEqual(args["reference_images"], [str(replacement), str(own)])
+        self.assertIn("骑车", args["prompt"])
+
+    def test_visual_condition_uses_observations_and_never_picks_between_two_matches(self):
+        from types import SimpleNamespace
+        self.portrait(self.knowledge.entity(ROOM, "小岚", pinned=True))
+        first, _ = self.reference_fixture("first")
+        second, _ = self.reference_fixture("second")
+        prompt = "/生图 小岚要用我发的两张里的背影照画头像"
+        decisions = [{"小岚": {"E1": 1}, "任务范围": {"direct": 1, "plan": 0}}, {"小岚": {"inspect": 1}}]
+        normal = self.ctx._jev.noul
+        for scores, unique in (([0.96, 0.02], True), ([0.94, 0.91], False)):
+            def judge(state, questions, **options):
+                if "逐张读取的画面" in state:
+                    self.assertEqual(set(state["逐张读取的画面"]), {"I1", "I2"})
+                    return scores
+                return normal(state, questions, **options)
+            self.server.calls.clear()
+            second_description = "正面" if unique else "也是背影"
+            with (patch.object(self.ctx._jev, "choices", side_effect=decisions),
+                  patch.object(self.ctx._jev, "noul", side_effect=judge),
+                  patch.object(self.ctx.magpie, "analyze_image", side_effect=[
+                      SimpleNamespace(text="背影"), SimpleNamespace(text=second_description)]) as inspect):
+                self.plugin.on_message(self.message(prompt), self.ctx)
+                self.wait_done()
+            self.assertEqual([c.args[0] for c in inspect.call_args_list], [str(first), str(second)])
+            if unique:
+                self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(first)])
+            else:
+                self.assertFalse(self.server.calls)
+                self.assertIn("引用", self.backend.texts[-1][1])
 
     def test_quoted_image_and_recent_own_image_reach_magpie_even_with_planning_failure(self):
         quoted, _ = self.reference_fixture("old-person", sender="wxid_other")

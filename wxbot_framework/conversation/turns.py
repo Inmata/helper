@@ -18,6 +18,7 @@ _QUESTION = re.compile(r"[?？]|你(?:问|指|说)的是|哪个|哪(?:一)?[场�
 _REFERS_BACK = re.compile(r"不是|刚才|你(?:说|讲)|我说的是|到底|不对吧|(?:^|[，。])那|这(?:个|事|说法)|他们")
 _SELF_REFERENCE = re.compile(r"你|刚才|刚刚|之前|上次|前面|前几天|以前|不对|说错|搞错|念|朗读|唱|语音|重说|记错|谁(?:说|讲)的|我(?:哪|啥|什么)时候")
 _SING_REQUEST = re.compile(r"唱|来(?:一|半)?首|\bsing\b", re.IGNORECASE)
+PHOTO_TOPIC = re.compile(r"照|相册|相片|档案|图库|图片库|素材|合影|入镜|出镜|人像|头像")
 
 CORRECTION_INTENT = {
     "instructions": "当前发言是否在核对或纠正群聊里某句话是谁说的，或质疑机器人先前的说法或实际动作？考虑引用和最近一轮。",
@@ -36,6 +37,11 @@ READ_CONSENT = {
     "true": "清楚同意用朗读替代演唱，比如‘可以，那就念吧’或紧接具体朗读提议说‘行’。",
     "false": "否定、想要唱而非念、另起话题、对旧语音的评论，或要求朗读不同内容。",
 }
+PHOTO_INVENTORY = {
+    "instructions": "这句话需要机器人说明自己在本群实际有哪些人物照片，或能用这些素材做什么吗？结合引用和上一轮判断。",
+    "true": "问照片库有没有某人、有几位、谁可以入镜、能否用现有照片画合照，或质疑机器人为什么声称没照片。",
+    "false": "普通人物档案查询、讨论别人拍的照片、评价图片，或直接要求现在画一张图。",
+}
 
 
 def turn_intents(jev, question, *, quote=None, previous=None):
@@ -48,6 +54,8 @@ def turn_intents(jev, question, *, quote=None, previous=None):
         checks["sing"] = SING_INTENT
     if previous and previous.reading_offer:
         checks["read"] = READ_CONSENT
+    if PHOTO_TOPIC.search(question + (previous.text if previous else "") + ((quote or {}).get("text") or "")):
+        checks["photo_inventory"] = PHOTO_INVENTORY
     if not checks:
         return set()
     state = {"当前发言": question, "引用": quote, "机器人上一轮答复": previous.text if previous else ""}

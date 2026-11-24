@@ -11,7 +11,9 @@ from datetime import datetime, timedelta, timezone
 from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .image_intent import FORMAT_SECONDS
+from .image_plan import ImageProfiles
 from .image_reply import ImageReply
+from .portraits import MAX_REFERENCES
 from wxbot_framework.conversation.slow_replies import SlowReplies
 from wxbot_framework.conversation.person_context import person_context
 from wxbot_framework.conversation.reply_wait import ReplyWait, timeout_reason
@@ -653,6 +655,13 @@ class Plugin:
             reading_offer = clean_query if offer_reading and voice_supported else ""
             voice_action = ""
             self_facts = {}
+            if "photo_inventory" in intents:
+                if "group.image.send" in ctx.capabilities:
+                    portraits = ImageProfiles(ctx, snapshot, "").portraits
+                    self_facts["本群可用人物档案照"] = [p["name"] for p in portraits.people.values()]
+                    self_facts["本群生图能力"] = f"可按名单选人或给全员画合照，每人取一张，参考图合计最多{MAX_REFERENCES}张。"
+                else:
+                    self_facts["本群生图能力"] = "当前微信连接无法发图。"
             if offer_reading or read_accepted or "correction" in intents or (previous and previous.voice_action and not clean_query):
                 self_facts["语音能力"] = VOICE_CAPABILITY if voice_supported else "当前连接只可发文字，不能唱歌或发语音。"
             if offer_reading:
@@ -825,7 +834,7 @@ class Plugin:
                     learned = verify_correction(())
                     if learned:
                         fresh = False
-                gather_local = needs_local and "correction" not in intents and classify_tier(clean_query) != CHAT
+                gather_local = needs_local and not intents.intersection({"correction", "photo_inventory"}) and classify_tier(clean_query) != CHAT
                 if not learned and can_prepare() and (fresh or (gather_local and not matches.answers)):
                     if fresh and active_budget is not None:
                         with active_budget.lock:

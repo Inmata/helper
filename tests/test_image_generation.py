@@ -594,6 +594,82 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(calls[1]["reference_images"], [str(photo)])
         self.assertIn("小枫 / 枫叶", calls[1]["prompt"])
 
+    def test_archive_group_photo_uses_inventory_even_if_routed_as_edit(self):
+        paths = [self.portrait(self.knowledge.entity(ROOM, name, pinned=True)) for name in ("小枫", "小栗")]
+        self.reference_fixture("unrelated")
+        self.ctx.capabilities -= {"group.image.receive"}
+        with (patch.object(self.ctx._jev, "noul", return_value=[0.99, 0.99]),
+              patch.object(self.ctx._llm, "complete_json", return_value={
+                  "绘图指令": "把库中人物画在一起", "档案照片": "全部", "群聊参考图数": 0})):
+            self.plugin.on_message(self.message("@机器人\u2005用你照片档案库里面有的所有人物的照片生成一个大合照",
+                data={"is_at_self": True, "at_members": ["wxid_robot"]}), self.ctx)
+            self.wait_done()
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], list(map(str, paths)))
+
+    def test_source_recovery_reconsiders_original_requirement_after_reply(self):
+        paths = [self.portrait(self.knowledge.entity(ROOM, name, pinned=True)) for name in ("小枫", "小栗")]
+        with patch.object(self.ctx._llm, "complete_json", side_effect=[
+                {"澄清问题": "你要用哪张图？"}, TimeoutError(),
+                {"档案照片": "全部", "群聊参考图数": 0}]) as planner:
+            self.plugin.on_message(self.message("/生图 把这张图换个背景"), self.ctx)
+            self.wait_done()
+            question = self.backend.texts[-1][1]
+            self.plugin.on_message(self.message("用你照片档案库里面所有照片啊", data={
+                "quote": {"ref_type": "1", "fromusr": self.members.account, "text": question}}), self.ctx)
+            self.wait_done()
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], list(map(str, paths)))
+        task = json.loads(planner.call_args.args[1])
+        self.assertEqual(task["已收到的补充"], ["用你照片档案库里面所有照片啊"])
+        self.assertEqual([p["人物"] for p in task["可用档案照"]], ["小枫", "小栗"])
+
+    def test_all_portraits_empty_and_mixed_missing_backdrop(self):
+        result = {"绘图指令": "画合照", "档案照片": "全部", "群聊参考图数": 0}
+        with patch.object(self.ctx._llm, "complete_json", return_value=result):
+            self.plugin.on_message(self.message("/生图 档案库有照片的人一起拍个照"), self.ctx)
+            self.wait_done()
+        self.assertIn("没有可用的", self.backend.texts[-1][1])
+        self.portrait(self.knowledge.entity(ROOM, "小栗", pinned=True))
+        with patch.object(self.ctx._llm, "complete_json", return_value={**result, "群聊参考图数": 1}):
+            self.plugin.on_message(self.message("/生图 用我的背景照给库里的人拍张合照"), self.ctx)
+            self.wait_done()
+        self.assertIn("原图", self.backend.texts[-1][1])
+        self.assertEqual(self.backend.images, [])
+
+    def test_only_explicit_followup_can_replace_a_missing_quoted_picture(self):
+        photo = self.portrait(self.knowledge.entity(ROOM, "小栗", pinned=True))
+        result = {"绘图指令": "用本群档案照画合照", "档案照片": "全部", "群聊参考图数": 0,
+                  "替换先前群图": True}
+        with patch.object(self.ctx._llm, "complete_json", return_value=result):
+            self.plugin.on_message(self.message("/生图 把大家画在这张背景图里",
+                data={"quote": {"ref_type": "3", "svrid": "missing"}}), self.ctx)
+            self.wait_done()
+            self.assertEqual(self.backend.images, [])
+            question = self.backend.texts[-1][1]
+            self.plugin.on_message(self.message("那张背景不用了，只用档案里现有的照片就好",
+                data={"quote": {"ref_type": "1", "fromusr": self.members.account, "text": question}}), self.ctx)
+            self.wait_done()
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(photo)])
+
+    def test_local_portraits_ignore_incidental_recent_picture(self):
+        photo = self.portrait(self.knowledge.entity(ROOM, "小栗", pinned=True))
+        self.reference_fixture("unrelated")
+        with patch.object(self.ctx._llm, "complete_json", return_value={
+                "绘图指令": "只画小栗", "群聊参考图数": 0, "档案照片": ["小栗"]}) as planner:
+            self.plugin.on_message(self.message("/生图 只用现有档案照画小栗"), self.ctx)
+            self.wait_done()
+        self.assertEqual(json.loads(planner.call_args.args[1])["任务"]["近期候选参考图"], ["I1"])
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(photo)])
+
+    def test_unavailable_source_selection_never_draws_an_unreferenced_archive_group(self):
+        self.portrait(self.knowledge.entity(ROOM, "小栗", pinned=True))
+        with patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError()):
+            self.plugin.on_message(self.message("/生图 用照片档案库里的人物做一张合照"), self.ctx)
+            self.wait_done()
+        self.assertEqual(self.server.calls, [])
+        self.assertTrue(any("未提交" in reply for _, reply in self.backend.texts))
+
     def test_mention_in_caption_does_not_attach_photo_and_missing_quote_stays_missing(self):
         person = self.knowledge.entity(ROOM, "小枫", pinned=True)
         self.portrait(person)
@@ -620,6 +696,9 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertFalse(question)
         self.assertEqual(len(result.references), 16)
         result, question = portraits.apply(plan, names)
+        self.assertIsNone(result)
+        self.assertIn("16", question)
+        result, question = portraits.apply(plan, "全部")
         self.assertIsNone(result)
         self.assertIn("16", question)
 

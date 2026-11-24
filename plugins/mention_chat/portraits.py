@@ -62,14 +62,19 @@ class RoomPortraits:
 
     def apply(self, plan, names):
         selected = {}
-        for label in names:
-            try:
-                ids = self._names.get(name_key(label), ())
-            except MemberError:
-                ids = ()
-            if len(ids) != 1:
-                return None, "这个称呼没有唯一可用的档案照。要用哪位的照片？也可以直接引用一张。"
-            selected.setdefault(next(iter(ids)), label)
+        if names == "全部":
+            if not self.people:
+                return None, "本群档案库里还没有可用的人物照片。能发来要入镜的人的照片吗？"
+            selected = {pid: person["name"] for pid, person in self.people.items()}
+        else:
+            for label in names:
+                try:
+                    ids = self._names.get(name_key(label), ())
+                except MemberError:
+                    ids = ()
+                if len(ids) != 1:
+                    return None, "这个称呼没有唯一可用的档案照。要用哪位的照片？也可以直接引用一张。"
+                selected.setdefault(next(iter(ids)), label)
         if len(plan.references) + len(selected) > MAX_REFERENCES:
             return None, f"这次参考图超过 {MAX_REFERENCES} 张了，要保留哪些人物或原图？"
         if not selected:

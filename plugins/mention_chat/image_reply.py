@@ -15,17 +15,16 @@ from wxbot_framework.conversation.turns import PHOTO_TOPIC, turn_key
 from wxbot_framework.integrations.jev import JevError
 from wxbot_framework.integrations.llm import LLMConnectionError, LLMContentBlocked, LLMFormatError
 from wxbot_framework.integrations.magpie_images import MagpieImageRejectedError, MagpieImages, REQUEST_SECONDS
-from wxbot_framework.integrations.magpie_tools import MagpieToolsError
+from wxbot_framework.integrations.magpie_tools import MagpieToolsError, MagpieToolsUnavailableError
 from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget
 from wxbot_framework.messaging.mentions import strip_at_labels
 from wxbot_framework.recent_images import ImageRecord, RECENT_IMAGES, READY
 from .image_intent import FORMAT_SECONDS, choose_format
-from .image_plan import ImageProfiles, fallback_image, image_sources, prepare_image, select_image_sources
+from .image_plan import CHAT_PHOTO_SOURCE, ImageProfiles, fallback_image, image_sources, prepare_image, select_image_sources
 
 TASK_SECONDS = 300
 PLAN_SECONDS = 75
 SOURCE_SECONDS = 15
-FORMAT_QUESTION = "你想把刚才那段内容画成图，还是写成文字？回我「图片」或「文字」就行。"
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / ".runtime" / "generated_images"
 PAIR_HINT = re.compile(r"(?:这|那|上面|前面|刚(?:刚|才)?发)(?:的)?[两二2]\s*[张幅]|"
                        r"(?:参考|用|结合|合并|融合|把|将)\s*[两二2]\s*[张幅](?:(?:参考)?[图照]|都)")
@@ -53,6 +52,7 @@ class ImageJob:
     task_id: str = ""
     stage: str = "queued"
     failure: str = ""
+    question_text: str = ""
     revisions: tuple = ()
     previous_prompt: str = ""
     source_id: int = 0
@@ -204,10 +204,10 @@ class ImageReply:
             pending = self._format_questions.get(key)
         if pending is None or message.is_self:
             return None
-        original, prompt, guard, asked_at = pending
+        original, prompt, guard, asked_at, asked_text = pending
         quote = message.data.get("quote") or {}
         if quote and (ctx.members.account not in (quote.get("fromusr"), quote.get("chatusr"))
-                      or strip_at_labels(quote.get("text") or "") != FORMAT_QUESTION):
+                      or strip_at_labels(quote.get("text") or "") != asked_text):
             return None
         if not source and (message.data.get("at_members") or message.text.lstrip().startswith("@")):
             return None
@@ -233,6 +233,29 @@ class ImageReply:
                         ctx.members.message_id(original), mode)
         return replace(message, data=data), prompt, mode
 
+    def archive_followup(self, message, ctx, text, *, cold=None):
+        if not re.fullmatch(r"(?:(?:用|就用|都用)?(?:库里|档案库里|照片库里)(?:的|面的)?(?:照片|档案照)?"
+                            r"|都用上|用.{1,32}的档案照)[啊呀吧。！!]*", text.strip()):
+            return False
+        key = turn_key(message)
+        with self._lock:
+            job = self._jobs.get(key)
+            if not job or not (PHOTO_TOPIC.search(job.prompt) or re.search("众人|群友|全员", job.prompt) or "档案照" in job.failure):
+                return False
+            if job.stage in ("submitting", "waiting", "sending") and job.plan and "人物外貌参考：" in job.plan.instruction and "都用上" not in text:
+                return True
+            if job.stage not in ("queued", "reference", "planning", "needs_input"):
+                return False
+            if job.stage == "needs_input" and time.monotonic() >= job.clarification_until:
+                return False
+        try:
+            with job.guard():
+                pass
+        except SnapshotExpired:
+            return False
+        self.request(message, ctx, job.prompt, cold=cold, prior=job, supplement=text)
+        return True
+
     def followup(self, message, ctx, text, *, addressed=False, can_revise=False, cold=None):
         if message.is_self or not text or len(text) > 2000:
             return False
@@ -250,7 +273,7 @@ class ImageReply:
             return False
         if job.stage == "needs_input":
             author_is_bot = ctx.members.account in (quote.get("fromusr"), quote.get("chatusr"))
-            answered = author_is_bot and strip_at_labels(quote.get("text") or "").strip() == job.failure
+            answered = bool(job.question_text and author_is_bot and strip_at_labels(quote.get("text") or "").strip() == job.question_text)
             supplied_image = addressed and len(job.references) < max(1, job.required_references) and quote.get("ref_type") == "3"
             if time.monotonic() >= job.clarification_until or not (answered or supplied_image):
                 return False
@@ -309,9 +332,11 @@ class ImageReply:
                     else:
                         with budget.delivery():
                             yield
-            if ctx.reply_at(message, FORMAT_QUESTION, delivery_guard=ask_guard):
+            text = self._status.compose(message, ctx, {"待确认": "用一句问句请对方从图片、文字两种形式里选一种，带上两个选项"},
+                                        personality=personality, guard=guard, choices=("图", "文字"))
+            if text and ctx.reply_at(message, text, delivery_guard=ask_guard):
                 with self._lock:
-                    self._format_questions[member] = (message, prompt, guard, time.monotonic())
+                    self._format_questions[member] = (message, prompt, guard, time.monotonic(), text)
                     if len(self._format_questions) > 64:
                         self._format_questions.popitem(last=False)
             return
@@ -388,12 +413,8 @@ class ImageReply:
             ctx.logger.info("生图未入队：消息=%s 原因=%s", snapshot.anchor_id, busy)
             inform({"未受理原因": busy})
             return
-        available = "可以从本群档案库选人物照片"
-        if "group.image.receive" in ctx.capabilities:
-            available += "，也可以使用群聊图片"
-        self._notify(job, message, ctx, {"本次请求": "已受理，前面还有生图任务" if queued else "收到绘图要求，尚未提交生成",
-                                         "可用操作": available},
-                     stages=("queued",) if queued else ("queued", "reference", "planning"))
+        if queued:
+            self._notify(job, message, ctx, {"本次请求": "已受理，前面还有生图任务"}, stages=("queued",))
         ctx.logger.info("生图入队：消息=%s 原消息=%s task=%s mode=%s", snapshot.anchor_id, job.source_id, job.filename, mode)
         self._queue.put(job)
 
@@ -435,7 +456,9 @@ class ImageReply:
                     job.failure = "生图服务出错，未取到图片"
                 job.stage = ("delivery_unknown" if job.stage == "sending" else
                              "expired" if isinstance(error, TimeoutError) else "failed")
-                self._notify(job, job.message, job.ctx, {"结果": job.failure}, stages=(job.stage,))
+                unavailable = (TimeoutError, LLMConnectionError, MagpieToolsUnavailableError)
+                if not isinstance(error, unavailable) and not isinstance(error.__cause__, unavailable):
+                    self._notify(job, job.message, job.ctx, {"结果": job.failure}, stages=(job.stage,))
             finally:
                 self._finish(job)
 
@@ -486,7 +509,8 @@ class ImageReply:
                         names, clarification = profiles.portraits.fallback_names(request)
                         if not job.quoted_image and job.required_references < 2:
                             if names:
-                                selection = {"档案照片": names, "群聊参考图数": 0}
+                                count = max(job.required_references, int(bool(CHAT_PHOTO_SOURCE.search(request))))
+                                selection = {"档案照片": names, "群聊参考图数": count}
                             elif clarification:
                                 selection = {"澄清问题": clarification}
                             elif photo_topic and (profiles.portraits.people or re.search(r"档案|库|相册", request)):
@@ -498,9 +522,13 @@ class ImageReply:
                 pass
             if question:
                 job.stage = "needs_input"
-                job.failure = question + "\n引用这条消息回复，我会接着画。"
+                job.failure = question
                 job.clarification_until = time.monotonic() + TASK_SECONDS
-                job.ctx.reply_at(job.message, job.failure, delivery_guard=job.guard)
+                text = self._status.compose(job.message, job.ctx, {"待确认": question},
+                                            personality=job.personality, guard=job.guard)
+                if text:
+                    job.question_text = text
+                    job.ctx.reply_at(job.message, text, delivery_guard=job.guard)
                 return
             job.ctx.logger.info("生图要求已整理：task=%s references=%d", job.filename, len(job.plan.references))
         job.stage = "submitting"

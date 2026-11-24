@@ -22,7 +22,7 @@ from wxbot_framework.conversation.status_replies import StatusReplies
 from wxbot_framework.integrations.jev import JevError
 from wxbot_framework.integrations.llm import LLMClient, LLMContentBlocked, LLMError
 from wxbot_framework.integrations.magpie_images import MagpieImages
-from wxbot_framework.integrations.magpie_tools import MagpieTools, MagpieToolsToolError
+from wxbot_framework.integrations.magpie_tools import MagpieTools, MagpieToolsToolError, MagpieToolsUnavailableError
 from wxbot_framework.memory.knowledge import KnowledgeStore
 from wxbot_framework.recent_images import RECENT_IMAGES
 from wxbot_framework.sdk import Message, PluginContext, ServiceFacade
@@ -99,6 +99,8 @@ class Backend:
 
 class Jev:
     def noul(self, state, questions, **options):
+        if "当前群的别称" in state:
+            raise JevError("本机用例默认测试语义服务离线时的选材")
         text = state.get("当前艾特正文")
         if text:
             values = [0.01, 0.01] if text in ("画不出来？", "图呢？", "画好了吗？") else [0.99, 0.01]
@@ -254,6 +256,14 @@ class ImageGenerationTests(unittest.TestCase):
                 self.assertEqual(self.backend.images, [])
                 self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)
 
+    def test_image_service_connection_timeout_is_silent(self):
+        with patch.object(self.plugin.image_reply._client, "submit",
+                          side_effect=MagpieToolsUnavailableError("连接失败或超时")):
+            self.plugin.on_message(self.message(), self.ctx)
+            self.wait_done()
+        self.assertEqual(self.backend.texts, [])
+        self.assertEqual(self.backend.images, [])
+
     def test_command_delivers_image_and_suppresses_delayed_duplicate(self):
         self.server.release.clear()
         self.plugin.on_message(self.message(), self.ctx)
@@ -396,6 +406,7 @@ class ImageGenerationTests(unittest.TestCase):
         mention = {"is_at_self": True, "at_members": ["wxid_robot"], "quote": {"ref_type": "3", "svrid": "source-picture"}}
         original = self.message("@机器人\u2005生成这个故事", data=mention)
         with (patch.object(self.ctx._jev, "noul", side_effect=JevError("timeout")),
+              patch.object(self.ctx._llm, "complete_text", return_value="这个故事想看图片，还是想读文字？"),
               patch.object(self.ctx._llm, "complete_json", return_value={"动作": "clarify"})):
             self.plugin.on_message(original, self.ctx)
         question = strip_at_labels(self.backend.texts[-1][1])
@@ -414,6 +425,7 @@ class ImageGenerationTests(unittest.TestCase):
     def test_answer_text_to_format_question_uses_chat_with_original_prompt(self):
         original = self.message("@机器人\u2005生成这段冒险", data={"is_at_self": True, "at_members": ["wxid_robot"]})
         with (patch.object(self.ctx._jev, "noul", return_value=[0.27, 0.05]),
+              patch.object(self.ctx._llm, "complete_text", return_value="这段冒险要写成文字，还是画成图？"),
               patch.object(self.ctx._llm, "complete_json", return_value={"动作": "clarify"})):
             self.plugin.on_message(original, self.ctx)
         reply = self.message("我想要文字版")
@@ -429,6 +441,7 @@ class ImageGenerationTests(unittest.TestCase):
     def test_likely_image_asks_instead_of_chat_when_second_opinion_times_out(self):
         mention = {"is_at_self": True, "at_members": ["wxid_robot"]}
         with (patch.object(self.ctx._jev, "noul", return_value=[0.60, 0.05]),
+              patch.object(self.ctx._llm, "complete_text", return_value="四格想要图片还是文字？"),
               patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError)):
             self.plugin.on_message(self.message("@机器人\u2005做个四格漫画", data=mention), self.ctx)
         self.assertIn("图片", self.backend.texts[-1][1])
@@ -599,13 +612,64 @@ class ImageGenerationTests(unittest.TestCase):
         self.reference_fixture("unrelated")
         self.ctx.capabilities -= {"group.image.receive"}
         with (patch.object(self.ctx._jev, "noul", return_value=[0.99, 0.99]),
-              patch.object(self.ctx._llm, "complete_json", return_value={
-                  "绘图指令": "把库中人物画在一起", "档案照片": "全部", "群聊参考图数": 0})):
+              patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError)):
             self.plugin.on_message(self.message("@机器人\u2005用你照片档案库里面有的所有人物的照片生成一个大合照",
                 data={"is_at_self": True, "at_members": ["wxid_robot"]}), self.ctx)
             self.wait_done()
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
         self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], list(map(str, paths)))
+
+    def test_room_cast_uses_all_available_people_when_planning_times_out(self):
+        group = self.knowledge.group_entity(ROOM)
+        self.knowledge.change_identity(ROOM, group["id"], LOCAL_EDITOR, alias="星河社")
+        paths = [self.portrait(self.knowledge.entity(ROOM, name, pinned=True)) for name in ("小枫", "小栗", "机器人本人")]
+        with patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError):
+            self.plugin.on_message(self.message("/生图 小枫参加相亲节目，星河社众人为她爆灯"), self.ctx)
+            self.wait_done()
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], list(map(str, paths)))
+        self.assertFalse(any("引用" in line for _, line in self.backend.texts))
+
+    def test_collective_paraphrase_reloads_new_portraits_without_restart(self):
+        first = self.portrait(self.knowledge.entity(ROOM, "小枫", pinned=True))
+        second = self.knowledge.entity(ROOM, "小栗", pinned=True)
+        question = "把能找着脸的都请上台，给小枫挨个亮灯"
+        with (patch.object(self.ctx._jev, "noul", return_value=[0.97]) as judge,
+              patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError)):
+            self.plugin.on_message(self.message("/生图 " + question), self.ctx)
+            self.wait_done()
+            self.assertEqual(judge.call_args.args[0]["绘图要求"], question)
+            new_photo = self.portrait(second)
+            self.plugin.on_message(self.message("/生图 " + question), self.ctx)
+            self.wait_done()
+        submissions = [c["arguments"]["reference_images"] for c in self.server.calls if c["name"] == "generate_image"]
+        self.assertEqual(submissions, [[str(first)], [str(first), str(new_photo)]])
+
+    def test_inventory_answers_in_models_own_words_using_current_room_photos(self):
+        self.portrait(self.knowledge.entity(ROOM, "张姐", pinned=True))
+        self.knowledge.entity(ROOM, "没有照片的成员", pinned=True)
+        for question, wording in (("你照片档案库都存了那些照片", "我手头有张姐的。"),
+                                  ("你存了群里那些人的照片", "张姐，就她一位。")):
+            with (patch.object(self.ctx._llm, "complete_text", return_value=wording) as writer,
+                  patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError)):
+                self.plugin.on_message(self.message("@机器人\u2005" + question, data={
+                    "is_at_self": True, "at_members": ["wxid_robot"]}), self.ctx)
+                self.wait_done()
+            self.assertIn("本群可用人物档案照", writer.call_args.args[1])
+            self.assertEqual(strip_at_labels(self.backend.texts[-1][1]).strip(), wording)
+        self.assertFalse(self.server.calls)
+
+    def test_short_archive_answer_only_resumes_same_senders_pending_question(self):
+        path = self.portrait(self.knowledge.entity(ROOM, "张姐", pinned=True))
+        with patch.object(self.ctx._llm, "complete_json", side_effect=[
+                {"澄清问题": "要用张姐的档案照还是其他图片？"},
+                {"绘图指令": "画张姐", "档案照片": ["张姐"], "群聊参考图数": 0}]):
+            self.plugin.on_message(self.message("/生图 画张姐"), self.ctx)
+            self.wait_done()
+            self.plugin.on_message(self.message("库里", sender="wxid_other"), self.ctx)
+            self.assertFalse(self.server.calls)
+            self.plugin.on_message(self.message("库里"), self.ctx)
+            self.wait_done()
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(path)])
 
     def test_source_recovery_reconsiders_original_requirement_after_reply(self):
         paths = [self.portrait(self.knowledge.entity(ROOM, name, pinned=True)) for name in ("小枫", "小栗")]
@@ -662,13 +726,13 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(json.loads(planner.call_args.args[1])["任务"]["近期候选参考图"], ["I1"])
         self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(photo)])
 
-    def test_unavailable_source_selection_never_draws_an_unreferenced_archive_group(self):
-        self.portrait(self.knowledge.entity(ROOM, "小栗", pinned=True))
+    def test_unavailable_source_selection_draws_the_archive_group_from_local_photos(self):
+        path = self.portrait(self.knowledge.entity(ROOM, "小栗", pinned=True))
         with patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError()):
             self.plugin.on_message(self.message("/生图 用照片档案库里的人物做一张合照"), self.ctx)
             self.wait_done()
-        self.assertEqual(self.server.calls, [])
-        self.assertTrue(any("未提交" in reply for _, reply in self.backend.texts))
+        self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(path)])
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
 
     def test_mention_in_caption_does_not_attach_photo_and_missing_quote_stays_missing(self):
         person = self.knowledge.entity(ROOM, "小枫", pinned=True)
@@ -686,7 +750,7 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertIn("原图", self.backend.texts[-1][1])
 
     def test_portrait_limit_counts_chat_references_and_repeated_aliases(self):
-        people = [{"id": i, "name": f"群友{i}", "aliases": []} for i in range(1, 17)]
+        people = [{"id": i, "name": f"群友{i}", "aliases": []} for i in range(1, 26)]
         for p in people:
             self.portrait(p)
         portraits = RoomPortraits(ROOM, people, self.magpie.max_image_bytes)
@@ -695,12 +759,12 @@ class ImageGenerationTests(unittest.TestCase):
         result, question = portraits.apply(plan, [*names[:15], names[0]])
         self.assertFalse(question)
         self.assertEqual(len(result.references), 16)
-        result, question = portraits.apply(plan, names)
-        self.assertIsNone(result)
-        self.assertIn("16", question)
-        result, question = portraits.apply(plan, "全部")
-        self.assertIsNone(result)
-        self.assertIn("16", question)
+        for chosen in (names, "全部"):
+            result, question = portraits.apply(plan, chosen, request="群友23和众人合照")
+            self.assertFalse(question)
+            self.assertEqual(result.references[0], "场景.png")
+            self.assertEqual(len(set(result.references)), 16)
+            self.assertIn("群友23", result.instruction)
 
     def test_named_profile_and_poster_copy_reach_image_model(self):
         self.profile_fixture()

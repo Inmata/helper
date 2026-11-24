@@ -71,7 +71,7 @@ class ChatEvidenceTests(unittest.TestCase):
         message = self.fixture.message("走了好几天了")
         with patch("plugins.mention_chat.material_needs", return_value=(True, False)):
             self._reply(message, message.text)
-        self.assertIn("还没查到能确认", self.fixture.backend.texts[-1][1])
+        self.assertEqual(self.fixture.backend.texts, [])
 
     def test_nonempty_old_search_results_do_not_confirm_current_status(self):
         self.plugin.tools = read_tool_options({})
@@ -96,8 +96,7 @@ class ChatEvidenceTests(unittest.TestCase):
         with (patch("plugins.mention_chat.material_needs", return_value=(True, False)),
               patch.object(MentionTools, "search", return_value=ToolResult("search", True, "2021 年的旧任职简介"))):
             self._reply(message, message.text)
-        self.assertIn("还没核实清楚", self.fixture.backend.texts[-1][1])
-        self.assertFalse(any("仍在原岗位" in text for _, text in self.fixture.backend.texts))
+        self.assertEqual(self.fixture.backend.texts, [])
 
     def test_chat_answer_can_search_older_firsthand_dialogue(self):
         self.fixture.members.register("阿青", ROOM, "wxid_qing")

@@ -623,7 +623,10 @@ class MentionDeliveryTests(unittest.TestCase):
                 ctx.jev.noul.side_effect = lambda state, questions, **kw: [0.01 if "当前发言" in state else 0.9] * len(questions)
                 first = replace(mention("火系用火招打草系是两倍吗"), dispatch_sequence=1)
                 turns.observe(first)
-                generate = Mock(side_effect=[old_reply, failure or new_reply])
+                attempts = [old_reply, failure or new_reply]
+                if isinstance(failure, LLMConnectionError):
+                    attempts.append(failure)
+                generate = Mock(side_effect=attempts)
                 ctx.client.complete_text = generate
 
                 def add_before_send(_):
@@ -633,17 +636,26 @@ class MentionDeliveryTests(unittest.TestCase):
                 ctx.before_guard = add_before_send
                 try:
                     plugin.on_message(first, ctx)
-                    self.assertEqual(generate.call_count, 2)
+                    self.assertEqual(generate.call_count, len(attempts))
                     self.assertIn("水系", generate.call_args.args[1])
                     if failure:
-                        self.assertEqual(len(ctx.sent), 1)
-                        self.assertNotIn(old_reply, ctx.sent[0][1])
-                        self.assertNotIn("重试", ctx.sent[0][1])
+                        self.assertEqual(ctx.sent, [])
                     else:
                         self.assertEqual(ctx.sent, [("reply_at", new_reply)])
                     status.submit.assert_not_called()
                 finally:
                     plugin._wait.close()
+
+    def test_transient_chat_timeout_retries_and_only_sends_the_answer(self):
+        plugin, ctx = self.build("好呀。")
+        status = Mock()
+        plugin._wait = ReplyWait(status)
+        self.addCleanup(plugin._wait.close)
+        ctx.client.complete_text = Mock(side_effect=[LLMConnectionError("读取超时"), "八点集合。"])
+        plugin.on_message(mention("几点集合？"), ctx)
+        self.assertEqual(ctx.client.complete_text.call_count, 2)
+        self.assertEqual(ctx.sent, [("reply_at", "八点集合。")])
+        status.submit.assert_not_called()
 
     def test_singing_offer_is_text_and_only_consent_starts_reading(self):
         turns = self.members.turns = ConversationTurns()

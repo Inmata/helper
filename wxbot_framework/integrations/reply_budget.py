@@ -28,7 +28,6 @@ class ReplyBudget:
         self.deadline = arrived + seconds
         self.prepare_until = self.deadline - 70
         self.answer_until = self.deadline - 10
-        self.notice_at = arrived + 30
         self.calls = {}
         self.llm_limit = 3
         self.source_id = 0
@@ -37,7 +36,6 @@ class ReplyBudget:
         self.sending = False
         self.attempted = False
         self.sent = False
-        self.progress = False
         self.revision = 0
         self.reviewing_additions = False
         self.ready = None

@@ -267,6 +267,13 @@ class KnowledgeStore(KnowledgeAdminMixin):
                 raise MemberError("未找到唯一人物")
             return matches[0]
 
+    def group_aliases(self, room):
+        with self.lock:
+            self._room(room)
+            row = self.connection().execute("SELECT aliases FROM knowledge_entities WHERE account=? AND room=? AND entity_key=?",
+                                            (self.account, room, GROUP_KEY)).fetchone()
+            return parse_aliases(row[0]) if row else []
+
     def profile_candidates(self, room):
         """仅提供本群现有活动人物，供只读昵称消歧。"""
         with self.lock:

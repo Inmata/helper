@@ -109,7 +109,7 @@ class ReplyImprovements(unittest.TestCase):
         self.assertTrue(voice.update_preference(message, ctx, '这条用语音说', jev))
         self.assertTrue(voice.text_only(message, ctx.room_state))
 
-    def test_deadline_closes_old_worker_and_emits_only_one_status(self):
+    def test_deadline_closes_worker_without_sending_process_updates(self):
         message = self.message('查询资料', sequence=1)
         self.store.record(message)
         ctx = Mock()
@@ -128,10 +128,10 @@ class ReplyImprovements(unittest.TestCase):
             budget = wait.accept(message, ctx, 90)
             budget.stage = "看图"
             budget.deadline = time.monotonic() - 1
-            self.assertTrue(sent.wait(2))
+            self.assertFalse(sent.wait(0.8))
+            self.assertTrue(budget.closed)
             wait.finish(budget, '重复结果')
-            self.assertEqual(ctx.reply_at.call_count, 1)
-            self.assertEqual(ctx.reply_at.call_args.args[1], "我等那张图的识别结果等太久了，没来得及回你。")
+            ctx.reply_at.assert_not_called()
             ctx.llm_for.assert_not_called()
             ctx.jev.noul.assert_not_called()
             with self.assertRaises(ReplyExpired), budget.delivery():
@@ -301,6 +301,16 @@ class ReplyImprovements(unittest.TestCase):
 
 
 class ReplyBudgetTests(unittest.TestCase):
+    def test_retry_uses_only_the_time_left_in_the_original_turn(self):
+        now = [68]
+        budget = ReplyBudget(0, clock=lambda: now[0])
+        with budget.work("写回复", budget.deadline):
+            self.assertEqual(budget.remaining(60, kind="llm", until=budget.deadline), 22)
+        now[0] = 89
+        with budget.delivery():
+            budget.submitted()
+        self.assertTrue(budget.sent)
+
     def test_deadline_draft_checks_pending_additions_and_revision(self):
         budget = ReplyBudget(time.monotonic())
         pending = threading.Event()

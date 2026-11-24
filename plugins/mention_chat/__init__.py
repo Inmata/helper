@@ -13,10 +13,10 @@ from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .image_intent import FORMAT_SECONDS
 from .image_plan import ImageProfiles
 from .image_reply import ImageReply
-from .portraits import MAX_REFERENCES
+from .portraits import MAX_REFERENCES, asks_portrait_list
 from wxbot_framework.conversation.slow_replies import SlowReplies
 from wxbot_framework.conversation.person_context import person_context
-from wxbot_framework.conversation.reply_wait import ReplyWait, timeout_reason
+from wxbot_framework.conversation.reply_wait import ReplyWait
 from wxbot_framework.conversation.status_replies import StatusReplies
 from wxbot_framework.integrations.reply_budget import CURRENT, ReplyDraft, ReplyExpired
 from .voice_reply import (COMMAND as VOICE_COMMAND, READ_COMMAND as VOICE_READ_COMMAND,
@@ -453,11 +453,17 @@ class Plugin:
             clean_query = original + "\n请写成文字。"
             source = "format"
         image_target = not message.is_self and source in ("structural", "typed")
-        image_intent = self.image_reply.intent(message, ctx, clean_query) if image_target else None
-        if image_target and image_intent is None and self.image_reply.status(message, ctx, clean_query):
+        inventory = asks_portrait_list(clean_query)
+        if ((image_target or not source and not addressed_elsewhere(message)) and not inventory
+                and self.image_reply.archive_followup(message, ctx, clean_query, cold=self.cold)):
+            if turns is not None:
+                turns.claim(message)
+            return
+        image_intent = self.image_reply.intent(message, ctx, clean_query) if image_target and not inventory else None
+        if image_target and not inventory and image_intent is None and self.image_reply.status(message, ctx, clean_query):
             return
         can_revise = image_intent is not None and image_intent.mode in ("create", "edit")
-        if not answer and self.image_reply.followup(message, ctx, clean_query, addressed=image_target,
+        if not answer and not inventory and self.image_reply.followup(message, ctx, clean_query, addressed=image_target,
                                                     can_revise=can_revise, cold=self.cold):
             if turns is not None:
                 turns.claim(message)
@@ -468,7 +474,7 @@ class Plugin:
             self.image_reply.request(message, ctx, clean_query, mode=image_intent.mode,
                                      previous_prompt=image_intent.previous_prompt, cold=self.cold)
             return
-        if (not answer and self._wait is not None and (source or not addressed_elsewhere(message)) and
+        if (not answer and not inventory and self._wait is not None and (source or not addressed_elsewhere(message)) and
                 self._wait.followup(message, ctx, clean_query, addressed=source is not None)):
             if turns is not None:
                 turns.claim(message)
@@ -600,7 +606,6 @@ class Plugin:
         active_budget = CURRENT.get()
         revision = active_budget.revision if active_budget is not None else None
         prepare_until = active_budget.prepare_until if active_budget is not None else None
-        answer_until = active_budget.answer_until if active_budget is not None else None
 
         def work(stage, until):
             return active_budget.work(stage, until) if active_budget is not None else nullcontext()
@@ -645,7 +650,8 @@ class Plugin:
             except ValueError:
                 judge = None
             with work("理解问题", prepare_until):
-                intents = turn_intents(judge, clean_query, quote=quote_hint, previous=previous)
+                inventory = asks_portrait_list(clean_query)
+                intents = {"photo_inventory"} if inventory else turn_intents(judge, clean_query, quote=quote_hint, previous=previous)
             if "correction" in intents and quote_is_bot:
                 quote, missing_quote = None, ""
             else:
@@ -656,10 +662,13 @@ class Plugin:
             voice_action = ""
             self_facts = {}
             if "photo_inventory" in intents:
+                portraits = ImageProfiles(ctx, snapshot, "").portraits
+                self_facts["本群可用人物档案照"] = [p["name"] for p in portraits.people.values()]
+                self_facts["档案照人数"] = len(portraits.people)
+                if inventory:
+                    self_facts["本次动作"] = "按实际名单逐个说出名字，用自己的话简短回答；历史对话里猜的数量与名单无关。"
                 if "group.image.send" in ctx.capabilities:
-                    portraits = ImageProfiles(ctx, snapshot, "").portraits
-                    self_facts["本群可用人物档案照"] = [p["name"] for p in portraits.people.values()]
-                    self_facts["本群生图能力"] = f"可按名单选人或给全员画合照，每人取一张，参考图合计最多{MAX_REFERENCES}张。"
+                    self_facts["本群生图能力"] = f"本群可按名单选人画合照，每人一张；参考图最多{MAX_REFERENCES}张，优先点名人物，余位随机抽取。"
                 else:
                     self_facts["本群生图能力"] = "当前微信连接无法发图。"
             if offer_reading or read_accepted or "correction" in intents or (previous and previous.voice_action and not clean_query):
@@ -769,7 +778,7 @@ class Plugin:
             fresh = False
             quoted_image = raw_quote.get("ref_type") in ("3", "47")
             learned = False
-            facts = corrections.list(snapshot.room) if corrections is not None and not (offer_reading or read_accepted) else []
+            facts = corrections.list(snapshot.room) if corrections is not None and not (offer_reading or read_accepted or inventory) else []
             chain = ()
             quoted_text = ""
             recent = [{"消息编号": row["id"], "发言人": row.get("speaker_name"), "内容": row["text"][:300]}
@@ -803,7 +812,7 @@ class Plugin:
             except ValueError:
                 planning_model = None
             if (callable(getattr(planning_model, "complete_json", None))
-                    and not (offer_reading or read_accepted or missing_quote or quoted_image) and can_prepare()):
+                    and not (offer_reading or read_accepted or missing_quote or quoted_image or inventory) and can_prepare()):
                 target_quote = quote or quote_hint
                 if "correction" in intents and (quote_is_bot or (not target_quote and originals)):
                     target_quote = {"已核对的聊天原话": originals} if originals else None
@@ -868,18 +877,13 @@ class Plugin:
                 if fresh and not (investigation and investigation.public):
                     if matches.answers and not matches.refresh:
                         yield from respond("；".join(row.statement.rstrip("。") for row in matches.answers) + "。", QA)
-                    elif matches.refresh:
-                        when = matches.refresh[0].observed_on
-                        yield from respond(f"这条现状目前只核实到 {when}，最新情况还没查到。", QA)
-                    else:
-                        yield from respond("这条近期消息我还没查到能确认的出处。", QA)
                     return
             if matches.ambiguous:
                 yield from respond(matches.clarification(), QA)
                 return
             if catch_up and not missing_quote and not self_facts and investigation is None and not matches.facts:
                 rows = snapshot.group_messages
-                with work("写回复", answer_until):
+                with work("写回复", active_budget.deadline if active_budget else None):
                     reply = Dialogue(ctx.llm_for(message, personality=personality, for_reply=True),
                                      display_timezone=ctx.display_timezone).catch_up(rows, clean_query, quote=quote)
                 self._ensure_running()
@@ -905,7 +909,7 @@ class Plugin:
             if self.voice_reply.text_only(message, self.room_state):
                 options["turn_context"] = ("本人持续文字偏好已保存。" +
                     ("管理员固定语音仍生效，须说明该冲突，不能承诺本轮只发文字。" if fixed_voice else "后续默认文字回复。"))
-            if offer_reading or read_accepted:
+            if offer_reading or read_accepted or inventory:
                 outcome = ToolOutcome()
             elif fresh and investigation is not None:
                 outcome = ToolOutcome(results=[ToolResult("search", True, text=item["内容"])
@@ -923,7 +927,7 @@ class Plugin:
             material = []
             if can_prepare():
                 with work("查群聊资料", prepare_until):
-                    if investigation is None and not quoted_image and "correction" not in intents and not matches.answers:
+                    if investigation is None and not (quoted_image or inventory) and "correction" not in intents and not matches.answers:
                         material = person_context(self.members, ctx.knowledge, reviewer, message.chat_id, clean_query,
                                                   history=snapshot.history, before_id=self.members.message_id(message),
                                                   quote=quote, sender_id=message.sender_id)
@@ -966,20 +970,12 @@ class Plugin:
                                    for use, rows in (("直接答案", matches.answers), ("承接前提", matches.premises))
                                    for fact in rows]
 
-            correction_reply = ""
-            if "correction" in intents and originals and not fresh:
-                matched = [rows[0] for rows in (self_facts["群友原话"], own_lines) if rows]
-                correction_reply = "我翻到的原话是，" + "。".join(
-                    f"{'你' if row['本人'] else '我' if row['发言人'] == '机器人' else row['发言人']}说过「{row['原话'][:140]}」"
-                    for row in matched) + "。"
-                remember_draft(correction_reply)
-
             def generate(*, guidance="", revision=None):
                 self._ensure_running()
                 prompt_options = options if not guidance else {
                     **options, "system": options.get("system", SYSTEM) + "\n" + guidance,
                 }
-                with work("写回复", answer_until):
+                with work("写回复", active_budget.deadline if active_budget else None):
                     text = personality_text(Dialogue(ctx.llm_for(message, personality=personality, for_reply=True)).reply(
                         snapshot, knowledge=context.knowledge, style=context.style,
                         speaker_profile=context.speaker_profile, people=context.people, person_messages=context.person_messages,
@@ -992,7 +988,14 @@ class Plugin:
                     raise LLMFormatError("大模型对话结果格式不正确")
                 return text, preference
 
-            reply, voice_preference = generate()
+            try:
+                reply, voice_preference = generate()
+            except LLMConnectionError:
+                if active_budget is None:
+                    raise
+                if before_send is not None:
+                    before_send()
+                reply, voice_preference = generate()
             self._ensure_running()
             review_facts = self_facts
             if not review_facts and VOICE_ACTION_WORDS.search(reply):
@@ -1023,13 +1026,16 @@ class Plugin:
                             evidence["本轮日期"] = self.members.now().date().isoformat()
                         decision = review_reply(judge if review_facts or verified else reviewer, clean_query, reply, evidence)
                         accepted = decision.status != REJECTED
+                        if inventory:
+                            accepted = accepted and all(name.casefold() in reply.casefold()
+                                for name in self_facts["本群可用人物档案照"])
                         contradicts = (decision.correction or 0) >= 0.7
                         ctx.logger.info("回复依据核对：status=%s local=%s public=%s own=%s correction=%s ids=%s error=%s",
                                         decision.status, decision.local, decision.public, decision.own,
                                         decision.correction, list(verified), decision.error)
                 if accepted:
                     break
-                if attempt == 0 and (active_budget is None or active_budget.clock() + 8 < answer_until):
+                if attempt == 0 and (active_budget is None or active_budget.clock() + 8 < active_budget.answer_until):
                     try:
                         reply, voice_preference = generate(revision=reply, guidance=(
                             "按已有资料答当前问题，删掉没有依据的细节。纠错时区分群友和机器人各自说过的话，"
@@ -1040,16 +1046,12 @@ class Plugin:
                         raise
                     except (LLMError, ReplyExpired):
                         pass
+                if inventory:
+                    return
                 if contradicts and matches.answers:
                     reply = "；".join(row.statement.rstrip("。") for row in matches.answers) + "。"
-                elif correction_reply:
-                    reply = correction_reply
-                elif fresh or checked_search or verified:
-                    reply = "这条消息我还没核实清楚，先不下结论。"
-                elif group_attribution or "correction" in intents:
-                    reply = "我刚才没对上这句是谁说的，现有记录里还没找到。"
                 else:
-                    reply = VOICE_CAPABILITY
+                    return
                 voice_preference = False
                 break
             # 用了工具的回复按问答单条发出；带网址的消息容易触发微信风控，模型照抄了网址也在这里去掉。
@@ -1073,12 +1075,12 @@ class Plugin:
             active_budget = CURRENT.get()
             if self._wait is not None and active_budget is not None:
                 if isinstance(error, LLMConnectionError):
-                    reason = timeout_reason(active_budget.stage)
+                    reason = f"模型连接失败或超时；最后阶段为{active_budget.stage}"
                 elif isinstance(error, LLMFormatError):
-                    reason = "刚才模型回过来的内容里，我没能读出一段正文。"
+                    reason = "模型返回内容缺少可用正文"
                 else:
-                    reason = "刚才写回复的时候模型接口报错了，我没收到能发的文字。"
-                self._wait.finish(active_budget, reason)
+                    reason = "模型接口出错，未收到可发送的正文"
+                self._wait.finish(active_budget, reason, quiet=True)
         finally:
             # 已发出至少一条（含守卫或异常发生在首条之后）就保留去重记录，避免排队中的同一提问重发。
             self._release(key, delivered=bool(result.sent))

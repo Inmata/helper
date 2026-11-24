@@ -2,6 +2,7 @@
 import json
 import sys
 import threading
+import time
 import unittest
 from datetime import timedelta
 from unittest.mock import Mock, patch
@@ -886,24 +887,16 @@ class FixedPersonalityTests(unittest.TestCase):
         self.assertEqual(history[1]["content"], "[机器人发言] 机器人说过乙")
 
     def test_invalid_model_reply_preserves_context(self):
-        status = "刚才模型回过来的内容里，我没能读出一段正文。"
         provider = Mock(return_value="")
         plugin = self.setup_chat(provider)
         self.ctx._jev = Mock()
         self.ctx._jev.noul.return_value = [0.98, 0.01]
-        delivered = threading.Event()
-        send = self.backend.send_at_text
-
-        def send_at_text(room, text, ids):
-            result = send(room, text, ids)
-            delivered.set()
-            return result
-
-        self.backend.send_at_text = send_at_text
         plugin.on_message(self.chat(), self.ctx)
-        self.assertTrue(delivered.wait(2))
-        self.assertEqual(len(self.backend.sent), 1)
-        self.assertTrue(self.backend.sent[0][1].endswith(status))
+        deadline = time.monotonic() + 2
+        while plugin.has_pending_callbacks() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(plugin.has_pending_callbacks())
+        self.assertEqual(self.backend.sent, [])
         provider.assert_called_once()
         self.assertFalse(any("实际状态" in call.args[0] for call in self.ctx._jev.noul.call_args_list))
         self.assertTrue(self.store.history("测试成员", ROOM))

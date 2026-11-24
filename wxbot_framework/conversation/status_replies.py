@@ -16,6 +16,7 @@ SYSTEM = """用一句简短中文接群友眼前这句话，像群聊里随口�
 实际状态是唯一事实来源。对方原话只是聊天内容，提问里的暗示不能当真。有明确结果先交代结果；
 已经失败或被拦截就准确说出，不否认、不说还在处理。原因未知就说不知道，不自行判断群友是否违规。
 回复失败原因时直接说卡在哪里，省去自嘲、道歉和提示用户说重试。
+状态只列事实，不是让你照读的台词。若列出了待确认的问题，只用自己的话向群友问清这一件事。
 别回答尚在处理的问题，别复述或要求重提被拦截的请求，别复述画图描述。
 刚收到绘图要求、还在选素材时，只说收到或正在准备。按列出的能力回复，不猜档案库里有没有某张照片。
 有语音就说清在准备语音。问多久而时间未知，就直说还不知道。别拿催促打趣，别编动作或夸张比喻。
@@ -39,45 +40,56 @@ class StatusReplies:
     def __init__(self, logger):
         self.queue = SlowReplies(logger, capacity=16, name="MentionChat.status")
 
-    def submit(self, message, ctx, facts, *, personality, guard, question=None, at=True):
+    def compose(self, message, ctx, facts, *, personality, guard, question=None, choices=()):
         budget = ReplyBudget(time.monotonic(), STATUS_SECONDS)
         payload = json.dumps({"群友原话": message.text if question is None else question,
                               "实际状态": facts}, ensure_ascii=False)
+        try:
+            model = ctx.llm_for(message, personality=personality, for_reply=True)
+            for prompt in (SYSTEM, SYSTEM + "\n按实际状态重新用自己的话表达。"):
+                with guard():
+                    if self.queue.stopped.is_set():
+                        return ""
+                token = CURRENT.set(budget)
+                try:
+                    text = " ".join(strip_links(model.complete_text(prompt, payload, max_tokens=128)).split())
+                    if 0 < len(text) <= 120:
+                        if choices:
+                            if (text.endswith(("？", "?")) and all(option in text for option in choices)
+                                    and budget.clock() < budget.deadline):
+                                return text
+                            continue
+                        grounded, invented_action = ctx.jev.noul(
+                            {"实际状态": facts, "语音能力": VOICE_CAPABILITY, "拟发送回复": text},
+                            [STATUS_GROUNDED, STATUS_ACTION], timeout=2)
+                        if grounded >= 0.7 and invented_action < 0.7 and budget.clock() < budget.deadline:
+                            return text
+                finally:
+                    CURRENT.reset(token)
+        except SnapshotExpired:
+            pass
+        except (LLMError, TimeoutError, RuntimeError, ValueError) as error:
+            ctx.logger.info("状态回复未提交：%s", type(error).__name__)
+        return ""
 
+    def submit(self, message, ctx, facts, *, personality, guard, question=None, at=True):
+        deadline = time.monotonic() + STATUS_SECONDS
         @contextmanager
         def delivery_guard():
             with guard():
-                if self.queue.stopped.is_set() or budget.clock() >= budget.deadline:
+                if self.queue.stopped.is_set() or time.monotonic() >= deadline:
                     raise SnapshotExpired("状态回复已失效")
                 yield
 
         def run():
             yield
-            try:
-                model = ctx.llm_for(message, personality=personality, for_reply=True)
-                for prompt in (SYSTEM, SYSTEM + "\n上次状态表达偏离实际情况。只交代程序确认的结果。"):
-                    with delivery_guard():
-                        pass
-                    token = CURRENT.set(budget)
-                    try:
-                        text = " ".join(strip_links(model.complete_text(prompt, payload, max_tokens=128)).split())
-                        if 0 < len(text) <= 120:
-                            grounded, invented_action = ctx.jev.noul(
-                                {"实际状态": facts, "语音能力": VOICE_CAPABILITY, "拟发送回复": text},
-                                [STATUS_GROUNDED, STATUS_ACTION], timeout=2)
-                            if grounded >= 0.7 and invented_action < 0.7:
-                                break
-                    finally:
-                        CURRENT.reset(token)
-                else:
-                    ctx.logger.info("状态回复未提交：候选未通过事实核对")
-                    return
+            text = self.compose(message, ctx, facts, personality=personality, guard=delivery_guard, question=question)
+            if text:
                 send = ctx.reply_at if at else ctx.reply
-                send(message, text, delivery_guard=delivery_guard)
-            except SnapshotExpired:
-                pass
-            except (LLMError, TimeoutError, RuntimeError, ValueError) as error:
-                ctx.logger.info("状态回复未提交：%s", type(error).__name__)
+                try:
+                    send(message, text, delivery_guard=delivery_guard)
+                except (SnapshotExpired, RuntimeError):
+                    ctx.logger.info("状态回复已失效")
 
         self.queue.handoff(object(), run())
 

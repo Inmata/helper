@@ -106,7 +106,7 @@ class OrdinaryReplyTests(unittest.TestCase):
         jev = ReviewJev([[0.98, 0.01, 0.01]] * 3)
         plugin, ctx = self.build("小红刚才回了俩问号。", jev=jev)
         plugin.on_message(mention("谁刚才急眼了"), ctx)
-        self.assertEqual(ctx.sent, [("reply_at", "我刚才没对上这句是谁说的，现有记录里还没找到。")])
+        self.assertEqual(ctx.sent, [])
         self.assertEqual(ctx.completions, 2)
 
     def test_greeting_does_not_depend_on_review(self):

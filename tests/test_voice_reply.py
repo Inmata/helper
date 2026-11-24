@@ -15,6 +15,7 @@ from plugins.mention_chat import Plugin
 from wxbot_framework.conversation.slow_replies import SlowReplies
 from plugins.mention_chat.voice_reply import VoiceReply, voice_parts
 from wxbot_framework.integrations import voice_local
+from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget
 from wxbot_framework.messaging.message import Message, VoiceSubmission
 
 
@@ -30,6 +31,12 @@ for line in sys.stdin.buffer:
     if sys.argv[2] == 'hang':
         time.sleep(10)
     audio = b'' if sys.argv[2] == 'long' else b'audio'
+    if sys.argv[2] == 'echo':
+        if b'first' in line:
+            time.sleep(0.3)
+        if b'slow' in line:
+            time.sleep(5.5)
+        audio = line.rstrip().split(b'\\t', 1)[1]
     wire.write(struct.pack('<I', len(audio)) + audio)
     wire.flush()
 """
@@ -147,6 +154,57 @@ class VoiceTests(unittest.TestCase):
                 recovered.synthesize.assert_called_once_with('星瞳', '再试。')
                 failed.close.assert_called_once()
                 reply.close()
+
+    def test_automatic_voice_can_finish_after_five_seconds_with_time_left_in_turn(self):
+        reply = VoiceReply()
+        reply._voices = ('星瞳',)
+        local = reply._local = self.worker(mode='echo')
+        local.wait_ready()
+        ctx = self.context()
+        token = CURRENT.set(ReplyBudget(time.monotonic(), seconds=20))
+        try:
+            sent = reply.send(Message('', '123@chatroom'), ctx, 'slow', voice='星瞳',
+                              guard=nullcontext, automatic=True)
+        finally:
+            CURRENT.reset(token)
+        self.assertTrue(sent)
+        self.assertEqual(ctx.reply_voice.call_args.args[1], b'slow')
+
+    def test_automatic_timeout_keeps_worker_and_discards_only_the_late_audio(self):
+        reply = VoiceReply()
+        reply._voices = ('星瞳',)
+        local = reply._local = self.worker(mode='echo')
+        local.wait_ready()
+        ctx = self.context()
+        message = Message('', '123@chatroom')
+        token = CURRENT.set(ReplyBudget(time.monotonic(), seconds=2.1))
+        try:
+            self.assertIsNone(reply.send(message, ctx, 'first', voice='星瞳', guard=nullcontext, automatic=True))
+        finally:
+            CURRENT.reset(token)
+        ctx.reply_voice.assert_not_called()
+        self.assertIsNone(local._process.poll())
+        self.assertTrue(reply.send(message, ctx, 'second', voice='星瞳', guard=nullcontext, automatic=True))
+        self.assertEqual(ctx.reply_voice.call_args.args[1], b'second')
+
+    def test_automatic_request_starts_replacement_and_keeps_warming_after_short_turn(self):
+        reply = VoiceReply()
+        reply._voices = ('星瞳',)
+        ctx = self.context()
+        message = Message('', '123@chatroom')
+        replacement = self.worker(delay=0.5)
+        with patch('plugins.mention_chat.voice_reply.LocalVoice', return_value=replacement) as create:
+            self.assertIsNone(reply.send(message, ctx, '启动', voice='星瞳', guard=nullcontext, automatic=True))
+            create.assert_called_once_with('星瞳')
+            token = CURRENT.set(ReplyBudget(time.monotonic(), seconds=0.05))
+            try:
+                self.assertIsNone(reply.send(message, ctx, '明示语音', voice='星瞳', guard=nullcontext))
+            finally:
+                CURRENT.reset(token)
+            ctx.reply_voice.assert_not_called()
+            replacement.wait_ready()
+            self.assertTrue(reply.send(message, ctx, '已就绪', voice='星瞳', guard=nullcontext, automatic=True))
+            create.assert_called_once()
 
     def test_shutdown_cancels_warmup_without_restarting_worker(self):
         plugin = Plugin()

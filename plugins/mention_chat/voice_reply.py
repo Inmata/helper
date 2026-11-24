@@ -10,7 +10,7 @@ from wxbot_framework.conversation.members import MemberError
 from wxbot_framework.integrations.voice_synth import synthesize_voice
 from wxbot_framework.integrations.voice_local import LocalVoice
 from wxbot_framework.integrations.jev import JevError
-from wxbot_framework.integrations.reply_budget import CURRENT
+from wxbot_framework.integrations.reply_budget import CURRENT, ReplyExpired
 
 COMMAND = "/音色"
 READ_COMMAND = "/语音"
@@ -250,7 +250,7 @@ class VoiceReply:
         now = monotonic()
         budget = CURRENT.get()
         if automatic and budget is not None:
-            with budget.work("合成语音", min(budget.deadline - 2, budget.clock() + 5)):
+            with budget.work("合成语音", budget.deadline - 2):
                 wav, voice = self._synthesize(ctx, reply, voice, automatic=True)
         else:
             wav, voice = self._synthesize(ctx, reply, voice, automatic=automatic)
@@ -269,13 +269,18 @@ class VoiceReply:
             if self._stopped:
                 return None, voice
             if self._voices:
-                if voice not in self._voices or (automatic and (self._local is None or not self._local.ready)):
+                if voice not in self._voices:
                     return None, voice
                 try:
                     if self._local is None:
                         ctx.logger.info("本地音色进程重新启动：%s", voice)
                         self._local = LocalVoice(voice)
+                    if automatic and self._local.warming_up:
+                        return None, voice
                     wav = self._local.synthesize(voice, reply)
+                except ReplyExpired as error:
+                    ctx.logger.info("%s语音改发文字：%s", voice, error)
+                    return None, voice
                 except (OSError, ValueError) as error:
                     ctx.logger.warning("%s语音合成失败，改发文字：%s（%s）", voice, type(error).__name__, error)
                     self._close_local()

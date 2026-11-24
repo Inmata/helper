@@ -245,7 +245,7 @@ class FixedPersonalityTests(unittest.TestCase):
         self.backend.send_voice = Mock(side_effect=lambda *args: VoiceSubmission(
             f"voice-{self.backend.send_voice.call_count}"))
         plugin.voice_reply._voices = ("星瞳",)
-        plugin.voice_reply._local = Mock()
+        plugin.voice_reply._local = Mock(warming_up=False)
         plugin.voice_reply._local.synthesize.return_value = b"audio"
         return plugin, provider
 

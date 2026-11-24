@@ -6,10 +6,12 @@ import struct
 import subprocess
 import sys
 from threading import Event, Lock, Thread
+from time import monotonic
 
 _LENGTH = struct.Struct("<I")
 _READY = b"READY\n"
 _WARMUP_TIMEOUT = 180
+_SYNTHESIS_TIMEOUT = 50
 _RUNTIME = Path(__file__).resolve().parents[2] / ".runtime/voice-xuanshen"
 _SPEAKERS = {"阿梓": "Azusa", "炫神": "XuanShen", "星瞳": "XingTong", "七海": "Nana7mi",
              "东雪莲": "Azuma", "永雏塔菲": "Taffy", "电棍": "otto", "孙笑川": "sun",
@@ -23,6 +25,8 @@ class LocalVoice:
         self._responses = Queue()
         self._ready = Event()
         self._initialized = False
+        self._started = monotonic()
+        self._response_deadline = None
         self._process = subprocess.Popen(
             [str(_PYTHON), "-u", "-X", "utf8", __file__, voice],
             cwd=_RUNTIME, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -56,10 +60,18 @@ class LocalVoice:
     def ready(self):
         return self._ready.is_set() and self._initialized
 
+    @property
+    def warming_up(self):
+        return not self._ready.is_set() and monotonic() - self._started < _WARMUP_TIMEOUT
+
     def wait_ready(self):
         """等待启动预热完成；这段等待不占单句合成的 50 秒预算。"""
-        from .reply_budget import remaining
-        if not self._ready.wait(timeout=remaining(_WARMUP_TIMEOUT)):
+        from .reply_budget import remaining, ReplyExpired
+        warmup_left = max(0, self._started + _WARMUP_TIMEOUT - monotonic())
+        wait = remaining(warmup_left)
+        if not self._ready.wait(timeout=wait):
+            if wait < warmup_left:
+                raise ReplyExpired("本轮等候预热的时间已用完")
             self.close()
             raise TimeoutError("本地音色预热超时")
         if not self._initialized:
@@ -68,17 +80,29 @@ class LocalVoice:
     def synthesize(self, voice, text):
         with self._lock:
             self.wait_ready()
-            try:
-                self._process.stdin.write(f"{voice}\t{text}\n".encode("utf-8"))
-                self._process.stdin.flush()
-                from .reply_budget import remaining
-                audio = self._responses.get(timeout=remaining(50))
-            except Empty:
-                self.close()
-                raise TimeoutError("本地语音合成超时") from None
-            if audio is None:
-                raise OSError("本地语音合成没有返回音频")
-            return audio or None
+            if self._response_deadline is not None:
+                # 上轮已改发文字。管道按顺序返回，先取走上句的音频，才能交给它新句子。
+                self._receive()
+            self._process.stdin.write(f"{voice}\t{text}\n".encode("utf-8"))
+            self._process.stdin.flush()
+            self._response_deadline = monotonic() + _SYNTHESIS_TIMEOUT
+            return self._receive()
+
+    def _receive(self):
+        from .reply_budget import remaining, ReplyExpired
+        synthesis_left = max(0, self._response_deadline - monotonic())
+        wait = remaining(synthesis_left)
+        try:
+            audio = self._responses.get(timeout=wait)
+        except Empty:
+            if wait < synthesis_left:
+                raise ReplyExpired("本轮等候语音的时间已用完") from None
+            self.close()
+            raise TimeoutError("本地语音合成超时") from None
+        self._response_deadline = None
+        if audio is None:
+            raise OSError("本地语音合成没有返回音频")
+        return audio or None
 
     def close(self):
         if self._process.poll() is None:

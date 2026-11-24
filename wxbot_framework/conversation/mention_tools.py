@@ -255,10 +255,11 @@ class MentionTools:
     """一次艾特提问的工具调用；``magpie`` 是延迟取得 MagpieTools 的可调用对象（取不到时抛异常）。"""
 
     def __init__(self, *, router, magpie, images, image_supported, logger, clock=time.monotonic,
-                 budget=BUDGET_SECONDS, stopped=None):
+                 budget=BUDGET_SECONDS, stopped=None, members=None):
         self.router = router
         self.magpie = magpie
         self.images = images
+        self.members = members
         self.image_supported = image_supported
         self.logger = logger
         self.clock = clock
@@ -324,7 +325,7 @@ class MentionTools:
         own_candidates = False
         if quoted_image:
             image = self.images.quoted(room, svrid=quote.get("svrid") or "", md5=quote.get("image_md5") or "",
-                                       wx_type=wx_type)
+                                       wx_type=wx_type, members=self.members)
         else:
             candidates = (image_choices if all_images else ()) or self.images.recent(
                 room, sender, before=received_at, within=IMAGE_WINDOW_SECONDS, wx_type=wx_type)

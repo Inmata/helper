@@ -97,6 +97,23 @@ class ReplyImprovements(unittest.TestCase):
         self.assertEqual(index.quoted(daily.ROOM, svrid='900').path, last.path)
         self.assertIsNotNone(index.quoted(daily.ROOM, md5=digests[-16]))
 
+    def test_reopened_received_quotes_keep_48_per_room_and_prefer_the_message_id(self):
+        photo = self.root / "received.png"
+        photo.write_bytes(b"saved group picture")
+        for i in range(49):
+            self.store.record(self.message("", type=3, sequence=i+1, data={
+                "image_status": "ready", "image_path": str(photo), "native_message_id": str(100 + i),
+                "image_metadata": {"md5": f"{i:032x}"}}))
+        index = RecentImages()
+        reopened = self.new_store()
+        for i in range(1, 49):
+            self.assertEqual(index.quoted(daily.ROOM, svrid=str(100 + i), members=reopened).path, str(photo))
+        self.assertIsNone(index.quoted(daily.ROOM, svrid="100", members=reopened))
+        self.assertIsNone(index.quoted(daily.OTHER_ROOM, svrid="101", members=reopened))
+        self.assertIsNone(index.quoted(daily.ROOM, svrid="101", members=self.new_store(account=daily.OTHER)))
+        self.assertEqual(index.quoted(daily.ROOM, svrid="101", md5=f"{48:032x}", members=reopened).native_message_id, "101")
+        self.assertEqual(index.recent(daily.ROOM, daily.CAT, before=time.monotonic(), within=120), ())
+
     def test_text_preference_persists_and_single_turn_voice_does_not_clear_it(self):
         voice = VoiceReply()
         ctx = Mock(members=self.store, room_state=self.store.room_state)

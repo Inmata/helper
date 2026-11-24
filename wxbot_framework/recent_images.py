@@ -155,19 +155,30 @@ class RecentImages:
                     members.record_sent_image(room, record.path, record.md5, source_id)
                     break
 
-    def quoted(self, room, *, svrid="", md5="", wx_type=3):
+    def quoted(self, room, *, svrid="", md5="", wx_type=3, members=None):
         """按引用里的原消息编号找图，找不到再按 md5 找本群最近一张。"""
         records = self._records(room, wx_type, include_sent=True)
+        found = None
         if svrid:
             for record in reversed(records):
                 if record.native_message_id == svrid:
-                    return record
-        if md5:
+                    found = record
+                    break
+        if md5 and found is None:
             md5 = md5.lower()
             for record in reversed(records):
                 if record.md5 == md5:
-                    return record
-        return None
+                    found = record
+                    break
+        if found and found.status == READY and (not svrid or found.native_message_id == svrid):
+            return found
+        if members is not None and wx_type == 3 and (svrid or md5):
+            row = members.received_image(room, svrid, md5.lower())
+            if row:
+                # 恢复的旧图只供这次明确引用使用，不占用实时索引或成为“刚发的图”。
+                return ImageRecord(room, row["sender"], "stored:" + row["event_key"], READY, 0,
+                                   native_message_id=row["native_id"], md5=row["md5"], path=row["path"])
+        return found
 
     def recent(self, room, sender, *, before, within, from_others=False, wx_type=3):
         """提问前 ``within`` 秒内、还没被看过的图（按到达顺序）：默认是这个人自己发的，``from_others`` 时是别人发的。"""

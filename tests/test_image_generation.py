@@ -629,6 +629,46 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], list(map(str, paths)))
         self.assertFalse(any("引用" in line for _, line in self.backend.texts))
 
+    def test_group_photo_quote_survives_a_new_receiver_session(self):
+        path = self.root / "received-photo.png"
+        path.write_bytes(PNG)
+        digest = "6dce77456887535dcaa70d4099510ac5"
+        native_id = "3319852670549363958"
+        data = {"room_wxid": ROOM, "chat_id": ROOM, "sender_id": "wxid_other", "wx_type": 3,
+                "native_message_id": native_id, "image_metadata": {"md5": digest},
+                "image_status": "ready", "image_path": str(path), "sequence": 3}
+        self.members.record(Message.from_native(11046, data, "old-session"))
+        RECENT_IMAGES.clear()
+        for quote in ({"svrid": native_id}, {"image_md5": digest}):
+            self.plugin.on_message(self.message("/生图 用这张图画成水彩", data={
+                "quote": {"ref_type": "3", "chatusr": "wxid_other", **quote}}), self.ctx)
+            self.wait_done()
+            self.assertEqual(self.backend.images[-1:], [(ROOM, PNG)])
+        self.assertEqual([c["arguments"]["reference_images"] for c in self.server.calls if c["name"] == "generate_image"],
+                         [[str(path)], [str(path)]])
+
+    def test_repeated_command_with_first_explicit_quote_supplies_the_running_plan(self):
+        path, _ = self.reference_fixture("original-picture", sender="wxid_other")
+        started, release = threading.Event(), threading.Event()
+        prompt = "/生图 把这张脸画成水彩"
+        def plan(system, user, **options):
+            if not started.is_set():
+                started.set()
+                release.wait(4)
+            return {"绘图指令": "水彩肖像", "群聊参考图数": 1}
+        with patch.object(self.ctx._llm, "complete_json", side_effect=plan):
+            self.plugin.on_message(self.message(prompt), self.ctx)
+            self.assertTrue(started.wait(3))
+            try:
+                self.plugin.on_message(self.message(prompt, data={
+                    "quote": {"ref_type": "3", "svrid": "original-picture"}}), self.ctx)
+            finally:
+                release.set()
+            self.wait_done()
+        self.assertEqual([c["arguments"]["reference_images"] for c in self.server.calls if c["name"] == "generate_image"],
+                         [[str(path)]])
+        self.assertFalse(any("未受理" in text for _, text in self.backend.texts))
+
     def test_collective_paraphrase_reloads_new_portraits_without_restart(self):
         first = self.portrait(self.knowledge.entity(ROOM, "小枫", pinned=True))
         second = self.knowledge.entity(ROOM, "小栗", pinned=True)

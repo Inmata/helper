@@ -232,7 +232,8 @@ class Plugin:
             jev = None
         return MentionTools(router=JevToolRouter(jev, **self.tools), magpie=lambda: ctx.magpie,
                             images=RECENT_IMAGES, image_supported=IMAGE_CAPABILITY in getattr(ctx, "capabilities", ()),
-                            logger=ctx.logger, stopped=self._slow.stopped if self._slow is not None else None)
+                            logger=ctx.logger, stopped=self._slow.stopped if self._slow is not None else None,
+                            members=self.members)
 
     def _run_tools(self, message, ctx, question, snapshot=None, *, resolved_quote=None, follow=False,
                    group_context=None, stop_at=None):

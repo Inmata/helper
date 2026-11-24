@@ -102,7 +102,7 @@ flowchart TD
 - 图片和群表情保存目录由 `image_directory` 配置（默认 `.runtime/images`），原生服务按账号隔离后交给 `ImageStore`。表情的下载适配位于 `sticker_download.py`，复用图片接收队列。原始 XML、CDN 地址与密钥只存在于解析和下载请求内部，不进入插件消息。
 - 原生加载只接受已知客户端版本和核心文件指纹。账号、联系人和原生调用按同一构建选择地址；4.2.0.12 / 4.2.0.13 使用本项目配套的 `native_text` 桥接。
 - 图片能力只按已编译桥接的实际导出声明：同时存在 V4 媒体队列与 `WxDownloadImage` 时才把 `image.receive` 等加入后端能力；旧 V3/V2 DLL 不声明，依赖图片能力的插件不会加载。`mention_chat` 不把图片能力写进 `requires`，按运行时能力决定能否看图，旧 DLL 下仍可联网搜索。
-- 最近图片索引 `recent_images.RECENT_IMAGES` 是进程内单例：原生服务写、艾特回复读，按群有界、服务启动时清空；已发送产物经共享数据库 `sent_images` 恢复明确引用。
+- 原生服务将最近图片写入进程内索引 `recent_images.RECENT_IMAGES`。服务启动时清空实时索引。共享数据库的 `received_images` 保留每群最近 48 张已接收群友图片的本地关联，`sent_images` 保存机器人已发图；看图和生图都可据此恢复明确引用。
 - `MemberStore` 持有会话轮次 `turns` 和主动发言预算 `speak_budget`，事件驱动与定时发言共用预算。群人格、音色及固定语音设置经 `RoomStateStore` 持久化；清空上下文、人格切换与连接变化分别使对应的待发回复失效。
 - 面向群友的模型生成显式使用 `PersonalityLLM(for_reply=True)`：人格模块持有角色表达与历史资料组织；对话、主动发言等模块持有事实和功能约束。搜索词、成语判定、记忆提取等内部任务沿用默认入口。俏皮人格将旧机器人发言作为资料理解，熟人损友保留原 API 历史结构。
 - 语音识别在原生服务的单 worker 执行器中运行，完整音频在内存中转写，再进入普通消息链路；合并转发只记录为资料，通过 `dispatch_to_plugins=False` 停在落库之后。详见 [messages](../messages/spec.md)。

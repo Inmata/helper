@@ -13,6 +13,11 @@ BASE_SCHEMA = """
         account TEXT NOT NULL, room TEXT NOT NULL, md5 TEXT NOT NULL, path TEXT NOT NULL,
         created_at TEXT NOT NULL, source_id INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(account,room,md5));
+    CREATE TABLE IF NOT EXISTS received_images (
+        id INTEGER PRIMARY KEY, account TEXT NOT NULL, room TEXT NOT NULL, sender TEXT NOT NULL,
+        event_key TEXT NOT NULL, native_id TEXT NOT NULL, md5 TEXT NOT NULL, path TEXT NOT NULL,
+        UNIQUE(account,room,event_key));
+    CREATE INDEX IF NOT EXISTS received_images_by_room ON received_images(account,room,id);
     CREATE TABLE IF NOT EXISTS people (
         account TEXT NOT NULL, room TEXT NOT NULL, person_key TEXT NOT NULL,
         name TEXT NOT NULL, display_name TEXT NOT NULL, wxid TEXT,

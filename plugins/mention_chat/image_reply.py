@@ -271,6 +271,13 @@ class ImageReply:
                 pass
         except SnapshotExpired:
             return False
+        quote_added = (quote.get("ref_type") == "3" and text == job.prompt and not job.quoted_image
+                       and job.stage in ("queued", "reference", "planning", "needs_input"))
+        if quote_added:
+            if job.stage == "needs_input" and time.monotonic() >= job.clarification_until:
+                return False
+            self.request(message, ctx, job.prompt, cold=cold, prior=job)
+            return True
         if job.stage == "needs_input":
             author_is_bot = ctx.members.account in (quote.get("fromusr"), quote.get("chatusr"))
             answered = bool(job.question_text and author_is_bot and strip_at_labels(quote.get("text") or "").strip() == job.question_text)
@@ -369,15 +376,17 @@ class ImageReply:
             if quoted:
                 RECENT_IMAGES.restore_sent(ctx.members, message.chat_id, quote=quote, source_id=ctx.members.message_id(message))
                 primary = RECENT_IMAGES.quoted(message.chat_id, svrid=quote.get("svrid") or "",
-                                               md5=quote.get("image_md5") or "")
+                                               md5=quote.get("image_md5") or "", members=ctx.members)
                 missing_reference = primary is None
                 references = (primary,) if primary else ()
                 if primary and required_references == 2:
                     references += tuple(record for record in candidates if record.key != primary.key)[-1:]
             else:
                 references = candidates[-2:]
-        revisions = (*prior.revisions, supplement) if prior else ()
-        key = (*member, prompt.strip(), tuple(record.key for record in references), revisions)
+        revisions = prior.revisions if prior else ()
+        if supplement:
+            revisions = (*revisions, supplement)
+        key = (*member, prompt.strip(), quoted, tuple(record.key for record in references), revisions)
 
         with self._lock:
             previous = self._pending.get(key)
@@ -385,13 +394,15 @@ class ImageReply:
                 return
             if prior is not None and self._jobs.get(member) is not prior:
                 return
+            if prior is not None and not supplement and prior.stage not in ("queued", "reference", "planning", "needs_input"):
+                return
             if member in self._members and prior is None:
                 busy = "同一人已有图片任务在处理，新任务未受理"
             elif member not in self._members and len(self._members) >= 3:
                 busy = "生图队列满，新任务未受理"
             else:
                 busy = ""
-                queued = bool(self._members)
+                queued = bool(self._members - {member})
                 self._members.add(member)
                 self._pending[key] = None
                 self._pending.move_to_end(key)

@@ -314,6 +314,10 @@ class MemberStore:
         return self.transcript.reference_chain(snapshot, native_id, text)
 
     def record(self, message):
+        if message.is_image:
+            if message.is_group and not message.is_self and message.image_status == "ready" and message.image_path:
+                self.record_received_image(message)
+            return False
         # 落库与计入预算在同一把聊天记录锁内完成：发送守卫持有这把锁，
         # 守卫内发出的消息与随后到达的群友消息，在预算里的先后顺序与落库一致。
         with self.database.lock:
@@ -354,6 +358,31 @@ class MemberStore:
                 ON CONFLICT(account,room,md5) DO UPDATE SET path=excluded.path,
                 created_at=excluded.created_at,source_id=excluded.source_id""",
                 (self.account, room, md5, str(path), self.now().isoformat(), source_id or 0))
+
+    def record_received_image(self, message):
+        from ..recent_images import GROUP_IMAGES_PER_ROOM
+        native_id = str(message.data.get("native_message_id") or "")
+        if native_id == "0":
+            native_id = ""
+        md5 = ((message.data.get("image_metadata") or {}).get("md5") or "").lower()
+        if not (native_id or md5):
+            return
+        with self.transaction() as db:
+            db.execute("""INSERT INTO received_images(account,room,sender,event_key,native_id,md5,path)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT(account,room,event_key) DO UPDATE SET
+                md5=excluded.md5,path=excluded.path""", (self.account, message.chat_id, message.sender_id,
+                native_id or message.image_path, native_id, md5, message.image_path))
+            db.execute("""DELETE FROM received_images WHERE account=? AND room=? AND id<=(
+                SELECT id FROM received_images WHERE account=? AND room=? ORDER BY id DESC LIMIT 1 OFFSET ?)""",
+                (self.account, message.chat_id, self.account, message.chat_id, GROUP_IMAGES_PER_ROOM))
+
+    def received_image(self, room, native_id, md5):
+        with self.database.lock:
+            rows = self.connection().execute("""SELECT * FROM received_images WHERE account=? AND room=? AND
+                ((native_id<>'' AND native_id=?) OR (md5<>'' AND md5=?))
+                ORDER BY (native_id<>'' AND native_id=?) DESC,id DESC""",
+                (self.account, room, native_id, md5, native_id))
+            return next((dict(row) for row in rows if Path(row["path"]).is_file()), None)
 
     def sent_images(self, room):
         with self.database.lock:

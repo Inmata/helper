@@ -257,12 +257,69 @@ class ImageGenerationTests(unittest.TestCase):
                 self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)
 
     def test_image_service_connection_timeout_is_silent(self):
-        with patch.object(self.plugin.image_reply._client, "submit",
-                          side_effect=MagpieToolsUnavailableError("连接失败或超时")):
+        def timeout(*args, **kwargs):
+            self.wait_for(lambda: bool(self.backend.texts))
+            raise MagpieToolsUnavailableError("连接失败或超时")
+
+        with patch.object(self.plugin.image_reply._client, "submit", side_effect=timeout):
             self.plugin.on_message(self.message(), self.ctx)
             self.wait_done()
-        self.assertEqual(self.backend.texts, [])
+        self.assertEqual(len(self.backend.texts), 1)
+        self.assertIn("生图受理", self.ctx._llm.calls[0]["实际状态"])
         self.assertEqual(self.backend.images, [])
+
+    def test_new_image_request_delivers_one_model_written_receipt(self):
+        for text, wording in (("@机器人\u2005画一只小狗", "行，接下啦。"),
+                              ("/生图 水彩橘猫", "好呀，这张交给我。")):
+            with self.subTest(text=text):
+                self.server.release.clear()
+                self.backend.texts.clear()
+                with patch.object(self.ctx._llm, "complete_text", return_value=wording) as writer:
+                    self.plugin.on_message(self.message(text, data={
+                        "is_at_self": True, "at_members": ["wxid_robot"]}), self.ctx)
+                    try:
+                        self.wait_for(lambda: bool(self.backend.texts))
+                        payload, _ = json.JSONDecoder().raw_decode(writer.call_args.args[1])
+                        self.assertEqual(list(payload["实际状态"]), ["生图受理"])
+                    finally:
+                        self.server.release.set()
+                    self.wait_done()
+                self.assertEqual([strip_at_labels(line).strip() for _, line in self.backend.texts], [wording])
+        self.assertEqual(self.backend.images, [(ROOM, PNG), (ROOM, PNG)])
+
+    def test_receipt_written_after_remote_acceptance_knows_generation_started(self):
+        self.server.release.clear()
+        queue = self.plugin._status.queue
+        handoff = queue.handoff
+        with patch.object(queue, "handoff") as pending:
+            self.plugin.on_message(self.message(), self.ctx)
+            self.assertTrue(self.server.waiting.wait(3))
+            handoff(*pending.call_args.args)
+            self.wait_for(lambda: bool(self.backend.texts))
+        self.assertIn("正在生成", self.ctx._llm.calls[0]["实际状态"]["生图受理"])
+        self.server.release.set()
+        self.wait_done()
+        self.assertEqual(len(self.backend.texts), 1)
+
+    def test_completed_image_drops_a_slow_receipt(self):
+        self.server.release.clear()
+        writing, release = threading.Event(), threading.Event()
+
+        def render(*args, **kwargs):
+            writing.set()
+            release.wait(4)
+            return "收到啦。"
+
+        with patch.object(self.ctx._llm, "complete_text", side_effect=render):
+            self.plugin.on_message(self.message(), self.ctx)
+            try:
+                self.assertTrue(writing.wait(2))
+                self.server.release.set()
+                self.wait_for(lambda: bool(self.backend.images))
+            finally:
+                release.set()
+            self.wait_done()
+        self.assertEqual(self.backend.texts, [])
 
     def test_command_delivers_image_and_suppresses_delayed_duplicate(self):
         self.server.release.clear()
@@ -1070,6 +1127,7 @@ class ImageGenerationTests(unittest.TestCase):
             self.plugin.on_message(self.message(sender=f"wxid_member{n}"), self.ctx)
         self.assertTrue(self.server.submitted.wait(2))
         self.wait_for(lambda: any("队列满" in text for _, text in self.backend.texts))
+        self.wait_for(lambda: sum("前面还有生图任务" in text for _, text in self.backend.texts) == 2)
         self.plugin.image_reply.close()
         self.assertEqual(self.backend.images, [])
         self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)

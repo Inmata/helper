@@ -18,7 +18,8 @@ SYSTEM = """用一句简短中文接群友眼前这句话，像群聊里随口�
 回复失败原因时直接说卡在哪里，省去自嘲、道歉和提示用户说重试。
 状态只列事实，不是让你照读的台词。若列出了待确认的问题，只用自己的话向群友问清这一件事。
 别回答尚在处理的问题，别复述或要求重提被拦截的请求，别复述画图描述。
-刚收到绘图要求、还在选素材时，只说收到或正在准备。按列出的能力回复，不猜档案库里有没有某张照片。
+生图受理时按当前人格自然应一声，不追问素材。刚接下或在选素材时只说收到或准备，确认已开始生成才说在画。
+按列出的能力回复，不猜档案库里有没有某张照片。
 有语音就说清在准备语音。问多久而时间未知，就直说还不知道。别拿催促打趣，别编动作或夸张比喻。
 别念阶段名称，别说后台或流程。不要猜原因、百分比或时间，不附链接或内部报错。""" + "\n" + VOICE_CAPABILITY
 STATUS_GROUNDED = {
@@ -26,7 +27,7 @@ STATUS_GROUNDED = {
     "true": "回复交代了与提问相关的关键结果或阶段，允许自然表达。知道已拦截就明确说拦截；"
             "知道失败、超时、未受理或送达不明就如实说明。原因未知可说不清楚，不能乱猜。",
     "false": "英文提示、否认已发生的拦截、无依据宣称没违规、把失败说成还在处理或已经成功、遗漏关键结果，"
-             "或猜测失败原因、进度、用时及重试结果。只收到绘图请求就声称已经在画、自称没有程序可读取的照片库，也不合格。把说重试当作默认解决办法也不合格。把被拦截的请求重新回答或建议绕过过滤也不合格。",
+             "或猜测失败原因、进度、用时及重试结果。生图受理回话擅自追问素材、只收到绘图请求就声称已经在画、自称没有程序可读取的照片库，也不合格。把说重试当作默认解决办法也不合格。把被拦截的请求重新回答或建议绕过过滤也不合格。",
 }
 STATUS_ACTION = {
     "instructions": "候选是否声称、暗示或承诺一项程序未确认或没有能力执行的实际动作？",
@@ -83,7 +84,8 @@ class StatusReplies:
 
         def run():
             yield
-            text = self.compose(message, ctx, facts, personality=personality, guard=delivery_guard, question=question)
+            current_facts = facts() if callable(facts) else facts
+            text = self.compose(message, ctx, current_facts, personality=personality, guard=delivery_guard, question=question)
             if text:
                 send = ctx.reply_at if at else ctx.reply
                 try:

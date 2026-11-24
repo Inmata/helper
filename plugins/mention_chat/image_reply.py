@@ -424,10 +424,16 @@ class ImageReply:
             ctx.logger.info("生图未入队：消息=%s 原因=%s", snapshot.anchor_id, busy)
             inform({"未受理原因": busy})
             return
-        if queued:
-            self._notify(job, message, ctx, {"本次请求": "已受理，前面还有生图任务"}, stages=("queued",))
         ctx.logger.info("生图入队：消息=%s 原消息=%s task=%s mode=%s", snapshot.anchor_id, job.source_id, job.filename, mode)
         self._queue.put(job)
+        if prior is None:
+            if queued:
+                self._notify(job, message, ctx, {"生图受理": "已接单，前面还有生图任务"}, stages=("queued",))
+            else:
+                def receipt():
+                    return {"生图受理": "生图服务已接单，正在生成" if job.stage == "waiting" else "已收到本次绘图要求"}
+
+                self._notify(job, message, ctx, receipt, stages=("queued", "reference", "planning", "submitting", "waiting"))
 
     def _finish(self, job):
         with self._lock:

@@ -351,7 +351,7 @@ class Plugin:
             parts = command_text(message.text).split(maxsplit=1)
             args = parts[1] if len(parts) == 2 else ""
             if parts[0] == IMAGE_COMMAND:
-                if not self.image_reply.followup(message, ctx, args, addressed=True, cold=self.cold):
+                if not self.image_reply.followup(message, ctx, args, addressed=True, can_revise=True, cold=self.cold):
                     self.image_reply.request(message, ctx, args, cold=self.cold)
                 return
             if parts[0] == VOICE_COMMAND:
@@ -454,7 +454,9 @@ class Plugin:
         image_intent = self.image_reply.intent(message, ctx, clean_query) if image_target else None
         if image_target and image_intent is None and self.image_reply.status(message, ctx, clean_query):
             return
-        if not answer and self.image_reply.followup(message, ctx, clean_query, addressed=image_target, cold=self.cold):
+        can_revise = image_intent is not None and image_intent.mode in ("create", "edit")
+        if not answer and self.image_reply.followup(message, ctx, clean_query, addressed=image_target,
+                                                    can_revise=can_revise, cold=self.cold):
             if turns is not None:
                 turns.claim(message)
             return

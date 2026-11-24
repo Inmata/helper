@@ -669,6 +669,60 @@ class ImageGenerationTests(unittest.TestCase):
             "SELECT source_id,revision FROM reply_receipts WHERE kind='image' AND status='submitted'").fetchone()
         self.assertEqual(tuple(receipt), (self.members.message_id(original), 1))
 
+    def test_chat_question_during_natural_image_request_keeps_original_generation(self):
+        mention = {"is_at_self": True, "at_members": ["wxid_robot"]}
+        original = self.message("@机器人\u2005生成一张小猫的一天", data=mention)
+        question = "三角眼怎么改正？"
+        self.server.release.clear()
+        self.plugin.on_message(original, self.ctx)
+        self.assertTrue(self.server.waiting.wait(2))
+
+        def judge(state, questions, **options):
+            if "当前艾特正文" in state:
+                return [0.18, 0.01, 0.01]
+            if "当前话语" in state:
+                return [0.01]
+            return [0.99]  # 复现旧版对「改正」的补充误判。
+
+        with (patch.object(self.ctx._jev, "noul", side_effect=judge),
+              patch.object(self.ctx._llm, "complete_json", return_value={"动作": "text"}),
+              patch.object(self.plugin, "_reply_turn", return_value=iter(())) as chat):
+            self.plugin.on_message(self.message("@机器人\u2005" + question, data=mention), self.ctx)
+            self.server.release.set()
+            self.wait_done()
+        chat.assert_called_once()
+        self.assertEqual(chat.call_args.args[2], question)
+        self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        receipt = self.members.connection().execute(
+            "SELECT source_id,revision FROM reply_receipts WHERE kind='image' AND status='submitted'").fetchone()
+        self.assertEqual(tuple(receipt), (self.members.message_id(original), 0))
+
+    def test_only_linked_image_request_can_revise_active_drawing(self):
+        mention = {"is_at_self": True, "at_members": ["wxid_robot"]}
+        original = self.message("@机器人\u2005画只绿底橘猫", data=mention)
+        correction = "刚才那张猫图，背景换成蓝色"
+        self.server.release.clear()
+        self.plugin.on_message(original, self.ctx)
+        self.assertTrue(self.server.waiting.wait(2))
+
+        def judge(state, questions, **options):
+            if "当前艾特正文" in state:
+                return [0.99, 0.85 if state["当前艾特正文"] == correction else 0.01, 0.01]
+            if "正在做的图" in state:
+                return [0.99 if state["当前发言"] == correction else 0.01]
+            return [0.99] * len(questions)
+
+        with (patch.object(self.ctx._jev, "noul", side_effect=judge),
+              patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError)):
+            self.plugin.on_message(self.message("@机器人\u2005另外画张海报", data=mention), self.ctx)
+            self.plugin.on_message(self.message("@机器人\u2005" + correction, data=mention), self.ctx)
+            self.server.release.set()
+            self.wait_done()
+        prompts = [c["arguments"]["prompt"] for c in self.server.calls if c["name"] == "generate_image"]
+        self.assertEqual(prompts, ["水彩绘制一只橘猫，浅色背景", "画只绿底橘猫\n" + correction])
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
     def test_explicit_edit_delivers_first_result_without_review_or_redraw(self):
         reference = self.poster_fixture()
         self.server.image = PNG

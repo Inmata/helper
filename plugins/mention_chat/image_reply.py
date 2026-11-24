@@ -232,7 +232,7 @@ class ImageReply:
                         ctx.members.message_id(original), mode)
         return replace(message, data=data), prompt, mode
 
-    def followup(self, message, ctx, text, *, addressed=False, cold=None):
+    def followup(self, message, ctx, text, *, addressed=False, can_revise=False, cold=None):
         if message.is_self or not text or len(text) > 2000:
             return False
         key = message.session_id, message.chat_id, message.sender_id
@@ -253,12 +253,12 @@ class ImageReply:
             supplied_image = addressed and len(job.references) < max(1, job.required_references) and quote.get("ref_type") == "3"
             if time.monotonic() >= job.clarification_until or not (answered or supplied_image):
                 return False
-        elif addressed and active and job.stage in ("queued", "reference", "planning", "submitting", "waiting"):
+        elif can_revise and active and job.stage in ("queued", "reference", "planning", "submitting", "waiting"):
             if text in (job.prompt, *job.revisions):
                 return False
-            question = {"instructions": "判断当前发言是否明确修改或补充同一个正在做的生图任务。",
-                        "true": "要求改变、追加或删除原任务里的条件。",
-                        "false": "进度询问、闲聊、新的独立画图要求或不确定指哪张图。"}
+            question = {"instructions": "判断当前发言是否明确要求把一项变更用到正在做的这张图上。",
+                        "true": "要求在原图上改变、追加或删除画面条件，例如「刚才那张猫图，背景换成蓝色」。",
+                        "false": "另做一张独立的图、只提到相同人物或题材、问现实里的事情、询问进度或指代不清。"}
             try:
                 changed = _within(lambda: ctx.jev.noul({"正在做的图": job.prompt, "已收到补充": job.revisions,
                                                          "当前发言": text}, [question], timeout=2)[0], 2, self.stopped)

@@ -271,9 +271,18 @@ class KnowledgeStore(KnowledgeAdminMixin):
         """仅提供本群现有活动人物，供只读昵称消歧。"""
         with self.lock:
             self._room(room)
-            return [{"id": entity["id"], "name": entity["name"], "aliases": parse_aliases(entity["aliases"])}
-                    for entity in self._entities(room)
-                    if entity["status"] == "active" and not entity["entity_key"].startswith("group:")]
+            members = {member.wxid: member for member in self.members.list_members(room) if member.wxid}
+            candidates = []
+            for entity in self._entities(room):
+                if entity["status"] != "active" or entity["entity_key"].startswith("group:"):
+                    continue
+                aliases = set(parse_aliases(entity["aliases"]))
+                member = members.get(entity["wxid"])
+                if member:
+                    aliases.update(member.aliases)
+                aliases.discard(name_key(entity["name"]))
+                candidates.append({"id": entity["id"], "name": entity["name"], "aliases": sorted(aliases)})
+            return candidates
 
     def conversation_people(self, room):
         """只供本地检索的已绑定人物；身份字段不进入群回复。"""

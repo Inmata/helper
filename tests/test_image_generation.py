@@ -13,6 +13,8 @@ from PIL import Image
 
 from support.recyclable_tempdir import RecyclableTemporaryDirectory
 from plugins.mention_chat import Plugin
+from plugins.mention_chat.image_plan import ImagePlan
+from plugins.mention_chat.portraits import RoomPortraits
 from wxbot_framework.authorization import LOCAL_EDITOR
 from wxbot_framework.messaging.mentions import strip_at_labels
 from wxbot_framework.conversation.members import MemberStore
@@ -159,6 +161,8 @@ class ImageGenerationTests(unittest.TestCase):
         self.plugin._status = StatusReplies(self.ctx.logger)
         self.output_patch = patch("plugins.mention_chat.image_reply.OUTPUT_DIR", self.root / "output")
         self.output_patch.start()
+        self.portraits = self.root / "群友照片"
+        self.enterContext(patch("plugins.mention_chat.portraits.PORTRAIT_ROOT", self.portraits))
         self.plugin.image_reply.start(self.ctx, self.plugin._status)
         self.sequence = 0
         RECENT_IMAGES.clear()
@@ -542,6 +546,82 @@ class ImageGenerationTests(unittest.TestCase):
         self.wait_done()
         self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(first), str(second)])
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
+    def portrait(self, person, filename="IMG_1234.PNG", room=ROOM):
+        directory = self.portraits / room / f"{person['id']:03d}-{person['name']}"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / filename
+        path.write_bytes(PNG)
+        return path
+
+    def test_natural_request_combines_alias_portraits_with_exact_quote(self):
+        self.members.register("栗子", ROOM, "wxid_chestnut")
+        self.members.register("小栗", ROOM, "wxid_chestnut")
+        self.message("大家好", sender="wxid_chestnut")
+        chestnut = self.knowledge.member_entity(ROOM, "wxid_chestnut")
+        maple = self.knowledge.entity(ROOM, "小枫", aliases=["枫叶"], pinned=True)
+        first = self.portrait(maple)
+        self.portrait(chestnut)
+        preferred = self.portrait(chestnut, "默认.png")
+        quote, _ = self.reference_fixture("scenery")
+        drawing = "保留第一张的海边背景，枫叶在左，栗子在右。"
+        with patch.object(self.ctx._llm, "complete_json", return_value={
+            "绘图指令": drawing, "档案照片": ["枫叶", "小枫", "栗子"]}) as planner:
+            self.plugin.on_message(self.message("@机器人\u2005画枫叶和栗子在这里的合影", data={
+                "is_at_self": True, "at_members": ["wxid_robot"], "quote": {"ref_type": "3", "svrid": "scenery"}
+            }), self.ctx)
+            self.wait_done()
+        people = json.loads(planner.call_args.args[1])["任务"]["可用档案照"]
+        self.assertIn("栗子", next(p["别名"] for p in people if p["人物"] == chestnut["name"]))
+        args = self.server.calls[0]["arguments"]
+        self.assertEqual(args["reference_images"], list(map(str, (quote, first, preferred))))
+        self.assertIn("第2张是小枫 / 枫叶", args["prompt"])
+        self.assertIn("第3张是小栗 / 栗子", args["prompt"])
+        self.assertIn(drawing, args["prompt"])
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
+    def test_photo_only_profile_is_read_on_next_request_and_timeout_keeps_alias(self):
+        person = self.knowledge.entity(ROOM, "小枫", aliases=["枫叶"], pinned=True)
+        self.portrait(person, room="87654321@chatroom")
+        with patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError):
+            self.plugin.on_message(self.message("/生图 画枫叶的头像"), self.ctx)
+            self.wait_done()
+            photo = self.portrait(person)
+            self.plugin.on_message(self.message("/生图 帮我画枫叶的头像"), self.ctx)
+            self.wait_done()
+        calls = [c["arguments"] for c in self.server.calls if c["name"] == "generate_image"]
+        self.assertNotIn("reference_images", calls[0])
+        self.assertEqual(calls[1]["reference_images"], [str(photo)])
+        self.assertIn("小枫 / 枫叶", calls[1]["prompt"])
+
+    def test_mention_in_caption_does_not_attach_photo_and_missing_quote_stays_missing(self):
+        person = self.knowledge.entity(ROOM, "小枫", pinned=True)
+        self.portrait(person)
+        with patch.object(self.ctx._llm, "complete_json", return_value={"绘图指令": "只画猫", "档案照片": []}):
+            self.plugin.on_message(self.message("/生图 画小枫的猫，角落写小枫"), self.ctx)
+            self.wait_done()
+        self.assertNotIn("reference_images", self.server.calls[0]["arguments"])
+        with patch.object(self.ctx._llm, "complete_json", return_value={
+                "绘图指令": "替换原图背景", "档案照片": ["小枫"], "以档案照为原图": True}):
+            self.plugin.on_message(self.message("/生图 把这张小枫的照片换个背景",
+                data={"quote": {"ref_type": "3", "svrid": "missing"}}), self.ctx)
+            self.wait_done()
+        self.assertEqual(len(self.backend.images), 1)
+        self.assertIn("原图", self.backend.texts[-1][1])
+
+    def test_portrait_limit_counts_chat_references_and_repeated_aliases(self):
+        people = [{"id": i, "name": f"群友{i}", "aliases": []} for i in range(1, 17)]
+        for p in people:
+            self.portrait(p)
+        portraits = RoomPortraits(ROOM, people, self.magpie.max_image_bytes)
+        names = [p["name"] for p in people]
+        plan = ImagePlan("合影", ("场景.png",))
+        result, question = portraits.apply(plan, [*names[:15], names[0]])
+        self.assertFalse(question)
+        self.assertEqual(len(result.references), 16)
+        result, question = portraits.apply(plan, names)
+        self.assertIsNone(result)
+        self.assertIn("16", question)
 
     def test_named_profile_and_poster_copy_reach_image_model(self):
         self.profile_fixture()

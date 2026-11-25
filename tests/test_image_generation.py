@@ -693,6 +693,101 @@ class ImageGenerationTests(unittest.TestCase):
         self.wait_done()
         self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(path)])
 
+    def test_swap_uses_the_exact_quoted_base_and_archive_face_even_when_planning_fails(self):
+        face = self.portrait(self.knowledge.entity(ROOM, "张姐", pinned=True))
+        decisions = [
+            {"张姐": {"E1": 0.98}, "待修改底图": {"E1": 0.98}, "任务范围": {"direct": 0.96, "plan": 0.04}},
+            {"张姐": {"portrait": 0.96}, "待修改底图": {"quote": 0.99, "absent": 0.01}},
+        ]
+        requests = (
+            "把张姐的脸换到这个人身上 不修改这张图里人物的发型服饰",
+            "用张姐的档案照，把引用图里那个人的脸替换掉，照旧保留衣服和发型",
+        )
+        expected = []
+        with (patch.object(self.ctx._jev, "choices", side_effect=decisions * len(requests)) as judge,
+              patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError) as planner):
+            for index, request in enumerate(requests):
+                native_id = f"target-{index}"
+                target, _ = self.reference_fixture(native_id, sender="wxid_other")
+                self.reference_fixture(f"newer-{index}", sender="wxid_other")
+                self.plugin.on_message(self.message("/生图 " + request,
+                    data={"quote": {"ref_type": "3", "svrid": native_id}}), self.ctx)
+                self.wait_done()
+                expected.append([str(target), str(face)])
+        submissions = [c["arguments"] for c in self.server.calls if c["name"] == "generate_image"]
+        self.assertEqual([args["reference_images"] for args in submissions], expected)
+        for args, request in zip(submissions, requests):
+            self.assertIn("第1张是待修改的底图", args["prompt"])
+            self.assertIn("人物外貌参考：第2张是张姐", args["prompt"])
+            self.assertIn(request, args["prompt"])
+        self.assertEqual(judge.call_count, 4)
+        planner.assert_not_called()
+
+    def test_swap_asks_for_only_the_missing_picture_and_keeps_the_other(self):
+        person = self.knowledge.entity(ROOM, "张姐", pinned=True)
+        self.knowledge.entity(ROOM, "小栗", pinned=True)
+        decisions = []
+        for name in ("张姐", "小栗"):
+            decisions.extend([
+                {name: {"E1": 1}, "待修改底图": {"E1": 1}, "任务范围": {"direct": 1, "plan": 0}},
+                {name: {"portrait": 1}, "待修改底图": {"quote": 1, "absent": 0}},
+            ])
+        prompt = "/生图 把张姐的脸换到这个人身上 不修改这张图里人物的发型服饰"
+        with (patch.object(self.ctx._jev, "choices", side_effect=decisions) as judge,
+              patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError) as planner):
+            face = self.portrait(person)
+            self.reference_fixture("unrelated", sender="wxid_other")
+            self.plugin.on_message(self.message(prompt, data={"quote": {"ref_type": "3", "svrid": "missing"}}), self.ctx)
+            self.wait_done()
+            self.assertFalse(self.server.calls)
+            self.assertIn("要修改的底图", self.backend.texts[-1][1])
+            target, _ = self.reference_fixture("recovered-target", sender="wxid_other")
+            self.plugin.on_message(self.message("@机器人\u2005就用这张", data={
+                "is_at_self": True, "at_members": [self.members.account],
+                "quote": {"ref_type": "3", "svrid": "recovered-target"},
+            }), self.ctx)
+            self.wait_done()
+            first = [c["arguments"] for c in self.server.calls if c["name"] == "generate_image"]
+            self.assertEqual([args["reference_images"] for args in first], [[str(target), str(face)]])
+
+            # 两次独立请求使用不同发言人，各自续接自己的追问。
+            current_target, _ = self.reference_fixture("other-target", sender="wxid_other")
+            self.plugin.on_message(self.message(prompt.replace("张姐", "小栗"), sender="wxid_second",
+                data={"quote": {"ref_type": "3", "svrid": "other-target"}}), self.ctx)
+            self.wait_done()
+            self.assertIn("小栗的档案照", self.backend.texts[-1][1])
+            replacement, _ = self.reference_fixture("replacement-face", sender="wxid_other")
+            self.plugin.on_message(self.message("@机器人\u2005就用这张", sender="wxid_second", data={
+                "is_at_self": True, "at_members": [self.members.account],
+                "quote": {"ref_type": "3", "svrid": "replacement-face"},
+            }), self.ctx)
+            self.wait_done()
+        submissions = [c["arguments"] for c in self.server.calls if c["name"] == "generate_image"]
+        self.assertEqual([args["reference_images"] for args in submissions],
+                         [[str(target), str(face)], [str(current_target), str(replacement)]])
+        self.assertIn("第1张是待修改的底图", submissions[1]["prompt"])
+        self.assertIn("第2张用作小栗的参考", submissions[1]["prompt"])
+        self.assertEqual(judge.call_count, 4)
+        planner.assert_not_called()
+
+    def test_style_only_quote_stays_a_reference_instead_of_becoming_the_edit_base(self):
+        face = self.portrait(self.knowledge.entity(ROOM, "张姐", pinned=True))
+        style, _ = self.reference_fixture("style")
+        decisions = [
+            {"张姐": {"E2": 1}, "画面参考": {"E1": 1}, "待修改底图": {"E2": 1}, "任务范围": {"direct": 1, "plan": 0}},
+            {"张姐": {"portrait": 1}, "画面参考": {"quote": 1}, "待修改底图": {"quote": 0.01, "absent": 0.99}},
+        ]
+        with (patch.object(self.ctx._jev, "choices", side_effect=decisions),
+              patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError) as planner):
+            self.plugin.on_message(self.message("/生图 只参考这张图的画风，画张姐在车站，背景改成浅灰色",
+                data={"quote": {"ref_type": "3", "svrid": "style"}}), self.ctx)
+            self.wait_done()
+        args = self.server.calls[0]["arguments"]
+        self.assertEqual(args["reference_images"], [str(style), str(face)])
+        self.assertIn("第1张用作画面参考", args["prompt"])
+        self.assertNotIn("是待修改的底图", args["prompt"])
+        planner.assert_not_called()
+
     def test_missing_person_reference_resumes_only_that_role(self):
         self.members.register("A姐", ROOM, self.members.account)
         self.message("大家好", sender=self.members.account)

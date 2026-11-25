@@ -66,6 +66,7 @@ class ImageJob:
     material_question: str = ""
     replacement_role: str = ""
     material_sources: dict = field(default_factory=dict)
+    base_reference: str = ""
     required_references: int = 0
     edit: bool = False
     plan: object = None
@@ -423,6 +424,10 @@ class ImageReply:
                 self._members.add(member)
                 self._pending[key] = None
                 self._pending.move_to_end(key)
+                material_sources = (prior.material_sources.copy()
+                                    if prior and prior.material_question and quoted and
+                                    (not supplement or re.fullmatch(r"(?:就用|补上|补发|用)?这张(?:图|照片)?[。！!]*", supplement))
+                                    else {})
                 job = ImageJob(message, ctx, prompt.strip(), references, snapshot, guard, key, uuid4().hex,
                                time.monotonic() + TASK_SECONDS, personality,
                                revisions=revisions, source_id=prior.source_id if prior else snapshot.anchor_id,
@@ -432,10 +437,8 @@ class ImageReply:
                                previous_image=previous_image,
                                recent_pictures=recent_pictures,
                                replacement_role=prior.material_question if prior and quoted else "",
-                               material_sources=(prior.material_sources.copy()
-                                                 if prior and prior.material_question and quoted and
-                                                 (not supplement or re.fullmatch(r"(?:就用|补上|补发|用)?这张(?:图|照片)?[。！!]*", supplement))
-                                                 else {}),
+                               material_sources=material_sources,
+                               base_reference=prior.base_reference if material_sources else "",
                                required_references=required_references,
                                edit=edit or bool(prior and (prior.edit or (prior.plan and prior.plan.edit))))
                 if prior is not None:

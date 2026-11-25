@@ -165,7 +165,7 @@ def prepare_image(ctx, message, snapshot, sources, references, guard, profiles, 
             paths, names, guide, question = binding
             if question:
                 return None, question
-            plan = ImagePlan(guide + request.strip(), paths, edit)
+            plan = ImagePlan(guide + request.strip(), paths, edit or bool(job.base_reference))
             return profiles.portraits.apply(plan, names, request=request)
     if sources["正文指定上图"] and not additions and not sources["本轮承接的上次绘图要求"]:
         if not references:

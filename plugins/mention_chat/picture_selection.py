@@ -15,6 +15,7 @@ SOURCES = {
     "inspect": "在好几张图片中按画面内容挑一张，须查看照片才能分辨。",
     "planning": "需要前文、人物事迹、组合多份来源，或原话不足以确定。",
 }
+EDIT_BASE = "待修改底图"
 
 
 def _winner(scores):
@@ -87,8 +88,11 @@ def _role_sources(job, profiles, request):
     if "你" in request and profiles.bot:
         bot_name = profiles.bot["name"]
         roles[bot_name] = f"{bot_name}（本群机器人，群友直接对她说的你、你自己）"
+    check_edit_base = job.quoted_image and bool(roles)
     if not roles or re.search(r"背景|构图|风格|场景图|底图", request):
         roles["画面参考"] = "画面参考（背景、构图或整体画法，与单个人物的外貌分开）"
+    if check_edit_base:
+        roles[EDIT_BASE] = EDIT_BASE
     clauses = {f"E{i}": clause for i, clause in enumerate(filter(None, re.split(r"[，。；：、\n]+|\s+", request)), 1)}
     if not clauses or len(clauses) > 60 or len(roles) > 16:
         return None
@@ -113,12 +117,19 @@ def _role_sources(job, profiles, request):
     questions = {role: (f"现在只判断{label}的{'画面' if role == '画面参考' else '外貌'}来源。先按其专属证据「{excerpts[role]}」回答，"
                         "并用完整指令和引用原话核对代词。对机器人说的‘你的头像’指她的档案照，引用和转述中的‘你’按原话的对象理解。"
                         "别把其他人物的要求套给这个对象。无论素材有没有到，按话里想要的来源选择。", SOURCES)
-                 for role, label in roles.items()}
+                 for role, label in roles.items() if role != EDIT_BASE}
+    if check_edit_base:
+        questions[EDIT_BASE] = (
+            "发言人是否要求直接修改这条消息明确引用的图片本身？",
+            {"quote": "让素材或新元素进入引用的图片，或修改引用图中的对象并保留其余画面。包括把另一个人的脸换到引用图的人身上。",
+             "absent": "引用图只提供画风、背景或人物外貌等参考，用户要创作新图，或者没有给出明确的修改对象。"})
     answers = judge.choices(state, questions, timeout=3)
-    modes = {role: _winner(scores) for role, scores in answers.items()}
+    modes = {role: _winner(scores) for role, scores in answers.items() if role != EDIT_BASE}
     if any(mode == "planning" or (answers[role][mode] < 0.55 and mode not in ("previous", "inspect"))
            for role, mode in modes.items()):
         return None
+    if check_edit_base and answers[EDIT_BASE]["quote"] >= 0.80:
+        modes = {EDIT_BASE: "quote", **modes}
     if all(mode in ("free", "absent") for mode in modes.values()):
         return None
     return {role: (mode, excerpts[role]) for role, mode in modes.items()}
@@ -147,8 +158,11 @@ def resolve_materials(job, profiles):
             names.append(role)
         elif mode in ("quote", "previous", "inspect"):
             if mode == "quote":
-                path = job.references[0].path if job.references and not job.missing_reference else ""
-                question = "" if path else f"请补发或引用用作{role}的原图。"
+                path = job.base_reference if role == EDIT_BASE else ""
+                if not path and job.references and not job.missing_reference:
+                    path = job.references[0].path
+                question = "" if path else (
+                    "请补发或引用要修改的底图。" if role == EDIT_BASE else f"请补发或引用用作{role}的原图。")
             else:
                 records = job.recent_pictures
                 path, question = _choose_group_picture(job, ctx.jev, role, excerpt, records, mode, deadline)
@@ -157,7 +171,12 @@ def resolve_materials(job, profiles):
                 return (), (), "", question
             if path not in paths:
                 paths.append(path)
-            notes.append(f"第{paths.index(path)+1}张用作{role}的参考。")
+            index = paths.index(path) + 1
+            if role == EDIT_BASE:
+                job.base_reference = path
+                notes.append(f"第{index}张是待修改的底图。在这张图上修改，保留其余画面。")
+            else:
+                notes.append(f"第{index}张用作{role}的参考。")
     if job.quoted_image and job.references and job.references[0].path not in paths:
         job.material_sources = {}
         return None

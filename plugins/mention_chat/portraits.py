@@ -11,6 +11,7 @@ from wxbot_framework.integrations.jev import JevError
 PORTRAIT_ROOT = Path(__file__).resolve().parents[2] / ".runtime" / "群友照片"
 MAX_REFERENCES = 16
 PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+SELF_AVATAR_HINT = re.compile(r"你[^。！？\n]{0,8}头像")
 _PHOTO = r"(?:照片|相片|相册|档案照|图库|照片库|照片档案库)"
 _WHICH = r"(?:哪[些几位个]|那些|谁|多少|几[位个张])"
 _INVENTORY = re.compile(

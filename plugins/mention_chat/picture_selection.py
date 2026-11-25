@@ -2,14 +2,13 @@
 import re
 import time
 
-from wxbot_framework.conversation.members import MemberError
 from wxbot_framework.integrations.reply_budget import remaining
 from wxbot_framework.recent_images import READY, RECENT_IMAGES
 
 
 SOURCES = {
     "previous": "按当前话语指向的上图、刚发那张、或依发送人、顺序、编号指定的一张群图画；靠消息位置即可定位。",
-    "quote": "使用群友点击微信引用的图片。",
+    "quote": "使用本条消息在微信实际引用的一张图片。引用的是文字时，按文字提到的素材来源选。",
     "portrait": "使用这个人物自己的已登记形象或档案照。",
     "free": "出镜，但允许自由发挥或没有指定照片。",
     "absent": "不参与画面取材，例如只是署名、受众或被排除的人。",
@@ -85,19 +84,18 @@ def _role_sources(job, profiles, request):
     ctx = job.ctx
     judge = ctx.jev
     roles = {name: name for name in profiles.mentioned}
-    if "你" in request:
-        try:
-            bot_name = ctx.knowledge.member_entity(profiles.room, ctx.members.account)["name"]
-        except MemberError:
-            bot_name = ""
-        if bot_name:
-            roles[bot_name] = f"{bot_name}（群友说的你、你自己）"
+    if "你" in request and profiles.bot:
+        bot_name = profiles.bot["name"]
+        roles[bot_name] = f"{bot_name}（本群机器人，群友直接对她说的你、你自己）"
     if not roles or re.search(r"背景|构图|风格|场景图|底图", request):
         roles["画面参考"] = "画面参考（背景、构图或整体画法，与单个人物的外貌分开）"
     clauses = {f"E{i}": clause for i, clause in enumerate(filter(None, re.split(r"[，。；：、\n]+|\s+", request)), 1)}
     if not clauses or len(clauses) > 60 or len(roles) > 16:
         return None
-    state = {"群友完整指令": request, "机器人身份": "群友对机器人说“你”", "可引用的原文片段": clauses,
+    quote = job.message.data.get("quote") or {}
+    state = {"群友完整指令": request, "可引用的原文片段": clauses,
+             "本群机器人": profiles.bot["name"] if profiles.bot else "",
+             "引用原话": {"发言人": quote.get("name"), "正文": (quote.get("text") or "")[:1000]} if quote else None,
              "本条微信明确引用的图片": "引用图" if job.quoted_image else "无",
              "群图片从旧到新": [f"I{i+1}" for i in range(len(job.recent_pictures))],
              "待判断的人物或用途": roles,
@@ -105,7 +103,7 @@ def _role_sources(job, profiles, request):
     questions = {role: (f"聚焦{label}。哪段原话最能决定其素材来源，或表明此人仅被题字提及？",
                         {**clauses, "whole": "需要结合多处或没有单独说明。"}) for role, label in roles.items()}
     questions["任务范围"] = ("群友有没有要求使用图片之外特定的旧对话、人物经历、群梗或群体名单？"
-                           "分配哪张照片、哪个人物用档案照、核对画面特征均在当前选图环节处理。",
+                           "分配哪张照片、核对画面特征，以及按已给出的引用原话确认用谁的档案照，均在当前选图环节处理。",
                           {"direct": "原话已经给出场景，剩下是按指示配图或自由创作。",
                            "plan": "必须检索或推导上述额外的文字资料才能构思成品。"})
     evidence = judge.choices(state, questions, timeout=3)
@@ -113,7 +111,8 @@ def _role_sources(job, profiles, request):
         return None
     excerpts = {role: clauses.get(_winner(evidence[role]), request) for role in roles}
     questions = {role: (f"现在只判断{label}的{'画面' if role == '画面参考' else '外貌'}来源。先按其专属证据「{excerpts[role]}」回答，"
-                        "并用完整指令核对代词。别把其他人物的要求套给这个对象。无论素材有没有到，按话里想要的来源选择。", SOURCES)
+                        "并用完整指令和引用原话核对代词。对机器人说的‘你的头像’指她的档案照，引用和转述中的‘你’按原话的对象理解。"
+                        "别把其他人物的要求套给这个对象。无论素材有没有到，按话里想要的来源选择。", SOURCES)
                  for role, label in roles.items()}
     answers = judge.choices(state, questions, timeout=3)
     modes = {role: _winner(scores) for role, scores in answers.items()}

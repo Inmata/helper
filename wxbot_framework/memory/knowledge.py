@@ -288,7 +288,8 @@ class KnowledgeStore(KnowledgeAdminMixin):
                 if member:
                     aliases.update(member.aliases)
                 aliases.discard(name_key(entity["name"]))
-                candidates.append({"id": entity["id"], "name": entity["name"], "aliases": sorted(aliases)})
+                candidates.append({"id": entity["id"], "name": entity["name"], "aliases": sorted(aliases),
+                                   "is_bot": entity["wxid"] == self.account})
             return candidates
 
     def conversation_people(self, room):

@@ -16,7 +16,7 @@ from wxbot_framework.integrations.jev import JevError
 from wxbot_framework.integrations.magpie_tools import MagpieToolsError
 from wxbot_framework.integrations.reply_budget import remaining
 from wxbot_framework.timeutil import parse_utc
-from .portraits import MAX_REFERENCES, RoomPortraits, wants_room_cast
+from .portraits import MAX_REFERENCES, SELF_AVATAR_HINT, RoomPortraits, wants_room_cast
 from .picture_selection import resolve_materials
 
 
@@ -24,7 +24,8 @@ SOURCE_RULES = """根据原话、最新补充、引用和实际清单决定素�
 输出“群聊参考图数”(0、1或2)，只数任务需要的群聊图片，包括要沿用的旧成品。近期有图不表示用户要用。要从几张候选里选一张时在“参考图”填它的编号，无法区分则提问。人物档案照由程序直接提供，不计入这个数。
 输出“档案照片”：要求有照片的所有人出镜时填字符串“全部”；指定部分人或有排除条件时填所选人物的名字数组；无须参照库中人物长相时填空数组。区分要入镜的人、题字和仅被提及的人。名单含主名和别名。
 点名主角、让本群众人参与场景时，主角按点名分配角色，其他入镜群友从可用档案照中取；没有排除或限量要求就取全部。本群的别称见任务，群友说“库里”是在选档案来源。
-名单已验证有照片，每人可直接取一张，无需查询文字档案来确认照片。可以给库中人物合影、给指定人物换背景，或以群友另发的图作场景。用户在补充中明确放弃先前指定的群图、改为只用档案照片时，加“替换先前群图”:true。只在所需素材确实缺少或指代无法确定时给出“澄清问题”。"""
+名单已验证有照片，每人可直接取一张，无需查询文字档案来确认照片。可以给库中人物合影、给指定人物换背景，或以群友另发的图作场景。用户在补充中明确放弃先前指定的群图、改为只用档案照片时，加“替换先前群图”:true。只在所需素材确实缺少或指代无法确定时给出“澄清问题”。
+群友直接对机器人说“用你的头像”时，按任务中机器人本人的档案照选取。转述或引用里的“你”按原话的说话对象理解，明确点名或指定了其他图片时按原话分配。"""
 
 SYSTEM = """负责本群的生图和改图。结合当前发言、明确引用及近期对话理解整项任务。当前发言可能只修改前文的一项，要继承其余已定要求。只有本次明确承接旧任务时才沿用请求人近期的生图命令。分清正在并行聊的话题。
 需要时查指代、旧决定、自己先前的原话、人物档案或图片。明确点名的档案素材已经放进任务；从前文看出画谁时，用 read_profile 按名字一次取材。只查当前确实缺少的资料。
@@ -63,7 +64,7 @@ class ImagePlan:
 
 
 class ImageProfiles:
-    def __init__(self, ctx, snapshot, request):
+    def __init__(self, ctx, snapshot, request, *, quote=""):
         self.ctx = ctx
         self.room = snapshot.room
         self.anchor = snapshot.anchor_id
@@ -75,9 +76,12 @@ class ImageProfiles:
         except MemberError:
             candidates = []
         self.portraits = RoomPortraits(self.room, candidates, ctx.magpie.max_image_bytes, room_aliases)
+        self.bot = next((person for person in candidates if person["is_bot"]), None)
+        self.bot_portrait = self.portraits.people.get(self.bot["id"]) if self.bot else None
         names = {name for person in candidates for name in (person["name"], *person["aliases"]) if len(name) >= 2}
         pattern = "|".join(map(re.escape, sorted(names, key=lambda name: (-len(name), name))))
-        self.mentioned = list(dict.fromkeys(re.findall(pattern, request, re.IGNORECASE))) if names else []
+        subject_text = request + "\n" + quote if "头像" in quote else request
+        self.mentioned = list(dict.fromkeys(re.findall(pattern, subject_text, re.IGNORECASE))) if names else []
 
     def prefetch(self):
         for name in self.mentioned:
@@ -133,12 +137,14 @@ def image_sources(job, profiles, references):
     return {"本次请求": job.prompt, "已收到的补充": list(job.revisions),
             "本轮承接的上次绘图要求": job.previous_prompt,
             "当前引用": (quote.get("text") or "")[:1000], "指定群聊图片": job.quoted_image or job.previous_image,
+            "引用原话的发言人": quote.get("name") or "",
             "正文指定上图": job.previous_image,
             "本条直接引用群图": quote.get("ref_type") == "3",
             "候选群图编号（从早到晚）": [f"I{i}" for i in range(1, len(references) + 1)], "指定的群图缺失": job.missing_reference,
             "可接收群聊图片": "group.image.receive" in job.ctx.capabilities,
             "本群别称": list(profiles.portraits.room_aliases),
             "可用档案照": [{"人物": p["name"], "别名": p["aliases"]} for p in profiles.portraits.people.values()],
+            "本群机器人本人的档案照": profiles.bot_portrait["name"] if profiles.bot_portrait else "",
             "参考图总数上限": MAX_REFERENCES}
 
 
@@ -146,7 +152,8 @@ def prepare_image(ctx, message, snapshot, sources, references, guard, profiles, 
                   missing_reference, required_references, edit, job=None):
     request = "\n".join((sources["本轮承接的上次绘图要求"], sources["本次请求"], *sources["已收到的补充"]))
     additions = sources["已收到的补充"]
-    if job is not None and (job.recent_pictures or job.quoted_image or job.previous_image or profiles.mentioned):
+    if job is not None and (job.recent_pictures or job.quoted_image or job.previous_image or profiles.mentioned
+                            or (profiles.bot_portrait and SELF_AVATAR_HINT.search(request))):
         try:
             binding = resolve_materials(job, profiles)
         except (JevError, ValueError) as exc:

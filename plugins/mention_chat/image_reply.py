@@ -524,7 +524,9 @@ class ImageReply:
                 job.references = tuple(ready_references)
             references = tuple(record.path for record in ready_references)
             job.stage = "planning"
-            profiles = ImageProfiles(job.ctx, job.snapshot, "\n".join((job.prompt, *job.revisions)))
+            quote = job.message.data.get("quote") or {}
+            profiles = ImageProfiles(job.ctx, job.snapshot, "\n".join((job.prompt, *job.revisions)),
+                                     quote=(quote.get("text") or "")[:1000])
             options = {"missing_reference": job.missing_reference, "required_references": job.required_references,
                        "edit": job.edit}
             sources = image_sources(job, profiles, references)

@@ -13,7 +13,7 @@ from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .image_intent import FORMAT_SECONDS
 from .image_plan import ImageProfiles
 from .image_reply import ImageReply
-from .portraits import MAX_REFERENCES, asks_portrait_list
+from .portraits import MAX_REFERENCES, SELF_AVATAR_HINT, asks_portrait_list
 from wxbot_framework.conversation.slow_replies import SlowReplies
 from wxbot_framework.conversation.person_context import person_context
 from wxbot_framework.conversation.reply_wait import ReplyWait
@@ -672,6 +672,13 @@ class Plugin:
                     self_facts["本群生图能力"] = f"本群可按名单选人画合照，每人一张；参考图最多{MAX_REFERENCES}张，优先点名人物，余位随机抽取。"
                 else:
                     self_facts["本群生图能力"] = "当前微信连接无法发图。"
+            elif SELF_AVATAR_HINT.search(clean_query):
+                portrait = ImageProfiles(ctx, snapshot, "").bot_portrait
+                if portrait:
+                    self_facts["本群头像"] = (
+                        f"你自己的头像是本群照片档案里「{portrait['name']}」的档案照。"
+                        "群友直接对你聊这张头像时按档案照接话。引用和转述中的人称按原话的发言者与对象理解。"
+                        "这里只确认照片归属，照片内容、挑选经过和微信头像状态没有记录。")
             if offer_reading or read_accepted or "correction" in intents or (previous and previous.voice_action and not clean_query):
                 self_facts["语音能力"] = VOICE_CAPABILITY if voice_supported else "当前连接只可发文字，不能唱歌或发语音。"
             if offer_reading:

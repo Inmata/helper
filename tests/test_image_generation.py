@@ -657,6 +657,31 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(judge.call_count, 2)
         planner.assert_not_called()
 
+    def test_avatar_references_follow_the_current_addressee_and_the_quoted_addressee(self):
+        self.members.register("A 姐", ROOM, self.members.account)
+        self.message("大家好", sender=self.members.account)
+        own = self.portrait(self.knowledge.member_entity(ROOM, self.members.account))
+        other = self.portrait(self.knowledge.entity(ROOM, "小栗", pinned=True))
+        decisions = [
+            {"A 姐": {"E1": 0.98}, "任务范围": {"direct": 0.98, "plan": 0.02}},
+            {"A 姐": {"portrait": 0.98}},
+            {"小栗": {"whole": 0.98}, "任务范围": {"direct": 0.98, "plan": 0.02}},
+            {"小栗": {"portrait": 0.98}},
+        ]
+        addressed = {"is_at_self": True, "at_members": [self.members.account]}
+        quote = {"ref_type": "1", "name": "小枫", "text": "@小栗\u2005你的头像好看"}
+        with (patch.object(self.ctx._jev, "choices", side_effect=decisions) as judge,
+              patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError) as planner):
+            self.plugin.on_message(self.message("@A姐\u2005用你自己的头像画一张表情包", data=addressed), self.ctx)
+            self.wait_done()
+            self.plugin.on_message(self.message("@A姐\u2005用引用里提到的头像画表情包",
+                data={**addressed, "quote": quote}), self.ctx)
+            self.wait_done()
+        calls = [entry["arguments"] for entry in self.server.calls if entry["name"] == "generate_image"]
+        self.assertEqual([entry["reference_images"] for entry in calls], [[str(own)], [str(other)]])
+        self.assertEqual(judge.call_args.args[0]["引用原话"], {"发言人": "小枫", "正文": quote["text"]})
+        planner.assert_not_called()
+
     def test_previous_image_missing_asks_only_for_picture_and_accepts_quoted_replacement(self):
         prompt = "/生图 参考上图画一张水彩"
         self.plugin.on_message(self.message(prompt), self.ctx)
@@ -887,6 +912,23 @@ class ImageGenerationTests(unittest.TestCase):
                 self.wait_done()
             self.assertIn("本群可用人物档案照", writer.call_args.args[1])
             self.assertEqual(strip_at_labels(self.backend.texts[-1][1]).strip(), wording)
+        self.assertFalse(self.server.calls)
+
+    def test_avatar_chat_gets_the_bot_archive_fact_and_keeps_the_quote_author(self):
+        self.members.register("A 姐", ROOM, self.members.account)
+        self.message("大家好", sender=self.members.account)
+        self.portrait(self.knowledge.member_entity(ROOM, self.members.account))
+        addressed = {"is_at_self": True, "at_members": [self.members.account]}
+        quote = {"ref_type": "1", "name": "小枫", "text": "@小栗\u2005你的头像好看"}
+        with (patch.object(self.ctx._jev, "noul", side_effect=lambda state, questions, **kw: [0.01] * len(questions)),
+              patch.object(self.ctx._llm, "complete_json", return_value={"动作": "text"}),
+              patch.object(self.ctx._llm, "complete_text", side_effect=["档案里那张被你夸到了。", "她在说小栗的头像。"]) as writer):
+            self.plugin.on_message(self.message("@A姐\u2005你那张头像挺好看", data=addressed), self.ctx)
+            self.plugin.on_message(self.message("@A姐\u2005她说的是谁的头像？", data={**addressed, "quote": quote}), self.ctx)
+        self.assertIn("「A 姐」的档案照", writer.call_args_list[0].args[1])
+        self.assertIn("小枫", writer.call_args_list[1].args[1])
+        self.assertNotIn("本群头像", writer.call_args_list[1].args[1])
+        self.assertEqual(strip_at_labels(self.backend.texts[-1][1]).strip(), "她在说小栗的头像。")
         self.assertFalse(self.server.calls)
 
     def test_short_archive_answer_only_resumes_same_senders_pending_question(self):

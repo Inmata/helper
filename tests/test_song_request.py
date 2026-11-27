@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import sys
 import unittest
 import wave
 from unittest.mock import patch
@@ -102,6 +103,18 @@ class SongTests(unittest.TestCase):
         self.assertEqual(self.backend.texts, [])
         receipts = self.members.connection().execute("SELECT kind,status FROM reply_receipts").fetchall()
         self.assertEqual([tuple(r) for r in receipts], [("voice", "submitted")] * 2)
+
+    def test_plain_title_delivers_when_bot_cannot_load_the_audio_decoder(self):
+        self.set_route([0.99, 0.01, 0.01])
+        class Model:
+            def complete_json(inner, system, user, **options):
+                return {"歌名": "雨爱", "歌手": "", "版本": ""}
+        self.ctx._llm = Model()
+        with patch.dict(sys.modules, {"miniaudio": None, "numpy": None}):
+            self.post("A姐，唱雨爱")
+        self.assertEqual(len(self.backend.voices), 1)
+        self.assertEqual(prepare_voice(self.backend.voices[0][1])[1], 500)
+        self.assertEqual(self.backend.texts, [])
 
     def test_missing_duplicate_admin_and_fulfilled(self):
         self.set_route([0.99, 0.01, 0.01])

@@ -4,14 +4,12 @@ import random
 import re
 import sqlite3
 import unicodedata
-import wave
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 
 from wxbot_framework.conversation.mention_tools import _within
 from wxbot_framework.integrations.llm import LLMError
-from wxbot_framework.integrations.voice_encode import prepare_voice
+from wxbot_framework.integrations.voice_encode import song_voice_clip
 
 
 def nickname_call(text, aliases):
@@ -83,20 +81,6 @@ class Song:
                 and (not artist or norm(artist) == norm(self.artist))
                 and (not version or norm(version) == norm(self.version)))
 
-    def voice_clip(self):
-        import miniaudio
-        try:
-            track = miniaudio.decode(self.audio.read_bytes(), nchannels=1, sample_rate=24000)
-        except miniaudio.MiniaudioError as exc:
-            raise ValueError("曲库片段解码失败") from exc
-        wav = BytesIO()
-        with wave.open(wav, "wb") as out:
-            out.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
-            out.writeframes(track.samples)
-        silk, _ = prepare_voice(wav.getvalue())
-        return silk
-
-
 class Songbook:
     def __init__(self, directory=None):
         self.directory = Path(directory) if directory else Path.home() / "Downloads" / "星瞳点歌库"
@@ -148,7 +132,7 @@ class Songbook:
             return reply("这会儿微信语音条发不出去，等会儿再点吧。")
         for song in candidates:
             try:
-                clip = song.voice_clip()
+                clip = song_voice_clip(song.audio)
             except (OSError, ValueError, ImportError, RuntimeError) as exc:
                 ctx.logger.warning("点歌片段暂不可用：%s %s", song.title, exc)
                 continue

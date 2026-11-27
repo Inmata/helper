@@ -2,12 +2,29 @@
 from io import BytesIO
 from pathlib import Path
 import struct
+import subprocess
+import sys
 import wave
 
 TENCENT_HEADER = b"\x02#!SILK_V3"
 STANDARD_HEADER = b"#!SILK_V3"
 MAX_BYTES = 20 * 1024 * 1024
 MAX_DURATION_MS = 60_000
+
+
+def song_voice_clip(path):
+    # 音乐解码器会加载本地扩展；隔离首次加载，避免它卡住机器人及其超时线程。
+    try:
+        result = subprocess.run(
+            [sys.executable, "-X", "utf8", "-B", "-m", "wxbot_framework.integrations.voice_encode", str(path.resolve())],
+            cwd=Path(__file__).resolve().parents[2], stdin=subprocess.DEVNULL, capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("点歌片段转换超过 10 秒") from exc
+    if result.returncode:
+        reason = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise ValueError(reason[-1] if reason else f"点歌转换进程退出（{result.returncode}）")
+    return result.stdout
 
 
 def _silk(data):
@@ -68,3 +85,15 @@ def prepare_voice(path):
     if not encoded.startswith(TENCENT_HEADER):
         raise ValueError("编码结果缺少微信 SILK 文件头")
     return _silk(encoded)
+
+
+if __name__ == "__main__":
+    import miniaudio
+
+    track = miniaudio.decode(Path(sys.argv[1]).read_bytes(), nchannels=1, sample_rate=24000)
+    wav = BytesIO()
+    with wave.open(wav, "wb") as out:
+        out.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        out.writeframes(track.samples)
+    encoded, _ = prepare_voice(wav.getvalue())
+    sys.stdout.buffer.write(encoded)

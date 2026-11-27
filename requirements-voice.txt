@@ -1,2 +1,3 @@
 silk-python==0.2.8
 sherpa-onnx==1.13.8
+miniaudio==1.73

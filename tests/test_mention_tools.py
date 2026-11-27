@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from plugins.mention_chat import Plugin
+from wxbot_framework.conversation.tool_router import ActionDecision
 from tests.support.recyclable_tempdir import RecyclableTemporaryDirectory
 from tests.test_mention_chat import ROOM, FakeCtx, FakeMembers, mention
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
@@ -712,6 +713,8 @@ class DialogueToolSectionTests(unittest.TestCase):
 
 class MentionChatToolTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch("plugins.mention_chat.reply_actions.choose_format",
+                                return_value=(ActionDecision("text"), "普通回复", "")))
         RECENT_IMAGES.clear()
         self.addCleanup(RECENT_IMAGES.clear)
 

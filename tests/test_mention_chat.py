@@ -14,6 +14,7 @@ from xml.sax.saxutils import escape
 
 from support.recyclable_tempdir import RecyclableTemporaryDirectory
 from plugins.mention_chat import Plugin
+from wxbot_framework.conversation.tool_router import ActionDecision
 from wxbot_framework.commands import help_text
 from wxbot_framework.conversation.dialogue import SYSTEM, Dialogue
 from wxbot_framework.conversation.members import ConversationSnapshot, MemberStore, SnapshotExpired
@@ -856,6 +857,8 @@ class ColdReplyTests(unittest.TestCase):
     OTHER_ROOM = "87654321@chatroom"
 
     def setUp(self):
+        self.enterContext(patch("plugins.mention_chat.reply_actions.choose_format",
+                                return_value=(ActionDecision("text"), "普通回复", "")))
         scratch = Path(__file__).resolve().parent.parent / ".runtime/tests"
         scratch.mkdir(parents=True, exist_ok=True)
         temp = RecyclableTemporaryDirectory(dir=scratch)

@@ -4,6 +4,10 @@ from __future__ import annotations
 from .database import backup_before_migration, backup_database
 
 BASE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS song_wishes (
+        title_key TEXT NOT NULL, artist_key TEXT NOT NULL, version_key TEXT NOT NULL,
+        title TEXT NOT NULL, artist TEXT NOT NULL, version TEXT NOT NULL,
+        PRIMARY KEY(title_key, artist_key, version_key));
     CREATE TABLE IF NOT EXISTS reply_receipts (
         id INTEGER PRIMARY KEY, account TEXT NOT NULL, room TEXT NOT NULL,
         source_id INTEGER NOT NULL, generation INTEGER NOT NULL, revision INTEGER NOT NULL,

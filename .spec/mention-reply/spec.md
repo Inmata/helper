@@ -9,7 +9,8 @@ code:
   - plugins/mention_chat/image_plan.py
   - plugins/mention_chat/picture_selection.py
   - plugins/mention_chat/portraits.py
-  - plugins/mention_chat/image_intent.py
+  - plugins/mention_chat/song_request.py
+  - plugins/mention_chat/reply_actions.py
   - wxbot_framework/conversation/reply_wait.py
   - wxbot_framework/conversation/status_replies.py
   - wxbot_framework/integrations/magpie_images.py
@@ -75,11 +76,15 @@ related:
 群里真正艾特机器人时，用本群人格结合聊天上下文与记忆回复发言者。发送约束沿用
 [delivery](../delivery/spec.md)。
 
+## 群聊点歌
+
+明确艾特、当面叫 A 姐或承接本人的定向往来时，共用动作路由判断是否要听她唱歌、查看歌单、出图或聊天。认领独立点歌后从正式曲库选择已试听片段，用 `ctx.reply_voice` 发送微信原生语音条。随机点歌直接挑可发送的曲目；特定歌曲按歌名、别名、指定歌手和版本匹配。引用语音按已记录的正文识别。曲库异常与已入库音频异常分别提示，仅查库确认缺歌才写入共享数据库。管理员通过 `/想听清单` 查看各群待办，已正式录入的曲目从待办移出。
+
 ## 现行流程总图
 
-本图覆盖定向群聊从[统一消息入口](../messages/spec.md)分发到回复、任务状态或发送回执。数字表示阅读段落，节点上的「接第几段」用于跨段承接。流程以当前实现和启用配置核对。艾特、引用机器人和同群同人明确接上文的发言共享意图判断。先匹配已发出的追问，再决定聊天、查进度或绘图。
+本图覆盖定向群聊从[统一消息入口](../messages/spec.md)分发到回复、任务状态或发送回执。数字表示阅读段落，节点上的「接第几段」用于跨段承接。流程以当前实现和启用配置核对。艾特、引用机器人和同群同人明确接上文的发言共享意图判断。先匹配已发出的追问，再决定聊天、查进度、绘图或点歌。
 
-![从微信收消息、入队分流到文字、语音和图片回执的现状总图](../../docs/diagrams/mention-reply-overview.svg)
+![点歌上线前的聊天与生图流程底图](../../docs/diagrams/mention-reply-overview.svg)
 
 <details>
 <summary>展开分支细节与回退规则</summary>
@@ -104,12 +109,12 @@ flowchart TB
 
     subgraph Intent["2　现行路由与意图判定"]
         direction TB
-        turn_open["开始处理本条<br/>原生艾特优先，其次引用机器人，再识别手打艾特"]
+        turn_open["开始处理本条<br/>原生艾特优先，其次引用机器人，再识别手打艾特和当面喊昵称"]
         old_turn["交给已合并的前轮或接龙"]
         pending_format{"是否匹配已有回复？<br/>图文选择、缺素材、聊天补条件或续看原图"}
         pending_result["图片沿用原要求和引用 → 第 4 段<br/>文字沿用原问题 → 第 3 段<br/>补素材接回原任务；续看沿用同一组图"]
-        image_gate{"艾特、引用机器人或同群同人明确续问？<br/>档案照名单查询仍走普通回复"}
-        image_intent["生图意图用正文、引用和本人近期往来<br/>Jev 出图分 ≥ 0.8 判新图或改图，未决时主模型补判一次<br/>整次分流最多 12 秒。补判失败时分数 ≥ 0.5 问图文，其余文字"]
+        image_gate{"当面叫她、艾特、引用机器人或同人定向续问？<br/>档案照名单查询仍走普通回复"}
+        image_intent["正文、引用和本人近期往来进入同次动作判断<br/>Jev 判断点唱、歌单与出图，未决由主模型补判<br/>整次分流最多 12 秒"]
         after_intent["依次尝试：确认是催图或重试时查本人原任务<br/>再接回符合原任务的补图或明确修订<br/>仍无匹配时按本次分流继续"]
         own_action["催图回报实际状态<br/>可恢复且有远端号的重试只继续查询<br/>有效补充接回原任务"]
         next_image["新图、改图或图文澄清<br/>交给 ImageReply → 第 4 段"]
@@ -118,7 +123,8 @@ flowchart TB
         turn_open -->|本条继续| pending_format
         pending_format -->|匹配| pending_result
         pending_format -->|未匹配| image_gate
-        image_gate -->|符合| image_intent --> after_intent
+        image_gate -->|符合| image_intent -->|聊天或生图| after_intent
+        image_intent -->|点歌或问歌单| songs["歌单查正式曲库；任选或指定歌曲发微信语音条<br/>仅确认缺歌时写想听清单；歧义先问歌名或歌手"]
         image_gate -->|跳过意图判断| after_intent
         after_intent -->|查询或续办已接手| own_action
         after_intent -->|仍有生图动作| next_image
@@ -131,7 +137,7 @@ flowchart TB
         text_status["回报运行状态<br/>原请求被拦截时说明结果"]
         text_gate["艾特或引用直接接话<br/>无定向限同人 30 秒内最多两次，且确实接上一轮"]
         text_skip["对别人说、换话题留给群聊<br/>冷处理按频率回话或跳过"]
-        text_context["同人补话可改写尚未发出的旧稿<br/>引用和已判为生图的请求保留独立<br/>近期短艾特补条件可由另一位群友补"]
+        text_context["同人补话可改写尚未发出的旧稿<br/>引用、独立点歌和生图请求保留独立<br/>近期短艾特补条件可由另一位群友补"]
         text_mode["按需看图、查档案、联网或重试原操作<br/>按固定语音、本轮要求、自动语音条件选发送方式"]
         output_text["提交文字<br/>收到确认才记录已发正文"]
         output_voice["合成并提交语音<br/>合成失败的未发部分回退文字<br/>提交未确认时停止补发"]
@@ -202,7 +208,7 @@ flowchart TB
 
 **维护与验收。** 入口、判断顺序、任务归属、等待回接或发送结果变化时，同次更新受影响的总图卡片和连线（`docs/diagrams/mention-reply-overview.svg`）及分支详图（`docs/diagrams/mention-reply-flow.mmd`）。阈值、超时和回退细节放在详图，SVG 保留决定去向的条件与出口。图块从 Mermaid 图源同步。沿改动分支走到结果，再从结果反查前置判断和回执，并用相关回归或代表样本核对。查看总图时同时检查首屏能否找到主要分路，常见路径能否连续读到结果。
 
-**核对位置。** [入口和分流](../../plugins/mention_chat/__init__.py)、[生图意图](../../plugins/mention_chat/image_intent.py)、[任务和状态](../../plugins/mention_chat/image_reply.py)、[语音发送](../../plugins/mention_chat/voice_reply.py)与[发送回执](../../wxbot_framework/plugin_engine/context.py)。
+**核对位置。** [入口和分流](../../plugins/mention_chat/__init__.py)、[回复动作判断](../../plugins/mention_chat/reply_actions.py)、[任务和状态](../../plugins/mention_chat/image_reply.py)、[语音发送](../../plugins/mention_chat/voice_reply.py)与[发送回执](../../wxbot_framework/plugin_engine/context.py)。
 
 ## 必须成立的规则
 

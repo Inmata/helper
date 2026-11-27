@@ -77,11 +77,14 @@ class ToolDecision:
 
 
 @dataclass(frozen=True)
-class ImageDecision:
+class ActionDecision:
     mode: str
     previous_prompt: str = ""
     probability: float | None = None
     error: str = ""
+    title: str = ""
+    artist: str = ""
+    version: str = ""
 
 
 def _threshold(value, name):
@@ -139,10 +142,10 @@ class JevToolRouter:
             state["补充语境"] = _summary(context)
         return self._decide(VISION, state, VISION_QUESTION, self.vision_threshold, timeout)
 
-    def image_request(self, question, *, context=None, previous_prompt="", timeout=2):
-        """一次判断出图、参考图以及能否沿用上一条生图要求。"""
+    def reply_action(self, question, *, context=None, previous_prompt="", timeout=2):
+        """同一批次判断本轮交付动作、是否指定歌曲及图片参考关系。"""
         if self.jev is None:
-            return ImageDecision("undecided", error="not-configured")
+            return ActionDecision("undecided", error="not-configured")
         questions = [
             {"instructions": "结合当前艾特、引用和它实际承接的话题，判断用户是否要求机器人现在交付一张新生成或编辑后的图片。",
              "true": "要求绘制或拍出成图，包括让人入镜、安排用库里的照片拍合照、接受画图方案、明确补充正在画的图、编辑已有图片或重新出图。引用图片并说‘照这张再来一版’属于用引用图再生成。",
@@ -160,16 +163,32 @@ class JevToolRouter:
                     "true": "当前话题仍承接这项任务，要再画一遍、按刚才说的来，或仅改变参考图和部分条件。换参考图可以保留原任务的场景。",
                     "false": "明确指定了另一套主题、指向不同的旧图、近期并行话题无法确定要接哪一个、仅问进度或闲聊。",
                 })
+            questions.extend((
+                {"instructions": "看当前发言、明确引用和与本人的往来，群友现在要听机器人唱歌或播放点歌片段吗？",
+                 "true": "当面点唱、来首歌、想听某首、再唱一次，或正在回答机器人刚问的点歌曲名。",
+                 "false": "仅问歌手、歌单、评价、歌词、朗读歌词、能力、讨论听歌、转述或拒绝唱歌、要画封面。"},
+                {"instructions": "假设本轮确实点歌，群友是否让机器人任挑一首？",
+                 "true": "只说唱首歌、随便唱、你挑，自己没有选歌或指向某首。",
+                 "false": "指定歌名、歌手、版本、引用的歌或说那首、再来一遍。"},
+                {"instructions": "当前群友在索取机器人能唱的歌曲清单吗？",
+                 "true": "问曲库里有哪些歌、能点哪些、想看看歌单。",
+                 "false": "要求现在唱歌、问某首是谁唱的，或谈别人的歌单。"},
+            ))
             values = self.jev.noul(state, questions, timeout=timeout)
         except Exception as error:
-            return ImageDecision("undecided", error=type(error).__name__)
+            return ActionDecision("undecided", error=type(error).__name__)
         if (not isinstance(values, (list, tuple)) or len(values) != len(questions)
                 or any(type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1
                        for value in values)):
-            return ImageDecision("undecided", error="invalid-probability")
-        if values[0] < 0.8:
-            return ImageDecision("undecided", probability=values[0])
-        return ImageDecision("edit" if values[1] >= 0.7 else "create",
+            return ActionDecision("undecided", error="invalid-probability")
+        sing, any_song, list_songs = values[-3:]
+        if max(sing, list_songs) >= 0.8 and values[0] < 0.5:
+            if list_songs > sing:
+                return ActionDecision("song_list", probability=list_songs)
+            return ActionDecision("song_any" if any_song >= 0.8 else "song", probability=sing)
+        if values[0] < 0.8 or max(sing, list_songs) >= 0.5:
+            return ActionDecision("undecided", probability=values[0])
+        return ActionDecision("edit" if values[1] >= 0.7 else "create",
                              previous_prompt if previous_prompt and values[2] >= 0.8 else "", values[0])
 
     def decide_search(self, *, question, vision_text=None, context="", group_context=None, timeout=None):

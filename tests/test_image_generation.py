@@ -13,6 +13,7 @@ from PIL import Image
 
 from support.recyclable_tempdir import RecyclableTemporaryDirectory
 from plugins.mention_chat import Plugin
+from plugins.mention_chat.reply_actions import ReplyActions
 from plugins.mention_chat.image_plan import ImagePlan
 from plugins.mention_chat.portraits import RoomPortraits
 from wxbot_framework.authorization import LOCAL_EDITOR
@@ -112,7 +113,7 @@ class Jev:
             values = [0.01, 0.01] if text in ("画不出来？", "图呢？", "画好了吗？") else [0.99, 0.01]
             if "请求人上一次生图要求" in state:
                 values.append(0.95 if text == "以这个为准再生成一次" else 0.05)
-            return values
+            return values + [0.01, 0.01, 0.01]
         return [0.99, 0.01]
 
 
@@ -171,6 +172,7 @@ class ImageGenerationTests(unittest.TestCase):
         self.output_patch.start()
         self.portraits = self.root / "群友照片"
         self.enterContext(patch("plugins.mention_chat.portraits.PORTRAIT_ROOT", self.portraits))
+        self.plugin.actions = ReplyActions()
         self.plugin.image_reply.start(self.ctx, self.plugin._status)
         self.sequence = 0
         RECENT_IMAGES.clear()
@@ -480,7 +482,7 @@ class ImageGenerationTests(unittest.TestCase):
         def judge(state, questions, **options):
             if "当前艾特正文" in state:
                 self.assertIn("最近绘图回执", state["前文与引用"])
-                return [0.99, 0.10, 0.99]
+                return [0.99, 0.10, 0.99, 0.01, 0.01, 0.01]
             return [0.99] * len(questions)
         with patch.object(self.ctx._jev, "noul", side_effect=judge):
             self.plugin.on_message(self.message("背景换蓝", sender="wxid_other"), self.ctx)
@@ -510,13 +512,13 @@ class ImageGenerationTests(unittest.TestCase):
         self.plugin.on_message(self.message(), self.ctx)
         self.wait_done()
         stale = self.message("背景换蓝", received_at=time.monotonic() + 60)
-        with patch.object(self.plugin.image_reply, "intent", wraps=self.plugin.image_reply.intent) as intent:
+        with patch.object(self.plugin.actions, "intent", wraps=self.plugin.actions.intent) as intent:
             self.plugin.on_message(stale, self.ctx)
             intent.assert_not_called()
         self.backend.image_success = False
         self.plugin.on_message(self.message("/生图 画只黑猫"), self.ctx)
         self.wait_done()
-        with patch.object(self.plugin.image_reply, "intent", wraps=self.plugin.image_reply.intent) as intent:
+        with patch.object(self.plugin.actions, "intent", wraps=self.plugin.actions.intent) as intent:
             self.plugin.on_message(self.message("背景换红"), self.ctx)
             intent.assert_not_called()
         self.wait_done()
@@ -535,7 +537,7 @@ class ImageGenerationTests(unittest.TestCase):
         with (patch.object(self.ctx._jev, "noul", side_effect=judge),
               patch.object(self.ctx._llm, "complete_json", return_value={"动作": "text"}),
               patch.object(self.plugin, "_reply_turn", return_value=iter(())) as chat,
-              patch.object(self.plugin.image_reply, "intent", wraps=self.plugin.image_reply.intent) as intent):
+              patch.object(self.plugin.actions, "intent", wraps=self.plugin.actions.intent) as intent):
             for seq, text in enumerate(["那花纹是什么颜色？", "我去买水果了"], 2):
                 self.plugin.on_message(self.message(text, dispatch_sequence=seq, dispatch_epoch="test"), self.ctx)
             chat.assert_called_once()
@@ -574,7 +576,7 @@ class ImageGenerationTests(unittest.TestCase):
                 return {"动作": "create"}
             return plan(system, user, **options)
 
-        with (patch.object(self.ctx._jev, "noul", return_value=[0.60, 0.05]),
+        with (patch.object(self.ctx._jev, "noul", return_value=[0.60, 0.05, 0.01, 0.01, 0.01]),
               patch.object(self.ctx._llm, "complete_json", side_effect=model),
               self.assertLogs(self.ctx.logger, level="INFO") as log):
             turns = self.members.turns
@@ -615,7 +617,7 @@ class ImageGenerationTests(unittest.TestCase):
 
     def test_answer_text_to_format_question_uses_chat_with_original_prompt(self):
         original = self.message("@机器人\u2005生成这段冒险", data={"is_at_self": True, "at_members": ["wxid_robot"]})
-        with (patch.object(self.ctx._jev, "noul", return_value=[0.27, 0.05]),
+        with (patch.object(self.ctx._jev, "noul", return_value=[0.27, 0.05, 0.01, 0.01, 0.01]),
               patch.object(self.ctx._llm, "complete_text", return_value="这段冒险要写成文字，还是画成图？"),
               patch.object(self.ctx._llm, "complete_json", return_value={"动作": "clarify"})):
             self.plugin.on_message(original, self.ctx)
@@ -631,7 +633,7 @@ class ImageGenerationTests(unittest.TestCase):
 
     def test_likely_image_asks_instead_of_chat_when_second_opinion_times_out(self):
         mention = {"is_at_self": True, "at_members": ["wxid_robot"]}
-        with (patch.object(self.ctx._jev, "noul", return_value=[0.60, 0.05]),
+        with (patch.object(self.ctx._jev, "noul", return_value=[0.60, 0.05, 0.01, 0.01, 0.01]),
               patch.object(self.ctx._llm, "complete_text", return_value="四格想要图片还是文字？"),
               patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError)):
             self.plugin.on_message(self.message("@机器人\u2005做个四格漫画", data=mention), self.ctx)
@@ -640,7 +642,7 @@ class ImageGenerationTests(unittest.TestCase):
 
     def test_rejected_and_unavailable_format_choices_leave_drawing_idle(self):
         mention = {"is_at_self": True, "at_members": ["wxid_robot"]}
-        with patch.object(self.ctx._jev, "noul", return_value=[0.05, 0.04]):
+        with patch.object(self.ctx._jev, "noul", return_value=[0.05, 0.04, 0.01, 0.01, 0.01]):
             for query, result in (("怎么画漫画？", {"动作": "text"}), ("别生成", {"动作": "text"}),
                                   ("生成这个", {"动作": "未知"})):
                 msg = self.message("@机器人\u2005" + query, data=mention)
@@ -1009,7 +1011,7 @@ class ImageGenerationTests(unittest.TestCase):
         paths = [self.portrait(self.knowledge.entity(ROOM, name, pinned=True)) for name in ("小枫", "小栗")]
         self.reference_fixture("unrelated")
         self.ctx.capabilities -= {"group.image.receive"}
-        with (patch.object(self.ctx._jev, "noul", return_value=[0.99, 0.99]),
+        with (patch.object(self.ctx._jev, "noul", return_value=[0.99, 0.99, 0.01, 0.01, 0.01]),
               patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError)):
             self.plugin.on_message(self.message("@机器人\u2005用你照片档案库里面有的所有人物的照片生成一个大合照",
                 data={"is_at_self": True, "at_members": ["wxid_robot"]}), self.ctx)
@@ -1357,7 +1359,7 @@ class ImageGenerationTests(unittest.TestCase):
 
         def judge(state, questions, **options):
             if "当前艾特正文" in state:
-                return [0.18, 0.01, 0.01]
+                return [0.18, 0.01, 0.01, 0.01, 0.01, 0.01]
             if "当前话语" in state:
                 return [0.01]
             return [0.99]  # 复现旧版对「改正」的补充误判。
@@ -1386,7 +1388,7 @@ class ImageGenerationTests(unittest.TestCase):
 
         def judge(state, questions, **options):
             if "当前艾特正文" in state:
-                return [0.99, 0.85 if state["当前艾特正文"] == correction else 0.01, 0.01]
+                return [0.99, 0.85 if state["当前艾特正文"] == correction else 0.01, 0.01, 0.01, 0.01, 0.01]
             if "正在做的图" in state:
                 return [0.99 if state["当前发言"] == correction else 0.01]
             return [0.99] * len(questions)

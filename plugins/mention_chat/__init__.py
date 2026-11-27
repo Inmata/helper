@@ -10,7 +10,8 @@ from datetime import datetime, timedelta, timezone
 
 from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
-from .image_intent import FORMAT_SECONDS
+from .reply_actions import FORMAT_SECONDS, ReplyActions
+from .song_request import Songbook, nickname_call
 from .image_plan import ImageProfiles
 from .image_reply import EDIT_HINT, PROGRESS_WORDS, ImageReply
 from .portraits import MAX_REFERENCES, SELF_AVATAR_HINT, asks_portrait_list
@@ -113,6 +114,8 @@ class Plugin:
         self._followup_lock = threading.Lock()
         self._slow = None
         self.cold = None
+        self.actions = None
+        self.songs = Songbook()
         self.voice_reply = VoiceReply()
         self.image_reply = ImageReply()
         self._wait = None
@@ -159,6 +162,7 @@ class Plugin:
         self._slow = SlowReplies(ctx.logger)
         self._status = StatusReplies(ctx.logger)
         self._wait = ReplyWait(self._status)
+        self.actions = ReplyActions()
         self.image_reply.start(ctx, self._status)
         if "voice.send" in getattr(ctx, "capabilities", ()):
             self.voice_reply.start(ctx.logger)
@@ -287,8 +291,18 @@ class Plugin:
                                         (outcome.search_query, outcome.search_subject or outcome.search_query))
         return outcome
 
+    def _source(self, message):
+        source = at_source(message, self.members, self.aliases)
+        if source or message.data.get("at_members") or self.actions is None:
+            return source
+        if nickname_call(message.text, self.aliases):
+            return "nickname"
+        return None
+
     def _clean_query(self, message, source):
         text = strip_at_labels(message.data.get("retry_question", message.text))
+        if source == "nickname":
+            text = nickname_call(text, self.aliases)
         if source == "typed":
             label = typed_at(text, self._bot_names(message.chat_id))
             if label:
@@ -319,7 +333,7 @@ class Plugin:
     def _advance_turn(self, turns, turn, ctx, *, deadline=None):
         changed = False
         for incoming in turns.additions(turn, deadline=deadline):
-            source = at_source(incoming, self.members, self.aliases)
+            source = self._source(incoming)
             quote = incoming.data.get("quote")
             if quote or (source is None and (incoming.data.get("at_members") or incoming.text.startswith("@"))):
                 continue
@@ -331,12 +345,12 @@ class Plugin:
             merge = self._turn_judge(ctx, "merge", turn.question, new=text)
             if not source and not merge and not self._turn_judge(ctx, "follow", turn.question, new=text):
                 continue
-            if not incoming.is_self and "group.image.send" in getattr(ctx, "capabilities", ()):
+            if not incoming.is_self and self.actions is not None:
                 budget = CURRENT.get()
                 if budget and budget.deadline - budget.clock() < FORMAT_SECONDS:
                     turns.claim(incoming)
                     continue
-                if self.image_reply.intent(incoming, ctx, text):
+                if self.actions.intent(incoming, ctx, text, self.image_reply):
                     turns.claim(incoming)
                     continue
             if merge:
@@ -363,6 +377,9 @@ class Plugin:
                 if not self.image_reply.followup(message, ctx, args, addressed=True, can_revise=True, cold=self.cold):
                     self.image_reply.request(message, ctx, args, cold=self.cold)
                 return
+            if parts[0] == "/想听清单":
+                self.songs.show_wishes(message, ctx)
+                return
             if parts[0] == VOICE_COMMAND:
                 self.voice_reply.command(message, ctx, args)
             elif parts[0] == VOICE_REPLY_COMMAND and not message.is_self:
@@ -377,7 +394,7 @@ class Plugin:
             resume = lambda: self._process_message(message, ctx, turns)
         key = turn_key(message)
         waiting = None
-        if not is_control(message.text) and at_source(message, self.members, self.aliases):
+        if not is_control(message.text) and self._source(message):
             if self._wait is not None:
                 try:
                     waiting = self._wait.accept(message, ctx, reply_seconds(message.text))
@@ -444,7 +461,7 @@ class Plugin:
                 active_budget.stage = "理解问题"
         if turns is not None and turns.merged(message):
             return
-        source = at_source(message, self.members, self.aliases)
+        source = self._source(message)
         clean_query = self._clean_query(message, source)
         game = self.room_game(message.chat_id, ctx, message=message)
         if game and self.is_move(clean_query, game):
@@ -502,9 +519,32 @@ class Plugin:
                 source = "image_follow"
         if source and turns is not None and not turns.claimed(message):
             turns.claim(message)
+        previous_song = turns.continuation(message) if turns is not None else None
+        if previous_song and previous_song.voice_action == "点歌" and not inventory and not answer:
+            chat_answer = False
         if source and eligible and not chat_answer:
-            image_intent = self.image_reply.intent(message, ctx, clean_query)
-            if image_intent is None:
+            snapshot = self.members.conversation_snapshot(message) if self.actions is not None else None
+            personality = ctx.personality(message) if snapshot else None
+            action = (self.actions.intent(message, ctx, clean_query, self.image_reply, snapshot=snapshot)
+                      if self.actions is not None else None)
+            if action and action.mode in ("song", "song_any", "song_list"):
+                def guard():
+                    return self._delivery_guard(message, ctx.response_guard, snapshot, personality)
+
+                @contextmanager
+                def send_guard():
+                    with guard(), active_budget.delivery() if active_budget else nullcontext():
+                        yield
+                turn = turns.open(message, clean_query, depth) if turns is not None else None
+                try:
+                    delivered = self.songs.respond(message, ctx, action, guard, send_guard)
+                    if delivered and turn:
+                        turns.sent(turn, delivered, voice_action="点歌")
+                finally:
+                    if turn:
+                        turns.close(turn)
+                return
+            if action is None:
                 retry = clean_query.strip(" ？?！!。") in ("重试", "再试一次")
                 with self._followup_lock:
                     last_chat = _tool_followup(self._retry, turn_key(message), message.received_at, 300) if retry else None
@@ -512,15 +552,15 @@ class Plugin:
                         and self.image_reply.status(message, ctx, clean_query)):
                     return
             else:
-                if (image_intent.mode in ("create", "edit") and recent_job and
+                if (action.mode in ("create", "edit") and recent_job and
                         self.image_reply.followup(message, ctx, clean_query, addressed=True, can_revise=True,
                                                   cold=self.cold)):
                     return
-                edit_job = (recent_job if image_intent.mode == "edit" and recent_job and
+                edit_job = (recent_job if action.mode == "edit" and recent_job and
                             (source == "image_follow" or EDIT_HINT.search(clean_query)) and
                             not message.data.get("quote") else None)
-                self.image_reply.request(message, ctx, clean_query, mode=image_intent.mode,
-                                         previous_prompt=image_intent.previous_prompt, cold=self.cold, edit_job=edit_job)
+                self.image_reply.request(message, ctx, clean_query, mode=action.mode,
+                                         previous_prompt=action.previous_prompt, cold=self.cold, edit_job=edit_job)
                 return
         if (eligible and not chat_answer and self._wait is not None and
                 self._wait.followup(message, ctx, clean_query, addressed=directed)):

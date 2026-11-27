@@ -19,7 +19,6 @@ from wxbot_framework.integrations.magpie_tools import MagpieToolsError, MagpieTo
 from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget
 from wxbot_framework.messaging.mentions import addressed_elsewhere, strip_at_labels
 from wxbot_framework.recent_images import ImageRecord, RECENT_IMAGES, READY
-from .image_intent import FORMAT_SECONDS, choose_format
 from .portraits import MAX_REFERENCES
 from .image_plan import (CHAT_PHOTO_SOURCE, ImageProfiles, fallback_image, image_sources, prepare_image,
                          select_image_sources, uses_previous_picture)
@@ -84,8 +83,6 @@ class ImageReply:
     def __init__(self):
         self.stopped = threading.Event()
         self._lock = threading.RLock()
-        self._intent_lock = threading.Lock()
-        self._intents = OrderedDict()
         self._format_questions = OrderedDict()
         self._pending = OrderedDict()
         self._members = set()
@@ -195,15 +192,7 @@ class ImageReply:
             self._queue.put(None)
             self._thread.join()
 
-    def intent(self, message, ctx, text):
-        if self._thread is None or not text or len(text) > 2000:
-            return None
-        identity = ((message.dispatch_epoch, message.dispatch_sequence) if message.dispatch_sequence
-                    else (*turn_key(message), message.sequence, message.received_at))
-        with self._intent_lock:
-            if identity in self._intents:
-                return self._intents[identity]
-        snapshot = ctx.members.conversation_snapshot(message)
+    def routing_history(self, message):
         member = turn_key(message)
         with self._lock:
             last_job = self._jobs.get(member)
@@ -217,29 +206,7 @@ class ImageReply:
                     previous = "\n".join(filter(None, (last_job.previous_prompt, last_job.prompt, *last_job.revisions)))[-2000:]
             except SnapshotExpired:
                 pass
-        # 预判补话时可能身处上一轮预算；路由单独限时，正文仍有完整调用额度。
-        outer = CURRENT.get()
-        seconds = outer.remaining(FORMAT_SECONDS) if outer else FORMAT_SECONDS
-        token = CURRENT.set(ReplyBudget(time.monotonic(), seconds))
-        try:
-            decision, origin, error = choose_format(ctx, message, snapshot, text, previous, self.stopped,
-                                                    just_delivered=just_delivered)
-            if (decision.mode == "create" and just_delivered and not message.data.get("quote")
-                    and EDIT_HINT.match(text)):
-                decision = replace(decision, mode="edit")
-                origin += "＋刚发成品上的修改要求"
-            intent = decision if decision.mode != "text" else None
-            ctx.logger.info("生图分流：消息=%s 来源=%s 动作=%s 异常=%s",
-                            snapshot.anchor_id, origin, decision.mode, error or "-")
-        finally:
-            CURRENT.reset(token)
-        if outer:
-            outer.remaining(1)
-        with self._intent_lock:
-            self._intents[identity] = intent
-            if len(self._intents) > 128:
-                self._intents.popitem(last=False)
-        return intent
+        return previous, just_delivered
 
     def format_answer(self, message, ctx, text, source):
         key = turn_key(message)

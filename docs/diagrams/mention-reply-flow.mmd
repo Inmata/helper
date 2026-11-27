@@ -16,12 +16,12 @@ flowchart TB
 
     subgraph Intent["2　现行路由与意图判定"]
         direction TB
-        turn_open["开始处理本条<br/>原生艾特优先，其次引用机器人，再识别手打艾特"]
+        turn_open["开始处理本条<br/>原生艾特优先，其次引用机器人，再识别手打艾特和当面喊昵称"]
         old_turn["交给已合并的前轮或接龙"]
         pending_format{"是否匹配已有回复？<br/>图文选择、缺素材、聊天补条件或续看原图"}
         pending_result["图片沿用原要求和引用 → 第 4 段<br/>文字沿用原问题 → 第 3 段<br/>补素材接回原任务；续看沿用同一组图"]
-        image_gate{"艾特、引用机器人或同群同人明确续问？<br/>档案照名单查询仍走普通回复"}
-        image_intent["生图意图用正文、引用和本人近期往来<br/>Jev 出图分 ≥ 0.8 判新图或改图，未决时主模型补判一次<br/>整次分流最多 12 秒。补判失败时分数 ≥ 0.5 问图文，其余文字"]
+        image_gate{"当面叫她、艾特、引用机器人或同人定向续问？<br/>档案照名单查询仍走普通回复"}
+        image_intent["正文、引用和本人近期往来进入同次动作判断<br/>Jev 判断点唱、歌单与出图，未决由主模型补判<br/>整次分流最多 12 秒"]
         after_intent["依次尝试：确认是催图或重试时查本人原任务<br/>再接回符合原任务的补图或明确修订<br/>仍无匹配时按本次分流继续"]
         own_action["催图回报实际状态<br/>可恢复且有远端号的重试只继续查询<br/>有效补充接回原任务"]
         next_image["新图、改图或图文澄清<br/>交给 ImageReply → 第 4 段"]
@@ -30,7 +30,8 @@ flowchart TB
         turn_open -->|本条继续| pending_format
         pending_format -->|匹配| pending_result
         pending_format -->|未匹配| image_gate
-        image_gate -->|符合| image_intent --> after_intent
+        image_gate -->|符合| image_intent -->|聊天或生图| after_intent
+        image_intent -->|点歌或问歌单| songs["歌单查正式曲库；任选或指定歌曲发微信语音条<br/>仅确认缺歌时写想听清单；歧义先问歌名或歌手"]
         image_gate -->|跳过意图判断| after_intent
         after_intent -->|查询或续办已接手| own_action
         after_intent -->|仍有生图动作| next_image
@@ -43,7 +44,7 @@ flowchart TB
         text_status["回报运行状态<br/>原请求被拦截时说明结果"]
         text_gate["艾特或引用直接接话<br/>无定向限同人 30 秒内最多两次，且确实接上一轮"]
         text_skip["对别人说、换话题留给群聊<br/>冷处理按频率回话或跳过"]
-        text_context["同人补话可改写尚未发出的旧稿<br/>引用和已判为生图的请求保留独立<br/>近期短艾特补条件可由另一位群友补"]
+        text_context["同人补话可改写尚未发出的旧稿<br/>引用、独立点歌和生图请求保留独立<br/>近期短艾特补条件可由另一位群友补"]
         text_mode["按需看图、查档案、联网或重试原操作<br/>按固定语音、本轮要求、自动语音条件选发送方式"]
         output_text["提交文字<br/>收到确认才记录已发正文"]
         output_voice["合成并提交语音<br/>合成失败的未发部分回退文字<br/>提交未确认时停止补发"]

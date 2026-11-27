@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import test_image_generation as fixture
 from plugins.mention_chat import reply_seconds
-from plugins.mention_chat.image_intent import FORMAT_PROMPT
+from plugins.mention_chat.reply_actions import FORMAT_PROMPT
 from wxbot_framework.app.maintenance import MaintenanceService
 from wxbot_framework.authorization import LOCAL_EDITOR
 from wxbot_framework.conversation.correction_capture import PROPOSE

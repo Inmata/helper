@@ -21,7 +21,7 @@ from wxbot_framework.conversation.personality import PersonalityState
 from wxbot_framework.conversation.reply_wait import ReplyWait
 from wxbot_framework.conversation.room_state import RoomStateStore
 from wxbot_framework.conversation.status_replies import StatusReplies
-from wxbot_framework.conversation.turns import READ_CONSENT, SING_INTENT, ConversationTurns
+from wxbot_framework.conversation.turns import ConversationTurns
 from wxbot_framework.integrations.llm import LLMClient, LLMConnectionError, LLMError
 from wxbot_framework.integrations.reply_budget import ReplyExpired
 from wxbot_framework.messaging.mentions import parse_quote
@@ -657,37 +657,22 @@ class MentionDeliveryTests(unittest.TestCase):
         self.assertEqual(ctx.sent, [("reply_at", "八点集合。")])
         status.submit.assert_not_called()
 
-    def test_singing_offer_is_text_and_only_consent_starts_reading(self):
+    def test_song_request_and_followup_use_normal_chat_and_voice_preference(self):
         turns = self.members.turns = ConversationTurns()
-        explanation = "唱我不会，不过能念给你听，你想听朗读吗？"
-        reading = "月光从窗边落下来。"
-        plugin, ctx = self.build([explanation, reading])
+        plugin, ctx = self.build(["你想聊哪首歌？", "好呀。"])
         ctx.capabilities = {"voice.send"}
         ctx.jev = Mock()
-
-        def judge(state, questions, **kw):
-            if "前一句或锚点" in state:
-                return [0.99]
-            return [0.99 if question in (SING_INTENT, READ_CONSENT) else 0.01 for question in questions]
-
-        ctx.jev.noul.side_effect = judge
+        ctx.jev.noul.side_effect = lambda state, qs, **kw: [float("前一句或锚点" in state)] * len(qs)
         first = replace(mention("给我唱一首月光"), dispatch_sequence=1)
-        ok = replace(first, text="好，那就念吧", data={}, dispatch_sequence=2)
-        with patch.object(plugin.voice_reply, "send", return_value=True) as voice:
+        with patch.object(plugin.voice_reply, "reserve", return_value=False), patch.object(plugin.voice_reply, "send") as voice:
             turns.observe(first)
             plugin.on_message(first, ctx)
-            self.assertEqual(ctx.sent, [("reply_at", explanation)])
+            reply = replace(first, text="行", data={}, received_at=time.monotonic(), dispatch_sequence=2)
+            turns.observe(reply)
+            plugin.on_message(reply, ctx)
+            self.assertEqual([text for _, text in ctx.sent], ["你想聊哪首歌？", "好呀。"])
             voice.assert_not_called()
-            self.assertIn("还未朗读", ctx.last_user)
-            ok = replace(ok, received_at=time.monotonic())
-            turns.observe(ok)
-            plugin.on_message(ok, ctx)
-            voice.assert_called_once()
-            self.assertEqual(voice.call_args.args[2], reading)
-        self.assertIn("获准朗读的原请求", ctx.last_user)
-        follow = replace(ok, received_at=time.monotonic(), dispatch_sequence=3)
-        self.assertEqual(turns.continuation(follow).voice_action, "已提交朗读语音")
-        self.assertFalse(turns.continuation(follow).reading_offer)
+            self.assertNotIn("获准朗读", ctx.last_user)
 
     def test_interjection_after_first_send_drops_the_rest_without_error(self):
         plugin, ctx = self.build("哈哈！真的假的？我不信。")

@@ -105,6 +105,8 @@ class Jev:
     def noul(self, state, questions, **options):
         if "当前群的别称" in state:
             raise JevError("本机用例默认测试语义服务离线时的选材")
+        if "新的发言" in state and len(questions) == 1:
+            return [0.99 if "补齐" in questions[0]["true"] else 0.01]
         text = state.get("当前艾特正文")
         if text:
             values = [0.01, 0.01] if text in ("画不出来？", "图呢？", "画好了吗？") else [0.99, 0.01]
@@ -455,6 +457,91 @@ class ImageGenerationTests(unittest.TestCase):
             self.wait_done()
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
         self.assertEqual(self.backend.texts, [])
+
+    def test_1151_quoted_bot_request_reaches_one_generation_and_image_receipt(self):
+        message = self.message("现在档案库照片不可能才 150 斤 你生成一张真实的 150 斤可能是什么样子",
+            data={"at_members": [], "quote": {"ref_type": "1", "chatusr": self.members.account,
+                                              "text": "165配150斤本来就挺显肉的嘛", "name": "a姐"}},
+            dispatch_sequence=1, dispatch_epoch="replay")
+        with patch.object(self.plugin, "_reply_turn", return_value=iter(())) as chat:
+            self.plugin.on_message(message, self.ctx)
+            self.wait_done()
+        chat.assert_not_called()
+        self.assertEqual([c["name"] for c in self.server.calls].count("generate_image"), 1)
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+        row = self.members.connection().execute(
+            "SELECT source_id,status FROM reply_receipts WHERE kind='image'").fetchone()
+        self.assertEqual(tuple(row), (self.members.message_id(message), "submitted"))
+
+    def test_recent_delivered_edit_binds_requesters_exact_image_or_asks_which_one(self):
+        self.plugin.on_message(self.message(), self.ctx)
+        self.wait_done()
+        original = self.members.sent_images(ROOM)[0]["path"]
+        def judge(state, questions, **options):
+            if "当前艾特正文" in state:
+                self.assertIn("最近绘图回执", state["前文与引用"])
+                return [0.99, 0.10, 0.99]
+            return [0.99] * len(questions)
+        with patch.object(self.ctx._jev, "noul", side_effect=judge):
+            self.plugin.on_message(self.message("背景换蓝", sender="wxid_other"), self.ctx)
+            self.plugin.on_message(self.message("背景换蓝"), self.ctx)
+            self.wait_done()
+            draws = [c for c in self.server.calls if c["name"] == "generate_image"]
+            self.assertEqual(len(draws), 2)
+            self.assertEqual(draws[-1]["arguments"]["reference_images"], [original])
+            self.assertIn("背景换蓝", draws[-1]["arguments"]["prompt"])
+            self.poster_fixture()
+            self.plugin.on_message(self.message("背景换红"), self.ctx)
+            self.wait_done()
+            self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 2)
+            self.assertIn("引用", self.backend.texts[-1][1])
+
+    def test_plain_progress_looks_up_existing_task_and_never_submits_another(self):
+        self.server.release.clear()
+        self.plugin.on_message(self.message(), self.ctx)
+        self.assertTrue(self.server.waiting.wait(2))
+        self.plugin.on_message(self.message("图呢？"), self.ctx)
+        self.wait_for(lambda: any("等待生成服务" in text for _, text in self.backend.texts))
+        self.server.release.set()
+        self.wait_done()
+        self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 1)
+
+    def test_plain_edit_cannot_bind_an_expired_or_unconfirmed_delivery(self):
+        self.plugin.on_message(self.message(), self.ctx)
+        self.wait_done()
+        stale = self.message("背景换蓝", received_at=time.monotonic() + 60)
+        with patch.object(self.plugin.image_reply, "intent", wraps=self.plugin.image_reply.intent) as intent:
+            self.plugin.on_message(stale, self.ctx)
+            intent.assert_not_called()
+        self.backend.image_success = False
+        self.plugin.on_message(self.message("/生图 画只黑猫"), self.ctx)
+        self.wait_done()
+        with patch.object(self.plugin.image_reply, "intent", wraps=self.plugin.image_reply.intent) as intent:
+            self.plugin.on_message(self.message("背景换红"), self.ctx)
+            intent.assert_not_called()
+        self.wait_done()
+        self.assertEqual(sum(c["name"] == "generate_image" for c in self.server.calls), 2)
+
+    def test_text_followup_is_routed_once_and_undirected_chatter_stays_unclaimed(self):
+        turns = self.members.turns
+        original = self.message("先聊橘猫", dispatch_sequence=1, dispatch_epoch="test")
+        turn = turns.open(original, original.text, 0)
+        turns.sent(turn, "它的尾巴上有花纹。")
+        turns.close(turn)
+        def judge(state, questions, **options):
+            if "前一句或锚点" in state:
+                return [float("那花纹" in state["新的发言"])]
+            return [0.01] * len(questions)
+        with (patch.object(self.ctx._jev, "noul", side_effect=judge),
+              patch.object(self.ctx._llm, "complete_json", return_value={"动作": "text"}),
+              patch.object(self.plugin, "_reply_turn", return_value=iter(())) as chat,
+              patch.object(self.plugin.image_reply, "intent", wraps=self.plugin.image_reply.intent) as intent):
+            for seq, text in enumerate(["那花纹是什么颜色？", "我去买水果了"], 2):
+                self.plugin.on_message(self.message(text, dispatch_sequence=seq, dispatch_epoch="test"), self.ctx)
+            chat.assert_called_once()
+            self.assertEqual(chat.call_args.kwargs["source"], "follow")
+            intent.assert_called_once()
+            self.assertEqual(self.server.calls, [])
 
     def test_explicit_mention_is_owned_once_and_not_merged_into_previous_turn(self):
         previous = self.message("@机器人\u2005前一个问题", dispatch_sequence=1, dispatch_epoch="epoch")
@@ -988,7 +1075,7 @@ class ImageGenerationTests(unittest.TestCase):
               patch.object(self.ctx._llm, "complete_json", side_effect=TimeoutError)):
             self.plugin.on_message(self.message("/生图 " + question), self.ctx)
             self.wait_done()
-            self.assertEqual(judge.call_args.args[0]["绘图要求"], question)
+            self.assertIn(question, [call.args[0].get("绘图要求") for call in judge.call_args_list])
             new_photo = self.portrait(second)
             self.plugin.on_message(self.message("/生图 " + question), self.ctx)
             self.wait_done()

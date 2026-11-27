@@ -16,8 +16,7 @@ FOLLOW_LIMIT = 2
 CLARIFICATION_SECONDS = 90
 _QUESTION = re.compile(r"[?？]|你(?:问|指|说)的是|哪个|哪(?:一)?[场款天年]")
 _REFERS_BACK = re.compile(r"不是|刚才|你(?:说|讲)|我说的是|到底|不对吧|(?:^|[，。])那|这(?:个|事|说法)|他们")
-_SELF_REFERENCE = re.compile(r"你|刚才|刚刚|之前|上次|前面|前几天|以前|不对|说错|搞错|念|朗读|唱|语音|重说|记错|谁(?:说|讲)的|我(?:哪|啥|什么)时候")
-_SING_REQUEST = re.compile(r"唱|来(?:一|半)?首|\bsing\b", re.IGNORECASE)
+_SELF_REFERENCE = re.compile(r"你|刚才|刚刚|之前|上次|前面|前几天|以前|不对|说错|搞错|念|朗读|语音|重说|记错|谁(?:说|讲)的|我(?:哪|啥|什么)时候")
 PHOTO_TOPIC = re.compile(r"照|相册|相片|档案|图库|图片库|素材|合影|入镜|出镜|人像|头像")
 
 CORRECTION_INTENT = {
@@ -25,17 +24,7 @@ CORRECTION_INTENT = {
     "true": "说机器人以前讲过某句话、指出它答错或改口，追问它为何那样回答，"
             "或者质疑它刚发的语音其实是念的。‘你之前说结婚就选小林’即使没有问号，仍然在核对旧话。"
             "引用机器人称某分数是高手，反问‘前十万也叫高手？’也算。质疑‘我啥时候说过这个’也算。",
-    "false": "普通新问题、群友纠正自己的错字、单纯补充新条件、评价其他人、单纯请求唱歌或朗读。",
-}
-SING_INTENT = {
-    "instructions": "当前发言是否直接要求机器人实际唱歌或用旋律演唱？",
-    "true": "‘唱一个雨爱’、‘给我用语音唱一下’、‘来首歌’。",
-    "false": "要求念歌词、评论之前的语音、指出上次光念没唱、问会不会唱，或在讨论别人唱歌。",
-}
-READ_CONSENT = {
-    "instructions": "机器人刚提出把原请求内容改为文字朗读。当前发言是否接受这项朗读提议？",
-    "true": "清楚同意用朗读替代演唱，比如‘可以，那就念吧’或紧接具体朗读提议说‘行’。",
-    "false": "否定、想要唱而非念、另起话题、对旧语音的评论，或要求朗读不同内容。",
+    "false": "普通新问题、群友纠正自己的错字、单纯补充新条件、评价其他人、普通的新请求。",
 }
 PHOTO_INVENTORY = {
     "instructions": "这句话需要机器人说明自己在本群实际有哪些人物照片，或能用这些素材做什么吗？结合引用和上一轮判断。",
@@ -50,17 +39,11 @@ def turn_intents(jev, question, *, quote=None, previous=None):
     checks = {}
     if quote or previous or _SELF_REFERENCE.search(question):
         checks["correction"] = CORRECTION_INTENT
-    if _SING_REQUEST.search(question):
-        checks["sing"] = SING_INTENT
-    if previous and previous.reading_offer:
-        checks["read"] = READ_CONSENT
     if PHOTO_TOPIC.search(question + (previous.text if previous else "") + ((quote or {}).get("text") or "")):
         checks["photo_inventory"] = PHOTO_INVENTORY
     if not checks:
         return set()
     state = {"当前发言": question, "引用": quote, "机器人上一轮答复": previous.text if previous else ""}
-    if "read" in checks:
-        state["待确认的原请求"] = previous.reading_offer
     try:
         scores = jev.noul(state, list(checks.values()), timeout=2)
         return {key for key, score in zip(checks, scores, strict=True) if score >= 0.7}
@@ -103,7 +86,7 @@ def judge_turn(jev, intent, question, *, previous="", new=""):
         p, = jev.noul({"前一句或锚点": question, context_key: previous, "新的发言": new},
                       [{"instructions": "依据消息含义和说话对象判断，拿不准判否。", "true": yes, "false": no}],
                       timeout=2)
-    except (JevError, OSError):
+    except (JevError, OSError, ValueError):
         return False
     return p >= 0.70
 
@@ -166,7 +149,6 @@ class LastReply:
     text: str
     sent_at: float
     depth: int
-    reading_offer: str = ""
     voice_action: str = ""
     request_at: float = 0
 
@@ -238,7 +220,7 @@ class ConversationTurns:
                 self._condition.wait(left)
             return ()
 
-    def sent(self, turn, text, *, reading_offer="", voice_action="", allow_closed=False):
+    def sent(self, turn, text, *, voice_action="", allow_closed=False):
         with self._condition:
             key = turn_key(turn.message)
             active = self._active.get(key)
@@ -252,13 +234,13 @@ class ConversationTurns:
             now = monotonic()
             self._replied = {k: value for k, value in self._replied.items()
                              if now - value.sent_at <= FOLLOW_SECONDS}
-            self._replied[key] = LastReply(turn.question, "\n".join(turn.sent), now, turn.depth, reading_offer, voice_action,
+            self._replied[key] = LastReply(turn.question, "\n".join(turn.sent), now, turn.depth, voice_action,
                                            turn.message.received_at)
 
     def continuation(self, message):
         with self._condition:
             previous = self._replied.get(turn_key(message))
-            if (previous is not None and (previous.depth < FOLLOW_LIMIT or previous.reading_offer)
+            if (previous is not None and previous.depth < FOLLOW_LIMIT
                     and 0 <= message.received_at - previous.sent_at <= FOLLOW_SECONDS):
                 return previous
 

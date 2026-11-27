@@ -40,7 +40,7 @@ SEARCH_HINTS = ("联网", "上网查", "网上查", "上网搜", "网上搜", "�
 IMAGE_WINDOW_SECONDS = 120
 SEARCH_RETRY_SECONDS = 300
 MAX_BATCH_IMAGES = 3
-_ALL_IMAGES = re.compile(r"(?:那就|那)?把?(?:这?(?:两|俩|三|几|\d+)张(?:图)?)?"
+ALL_IMAGES = re.compile(r"(?:那就|那)?把?(?:这?(?:两|俩|三|几|\d+)张(?:图)?)?"
                          r"(?:都看|一起看|全看|全部看)(?:一下|一遍|看)?(?:吧|啊|吗|行吗|不行吗?)?[。！？!?~～]*")
 _SEARCH_RETRY = re.compile(r"(?:^|[\s，,。；;！!])(?:那就|那|请|帮我)?"
                             r"(重试(?:搜索|联网|一下)?|联网重试|再搜(?:一次|一遍|一下)?|"
@@ -314,7 +314,7 @@ class MentionTools:
             result = self._search(outcome.search_query, deadline)
             outcome.results.append(result)
             return self._finish(outcome, started)
-        all_images = not has_quote and bool(_ALL_IMAGES.fullmatch(question.strip()))
+        all_images = not has_quote and bool(ALL_IMAGES.fullmatch(question.strip()))
         ref_type = quote.get("ref_type")
         sticker = ref_type == "47" or (ref_type != "3" and wants(question, STICKER_HINTS))
         wx_type = 47 if sticker else 3

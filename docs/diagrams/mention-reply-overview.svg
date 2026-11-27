@@ -1,0 +1,312 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" id="design-base-overview" viewBox="0 0 1440 3502" role="img" aria-labelledby="design-base-overview-title" aria-describedby="design-base-overview-description" data-overview="design" width="1440" height="3502" font-family="Microsoft YaHei, PingFang SC, sans-serif" fill="#183c48">
+<title id="design-base-overview-title">Helper 群聊消息分流 · 现行流程</title><desc id="design-base-overview-description">从收消息到发送回执，覆盖三类已有追问、五个新话出口。普通回复按规则选文字或语音，/语音 可直接朗读原文。</desc>
+<style>
+:where([data-overview="design"]) .ov-section{fill:#f4f7f9;stroke:#dbe5e9;stroke-width:1.5}
+:where([data-overview="design"]) .ov-section-title{font-size:27px;font-weight:700}
+:where([data-overview="design"]) .ov-focus{font-size:20px;fill:#466172}
+:where([data-overview="design"]) .ov-kicker{font-size:22px;font-weight:700;fill:#527080}
+:where([data-overview="design"]) .ov-title{font-size:44px;font-weight:700}
+:where([data-overview="design"]) .ov-lead{font-size:24px;fill:#245e58}
+:where([data-overview="design"]) .ov-box, :where([data-overview="design"]) .ov-port{stroke-width:2}
+:where([data-overview="design"]) .ov-node-title{font-weight:700}
+:where([data-overview="design"]) .ov-node-body{fill:#385366}
+:where([data-overview="design"]) .ov-divider{stroke:#bdd1d9;stroke-width:1;opacity:.8}
+:where([data-overview="design"]) .ov-destination, :where([data-overview="design"]) .ov-jump, :where([data-overview="design"]) .ov-port-text{font-size:18px;font-weight:700}
+:where([data-overview="design"]) .ov-jump{text-decoration:underline}
+:where([data-overview="design"]) .ov-wire{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+:where([data-overview="design"]) .ov-wire-label{font-size:18px;font-weight:700;paint-order:stroke;stroke:#fcfdfd;stroke-width:6px;stroke-linejoin:round}
+:where([data-overview="design"]) .ov-wire.ov-gray{stroke:#8198a6}
+:where([data-overview="design"]) .ov-text-gray{fill:#405c6f}
+:where([data-overview="design"]) .ov-fill-gray{fill:#fff;stroke:#8198a6;stroke-opacity:.58}
+:where([data-overview="design"]) .ov-wire.ov-blue{stroke:#286b9c}
+:where([data-overview="design"]) .ov-text-blue{fill:#286b9c}
+:where([data-overview="design"]) .ov-fill-blue{fill:#eaf4fd;stroke:#286b9c;stroke-opacity:.58}
+:where([data-overview="design"]) .ov-wire.ov-teal{stroke:#28776a}
+:where([data-overview="design"]) .ov-text-teal{fill:#28776a}
+:where([data-overview="design"]) .ov-fill-teal{fill:#e7f5f0;stroke:#28776a;stroke-opacity:.58}
+:where([data-overview="design"]) .ov-wire.ov-amber{stroke:#96601c}
+:where([data-overview="design"]) .ov-text-amber{fill:#96601c}
+:where([data-overview="design"]) .ov-fill-amber{fill:#fff3e2;stroke:#96601c;stroke-opacity:.58}
+:where([data-overview="design"]) .ov-wire.ov-purple{stroke:#71549b}
+:where([data-overview="design"]) .ov-text-purple{fill:#71549b}
+:where([data-overview="design"]) .ov-fill-purple{fill:#f0ebfa;stroke:#71549b;stroke-opacity:.58}
+:where([data-overview="design"]) .ov-wire.ov-red{stroke:#ac4c43}
+:where([data-overview="design"]) .ov-text-red{fill:#ac4c43}
+:where([data-overview="design"]) .ov-fill-red{fill:#fff0ee;stroke:#ac4c43;stroke-opacity:.58}
+  </style><defs><marker id="design-base-ov-arrow-gray" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="10" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L10 4L0 8Z" fill="#8198a6"/></marker><marker id="design-base-ov-arrow-blue" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="10" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L10 4L0 8Z" fill="#286b9c"/></marker><marker id="design-base-ov-arrow-teal" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="10" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L10 4L0 8Z" fill="#28776a"/></marker><marker id="design-base-ov-arrow-amber" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="10" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L10 4L0 8Z" fill="#96601c"/></marker><marker id="design-base-ov-arrow-purple" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="10" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L10 4L0 8Z" fill="#71549b"/></marker><marker id="design-base-ov-arrow-red" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="10" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L10 4L0 8Z" fill="#ac4c43"/></marker></defs>
+<style>
+    .v2-wire {
+      fill: none;
+      stroke: #475569;
+      stroke-width: 2.6;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .v2-title {
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 23px;
+      font-weight: 700;
+      fill: #1E293B;
+      text-anchor: middle;
+    }
+    .v2-body {
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 18px;
+      font-weight: 400;
+      fill: #334155;
+      text-anchor: middle;
+    }
+    .v2-body-lg {
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 18.5px;
+      font-weight: 400;
+      fill: #334155;
+      text-anchor: middle;
+    }
+    .v2-route-teal {
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 18px;
+      font-weight: 600;
+      fill: #0F766E;
+      text-anchor: middle;
+    }
+    .v2-route-slate {
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 18.5px;
+      font-weight: 600;
+      fill: #3B6285;
+      text-anchor: middle;
+    }
+    .v2-route-blue {
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 18px;
+      font-weight: 600;
+      fill: #1D4ED8;
+      text-anchor: middle;
+    }
+    .v2-route-amber {
+      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 18px;
+      font-weight: 600;
+      fill: #B45309;
+      text-anchor: middle;
+    }
+  </style>
+
+  <defs>
+    <marker id="v2-arrow" viewBox="0 0 12 12" refX="10.5" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M 1 1.5 L 10.5 6 L 1 10.5 L 3.2 6 Z" fill="#475569"/>
+    </marker>
+    <filter id="v2-card-shadow" x="-6%" y="-8%" width="112%" height="124%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#0F172A" flood-opacity="0.07"/>
+    </filter>
+  </defs>
+  <rect width="1440" height="3502" fill="#fcfdfd"/>
+<rect x="28" y="181" width="1384" height="583" rx="17" class="ov-section"/>
+<rect x="28" y="773" width="1384" height="391" rx="17" class="ov-section"/>
+<rect x="28" y="1210" width="1384" height="511" rx="17" class="ov-section"/>
+<rect x="28" y="1739" width="1384" height="398" rx="17" class="ov-section"/>
+<rect x="28" y="2155" width="1384" height="417" rx="17" class="ov-section"/>
+<rect x="28" y="2590" width="1384" height="883" rx="17" class="ov-section"/>
+<path d="M720 336V348H214V369" class="ov-wire ov-gray" marker-end="url(#design-base-ov-arrow-gray)"/>
+<path d="M551 348V369" class="ov-wire ov-blue" marker-end="url(#design-base-ov-arrow-blue)"/>
+<path d="M720 348H888V369" class="ov-wire ov-purple" marker-end="url(#design-base-ov-arrow-purple)"/>
+<path d="M888 348H1225V369" class="ov-wire ov-blue" marker-end="url(#design-base-ov-arrow-blue)"/>
+<path d="M1225 481V503H720V529" class="ov-wire ov-blue" marker-end="url(#design-base-ov-arrow-blue)"/>
+<path d="M1225 503V529" class="ov-wire ov-gray" marker-end="url(#design-base-ov-arrow-gray)"/>
+<path d="M720 617V641H255V658" class="ov-wire ov-amber" marker-end="url(#design-base-ov-arrow-amber)"/>
+<path d="M720 641V658" class="ov-wire ov-gray" marker-end="url(#design-base-ov-arrow-gray)"/>
+<path d="M720 641H1185V658" class="ov-wire ov-blue" marker-end="url(#design-base-ov-arrow-blue)"/>
+<path d="M991 895H1065" class="ov-wire ov-gray" marker-end="url(#design-base-ov-arrow-gray)"/>
+<path d="M419 1876H471" class="ov-wire ov-blue" marker-end="url(#design-base-ov-arrow-blue)"/>
+<path d="M689 1930V1961H263V1980" class="ov-wire ov-gray" marker-end="url(#design-base-ov-arrow-gray)"/>
+<path d="M689 1961H698V1980" class="ov-wire ov-purple" marker-end="url(#design-base-ov-arrow-purple)"/>
+<path d="M907 2041H947" class="ov-wire ov-purple" marker-end="url(#design-base-ov-arrow-purple)"/>
+<path d="M1166 1930V1940H887V1980" class="ov-wire ov-purple" marker-end="url(#design-base-ov-arrow-purple)"/>
+<path d="M415 2300H485" class="ov-wire ov-amber" marker-end="url(#design-base-ov-arrow-amber)"/>
+<path d="M883 2300H972" class="ov-wire ov-amber" marker-end="url(#design-base-ov-arrow-amber)"/>
+<path d="M684 2362V2392" class="ov-wire ov-gray" marker-end="url(#design-base-ov-arrow-gray)"/>
+<path d="M374 2750H391" class="ov-wire ov-blue" marker-end="url(#design-base-ov-arrow-blue)"/>
+<path d="M711 2750H728" class="ov-wire ov-blue" marker-end="url(#design-base-ov-arrow-blue)"/>
+<path d="M1048 2750H1065" class="ov-wire ov-blue" marker-end="url(#design-base-ov-arrow-blue)"/>
+<path d="M170 2819V2886" class="ov-wire ov-gray" marker-end="url(#design-base-ov-arrow-gray)"/>
+<path d="M302 2819V2835H383V3038H215V3058" class="ov-wire ov-gray" marker-end="url(#design-base-ov-arrow-gray)"/>
+<path d="M551 2819V2886" class="ov-wire ov-amber" marker-end="url(#design-base-ov-arrow-amber)"/>
+<path d="M888 2819V2886" class="ov-wire ov-blue" marker-end="url(#design-base-ov-arrow-blue)"/>
+<path d="M1225 2819V2886" class="ov-wire ov-teal" marker-end="url(#design-base-ov-arrow-teal)"/>
+<path d="M1327 2819V2859H1397V3078H1385" class="ov-wire ov-red" marker-end="url(#design-base-ov-arrow-red)"/>
+<path d="M1048 2955H1057V2790H1065" class="ov-wire ov-blue" marker-end="url(#design-base-ov-arrow-blue)"/>
+<path d="M888 3019V3080" class="ov-wire ov-red" marker-end="url(#design-base-ov-arrow-red)"/>
+<path d="M694 2819V2831H718V3038H607V3080" class="ov-wire ov-red" marker-end="url(#design-base-ov-arrow-red)"/>
+<path d="M728 2804H718V2831" class="ov-wire ov-red"/>
+<text x="52" y="45" class="ov-kicker" text-anchor="start">Helper　｜　群聊消息分流　｜　现行流程</text>
+<text x="52" y="106" class="ov-title" text-anchor="start">微信群机器人合流总流程</text>
+<text x="52" y="152" class="ov-lead" text-anchor="start">第 2 段接回已有追问，第 3 段判断新话，第 4 段决定怎样回复。</text>
+<g id="design-base-overview-ingress"><text x="52" y="221" class="ov-section-title" text-anchor="start">1  入口守卫与认领</text></g>
+<text x="408" y="221" class="ov-focus" text-anchor="start">命令、图片各走专用入口。自然语言进同一成员队列，先认领，再决定是否合并。</text>
+<g id="design-base-overview-pending"><text x="52" y="813" class="ov-section-title" text-anchor="start">2  已有追问匹配</text></g>
+<text x="408" y="813" class="ov-focus" text-anchor="start">文字按话题，绘图按原请求人和任务，看图沿用原候选。</text>
+<g id="design-base-overview-intent"><text x="52" y="1250" class="ov-section-title" text-anchor="start">3  统一意图分流</text></g>
+<text x="408" y="1250" class="ov-focus" text-anchor="start">以当前正文为主，再读引用和历史。只对不确定的情况补判。</text>
+<g id="design-base-overview-reply"><text x="52" y="1779" class="ov-section-title" text-anchor="start">4  文字与语音交付</text></g>
+<text x="408" y="1779" class="ov-focus" text-anchor="start">普通回复先写正文再选发送方式；/语音 直接朗读命令原文。</text>
+<g id="design-base-overview-ask"><text x="52" y="2195" class="ov-section-title" text-anchor="start">5  目标核对与追问回路</text></g>
+<text x="408" y="2195" class="ov-focus" text-anchor="start">带着原要求问清缺口。追问确认发出，才进入待答。</text>
+<g id="design-base-overview-image"><text x="52" y="2630" class="ov-section-title" text-anchor="start">6  生图受理与闭环</text></g>
+<text x="408" y="2630" class="ov-focus" text-anchor="start">受理、取材、提交、回执分开。只用确认发出的图续改。</text>
+<g data-ov-bounds="508,932,239,333" data-node="receive"><rect x="500" y="236" width="440" height="100" rx="13" class="ov-box ov-fill-blue"/><text x="720" y="270" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">收消息、过滤并记编号</text><text x="720" y="300" class="ov-node-body" text-anchor="middle" font-size="19">保留群范围、回显过滤和冷处理守卫</text><text x="720" y="323" class="ov-node-body" text-anchor="middle" font-size="19">接龙让行、设置命令各走原入口</text></g>
+<g data-ov-bounds="62,366,372,478" data-node="media"><rect x="54" y="369" width="320" height="112" rx="13" class="ov-box ov-fill-gray"/><text x="214" y="408.5" class="ov-node-title ov-text-gray" text-anchor="middle" font-size="26">单发图片入素材库</text><text x="214" y="438.5" class="ov-node-body" text-anchor="middle" font-size="19">供后续看图或选材使用</text><path d="M66 452H362" class="ov-divider"/><text x="214" y="473" class="ov-destination ov-text-gray" text-anchor="middle">仅收录，不自动接待办</text></g>
+<g data-ov-bounds="399,703,372,478" data-node="command_image"><rect x="391" y="369" width="320" height="112" rx="13" class="ov-box ov-fill-blue"/><text x="551" y="408.5" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">/生图 指令</text><text x="551" y="438.5" class="ov-node-body" text-anchor="middle" font-size="19">可新画，也可明确续办</text><path d="M403 452H699" class="ov-divider"/><a href="#design-base-overview-image"><text x="551" y="473" class="ov-destination ov-text-blue" text-anchor="middle">转第 6 段 · 生图</text></a></g>
+<g data-ov-bounds="736,1040,372,478" data-node="command_voice"><rect x="728" y="369" width="320" height="112" rx="13" class="ov-box ov-fill-purple"/><text x="888" y="408.5" class="ov-node-title ov-text-purple" text-anchor="middle" font-size="26">/语音 原文</text><text x="888" y="438.5" class="ov-node-body" text-anchor="middle" font-size="19">跳过普通聊天，直接朗读</text><path d="M740 452H1036" class="ov-divider"/><a href="#design-base-overview-reply"><text x="888" y="473" class="ov-destination ov-text-purple" text-anchor="middle">转第 4 段 · 朗读</text></a></g>
+<g data-ov-bounds="1073,1377,372,478" data-node="direct" id="flow-gate"><rect x="1065" y="369" width="320" height="112" rx="13" class="ov-box ov-fill-blue"/><text x="1225" y="409" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">确认是否对机器人说</text><text x="1225" y="439" class="ov-node-body" text-anchor="middle" font-size="19">艾特、引用、明确续问</text><text x="1225" y="462" class="ov-node-body" text-anchor="middle" font-size="19">回答有效追问也算定向</text></g>
+<text x="979" y="494" class="ov-wire-label ov-text-blue" text-anchor="middle">能确认说话对象</text>
+<g data-ov-bounds="1073,1377,532,609" data-node="other_chat"><rect x="1065" y="529" width="320" height="83" rx="13" class="ov-box ov-fill-gray"/><text x="1225" y="566" class="ov-node-title ov-text-gray" text-anchor="middle" font-size="26">进入普通群聊</text><text x="1225" y="596" class="ov-node-body" text-anchor="middle" font-size="19">沿用原有群聊处理</text></g>
+<text x="1313" y="514" class="ov-wire-label ov-text-gray" text-anchor="middle">无法确认</text>
+<g data-ov-bounds="508,932,532,614" data-node="claim"><rect x="500" y="529" width="440" height="88" rx="13" class="ov-box ov-fill-blue"/><text x="720" y="568.5" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">这条消息属于哪一轮？</text><text x="720" y="598.5" class="ov-node-body" text-anchor="middle" font-size="19">先认领，再决定是否并进旧回复</text></g>
+<g data-ov-bounds="62,448,661,732" data-node="claim-pending"><rect x="54" y="658" width="402" height="77" rx="13" class="ov-box ov-fill-amber"/><text x="255" y="691.5" class="ov-node-title ov-text-amber" text-anchor="middle" font-size="26">像是在答有效的追问</text><path d="M66 706H444" class="ov-divider"/><a href="#design-base-overview-pending"><text x="255" y="727" class="ov-destination ov-text-amber" text-anchor="middle">转第 2 段 · 匹配旧追问</text></a></g>
+<g data-ov-bounds="527,913,661,732" data-node="merge"><rect x="519" y="658" width="402" height="77" rx="13" class="ov-box ov-fill-gray"/><text x="720" y="692" class="ov-node-title ov-text-gray" text-anchor="middle" font-size="26">旧回复没发，补全同一问</text><text x="720" y="722" class="ov-node-body" text-anchor="middle" font-size="19">用新条件重答，旧草稿作废</text></g>
+<g data-ov-bounds="993,1377,661,750" data-node="independent"><rect x="985" y="658" width="400" height="95" rx="13" class="ov-box ov-fill-blue"/><text x="1185" y="691" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">另起请求，独立处理</text><text x="1185" y="721" class="ov-node-body" text-anchor="middle" font-size="19">如「顺便画一张」，单独分流</text><path d="M997 724H1373" class="ov-divider"/><a href="#design-base-overview-intent"><text x="1185" y="745" class="ov-destination ov-text-blue" text-anchor="middle">转第 3 段 · 判本次意图</text></a></g>
+<g data-ov-bounds="457,983,847,936" data-node="pending_source"><rect x="449" y="844" width="542" height="95" rx="13" class="ov-box ov-fill-amber"/><text x="720" y="877" class="ov-node-title ov-text-amber" text-anchor="middle" font-size="26">定位已发且有效的追问</text><text x="720" y="907" class="ov-node-body" text-anchor="middle" font-size="19">核对原问题、引用和当前回答</text><text x="720" y="930" class="ov-node-body" text-anchor="middle" font-size="19">这句确实回答缺口才接回</text></g>
+<a href="#design-base-overview-intent" aria-label="没对上 → 第 3 段"><rect x="1065" y="878" width="193" height="34" rx="8" class="ov-port ov-fill-gray"/><text x="1161.5" y="901" class="ov-port-text ov-text-gray" text-anchor="middle">没对上 → 第 3 段</text></a>
+<g data-ov-bounds="440,1000,1286,1388" data-node="intent" id="flow-intent"><rect x="432" y="1283" width="576" height="108" rx="13" class="ov-box ov-fill-blue"/><text x="720" y="1321" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">统一判断本次意图</text><text x="720" y="1351" class="ov-node-body" text-anchor="middle" font-size="19">读本次正文、引用和相关上下文</text><text x="720" y="1374" class="ov-node-body" text-anchor="middle" font-size="19">Jev 先判，仅不确定时补判</text></g>
+<g data-ov-bounds="291,915,1599,1711" data-node="retry"><rect x="283" y="1596" width="640" height="118" rx="13" class="ov-box ov-fill-purple"/><text x="603" y="1639" class="ov-node-title ov-text-purple" text-anchor="middle" font-size="26">用户要求「重试」时，按原操作分路</text><text x="603" y="1669" class="ov-node-body" text-anchor="middle" font-size="19">生图有远端号且可恢复：继续查同一项</text><text x="603" y="1692" class="ov-node-body" text-anchor="middle" font-size="19">搜索用原查询。普通回复用原问题，被拦截就说明结果</text></g>
+<g data-ov-bounds="958,1384,1599,1711" data-node="target"><rect x="950" y="1596" width="442" height="118" rx="13" class="ov-box ov-fill-teal"/><text x="1171" y="1629" class="ov-node-title ov-text-teal" text-anchor="middle" font-size="26">改图先确定唯一目标</text><text x="1171" y="1659" class="ov-node-body" text-anchor="middle" font-size="19">在途可修订。确认已发的图作底图。</text><text x="1171" y="1682" class="ov-node-body" text-anchor="middle" font-size="19">同群同人紧接「背景换蓝」可续改。</text><text x="1171" y="1705" class="ov-node-body" text-anchor="middle" font-size="19">对得上进生图，目标不清进追问。</text></g>
+<g data-ov-bounds="62,411,1825,1927" data-node="reply-start"><rect x="54" y="1822" width="365" height="108" rx="13" class="ov-box ov-fill-blue"/><text x="236.5" y="1860" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">按这轮问题生成普通答复</text><text x="236.5" y="1890" class="ov-node-body" text-anchor="middle" font-size="19">按需看图、查群聊或联网</text><text x="236.5" y="1913" class="ov-node-body" text-anchor="middle" font-size="19">看图只给答复提供资料</text></g>
+<g data-ov-bounds="479,899,1825,1927" data-node="reply-format"><rect x="471" y="1822" width="436" height="108" rx="13" class="ov-box ov-fill-blue"/><text x="689" y="1860" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">选文字或语音</text><text x="689" y="1890" class="ov-node-body" text-anchor="middle" font-size="19">固定语音、本轮要求与语音能力</text><text x="689" y="1913" class="ov-node-body" text-anchor="middle" font-size="19">自动语音还看资格和冷却</text></g>
+<g data-ov-bounds="62,464,1983,2099" data-node="reply_text" id="flow-text"><rect x="54" y="1980" width="418" height="122" rx="13" class="ov-box ov-fill-gray"/><text x="263" y="2025" class="ov-node-title ov-text-gray" text-anchor="middle" font-size="26">发送文字</text><text x="263" y="2055" class="ov-node-body" text-anchor="middle" font-size="19">发出后记录实际提交结果</text><text x="263" y="2078" class="ov-node-body" text-anchor="middle" font-size="19">默认文字或本轮选择文字</text></g>
+<g data-ov-bounds="497,899,1983,2099" data-node="reply_voice" id="flow-voice"><rect x="489" y="1980" width="418" height="122" rx="13" class="ov-box ov-fill-purple"/><text x="698" y="2025" class="ov-node-title ov-text-purple" text-anchor="middle" font-size="26">合成并提交语音</text><text x="698" y="2055" class="ov-node-body" text-anchor="middle" font-size="19">使用当前音色，记实际发送结果</text><text x="698" y="2078" class="ov-node-body" text-anchor="middle" font-size="19">接普通语音回复或 /语音 原文</text></g>
+<g data-ov-bounds="955,1377,1958,2099" data-node="voice_fail"><rect x="947" y="1955" width="438" height="147" rx="13" class="ov-box ov-fill-purple"/><text x="1166" y="2012.5" class="ov-node-title ov-text-purple" text-anchor="middle" font-size="26">语音合成或提交出错</text><text x="1166" y="2042.5" class="ov-node-body" text-anchor="middle" font-size="19">合成失败：只回退未发部分为文字</text><text x="1166" y="2065.5" class="ov-node-body" text-anchor="middle" font-size="19">提交结果不明：停止补发</text></g>
+<text x="927" y="2029" class="ov-wire-label ov-text-purple" text-anchor="middle">异常</text>
+<g data-ov-bounds="955,1377,1825,1927" data-node="read-path"><rect x="947" y="1822" width="438" height="108" rx="13" class="ov-box ov-fill-purple"/><text x="1166" y="1871.5" class="ov-node-title ov-text-purple" text-anchor="middle" font-size="26">/语音 原文</text><text x="1166" y="1901.5" class="ov-node-body" text-anchor="middle" font-size="19">按命令附带的原文合成语音</text></g>
+<g data-ov-bounds="62,407,2241,2359" data-node="ask_prepare"><rect x="54" y="2238" width="361" height="124" rx="13" class="ov-box ov-fill-amber"/><text x="234.5" y="2284" class="ov-node-title ov-text-amber" text-anchor="middle" font-size="26">把缺的条件问清</text><text x="234.5" y="2314" class="ov-node-body" text-anchor="middle" font-size="19">保留原要求、引用和候选图</text><text x="234.5" y="2337" class="ov-node-body" text-anchor="middle" font-size="19">记录缺口与追问归属</text></g>
+<g data-ov-bounds="493,875,2241,2359" data-node="ask_confirm"><rect x="485" y="2238" width="398" height="124" rx="13" class="ov-box ov-fill-amber"/><text x="684" y="2284" class="ov-node-title ov-text-amber" text-anchor="middle" font-size="26">追问发送有确认吗？</text><text x="684" y="2314" class="ov-node-body" text-anchor="middle" font-size="19">保存实际发送结果</text><text x="684" y="2337" class="ov-node-body" text-anchor="middle" font-size="19">确认后才能挂为待答</text></g>
+<g data-ov-bounds="980,1377,2241,2359" data-node="ask_wait"><rect x="972" y="2238" width="413" height="124" rx="13" class="ov-box ov-fill-amber"/><text x="1178.5" y="2272" class="ov-node-title ov-text-amber" text-anchor="middle" font-size="26">登记并等待回答</text><text x="1178.5" y="2302" class="ov-node-body" text-anchor="middle" font-size="19">按该类追问的原有有效期</text><text x="1178.5" y="2325" class="ov-node-body" text-anchor="middle" font-size="19">回答对上后接回原要求</text><path d="M984 2333H1373" class="ov-divider"/><a href="#design-base-overview-pending"><text x="1178.5" y="2354" class="ov-destination ov-text-amber" text-anchor="middle">有效回话 → 第 2 段</text></a></g>
+<text x="925" y="2288" class="ov-wire-label ov-text-amber" text-anchor="middle">确认发出</text>
+<g data-ov-bounds="493,875,2395,2497" data-node="ask_unknown"><rect x="485" y="2392" width="398" height="108" rx="13" class="ov-box ov-fill-gray"/><text x="684" y="2430" class="ov-node-title ov-text-gray" text-anchor="middle" font-size="26">追问未确认发出</text><text x="684" y="2460" class="ov-node-body" text-anchor="middle" font-size="19">仍按实际状态记录</text><text x="684" y="2483" class="ov-node-body" text-anchor="middle" font-size="19">查询时如实说明</text></g>
+<text x="781" y="2384" class="ov-wire-label ov-text-gray" text-anchor="middle">未确认发出</text>
+<text x="54" y="2539" class="ov-focus" text-anchor="start">追问过期或话题已换，按新消息处理。</text>
+<g data-ov-bounds="62,366,2686,2816" data-node="image_accept" id="flow-admit"><rect x="54" y="2683" width="320" height="136" rx="13" class="ov-box ov-fill-blue"/><text x="214" y="2723.5" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">检查后受理入队</text><text x="214" y="2753.5" class="ov-node-body" text-anchor="middle" font-size="19">发图能力、冷处理、重复请求</text><text x="214" y="2776.5" class="ov-node-body" text-anchor="middle" font-size="19">同连接同群同人同时一单</text><text x="214" y="2799.5" class="ov-node-body" text-anchor="middle" font-size="19">全局最多处理及排队三项</text></g>
+<g data-ov-bounds="399,703,2686,2816" data-node="image_prepare"><rect x="391" y="2683" width="320" height="136" rx="13" class="ov-box ov-fill-blue"/><text x="551" y="2723.5" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">取材和整理要求</text><text x="551" y="2753.5" class="ov-node-body" text-anchor="middle" font-size="19">核对底图、脸照及其他素材</text><text x="551" y="2776.5" class="ov-node-body" text-anchor="middle" font-size="19">缺关键素材就追问</text><text x="551" y="2799.5" class="ov-node-body" text-anchor="middle" font-size="19">规划失败但信息充分可回退</text></g>
+<g data-ov-bounds="736,1040,2686,2816" data-node="image_submit" id="flow-run"><rect x="728" y="2683" width="320" height="136" rx="13" class="ov-box ov-fill-blue"/><text x="888" y="2735" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">提交画图工具</text><text x="888" y="2765" class="ov-node-body" text-anchor="middle" font-size="19">每个绘图版本提交一次</text><text x="888" y="2788" class="ov-node-body" text-anchor="middle" font-size="19">有远端任务号就保留</text></g>
+<g data-ov-bounds="1073,1377,2686,2816" data-node="image_send" id="flow-send"><rect x="1065" y="2683" width="320" height="136" rx="13" class="ov-box ov-fill-blue"/><text x="1225" y="2735" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">保存成品并发群</text><text x="1225" y="2765" class="ov-node-body" text-anchor="middle" font-size="19">交给微信并记发送回执</text><text x="1225" y="2788" class="ov-node-body" text-anchor="middle" font-size="19">按回执分成功和未确认</text></g>
+<text x="170" y="2856" class="ov-wire-label ov-text-gray" text-anchor="middle">未受理</text>
+<text x="310" y="2862" class="ov-wire-label ov-text-gray" text-anchor="middle">并行回话</text>
+<text x="551" y="2856" class="ov-wire-label ov-text-amber" text-anchor="middle">缺关键素材</text>
+<text x="888" y="2856" class="ov-wire-label ov-text-blue" text-anchor="middle">远端返回任务号</text>
+<text x="1225" y="2856" class="ov-wire-label ov-text-teal" text-anchor="middle">确认提交</text>
+<g data-ov-bounds="62,366,2889,3016" data-node="image_busy"><rect x="54" y="2886" width="320" height="133" rx="13" class="ov-box ov-fill-gray"/><text x="214" y="2936.5" class="ov-node-title ov-text-gray" text-anchor="middle" font-size="26">本次未受理</text><text x="214" y="2966.5" class="ov-node-body" text-anchor="middle" font-size="19">如实说明队列满或已有任务</text><text x="214" y="2989.5" class="ov-node-body" text-anchor="middle" font-size="19">旧任务继续处理</text></g>
+<g data-ov-bounds="399,703,2889,3016" data-node="image-ask"><rect x="391" y="2886" width="320" height="133" rx="13" class="ov-box ov-fill-amber"/><text x="551" y="2936" class="ov-node-title ov-text-amber" text-anchor="middle" font-size="26">缺素材，先问清</text><text x="551" y="2966" class="ov-node-body" text-anchor="middle" font-size="19">保存缺口与已有材料</text><path d="M403 2990H699" class="ov-divider"/><a href="#design-base-overview-ask"><text x="551" y="3011" class="ov-destination ov-text-amber" text-anchor="middle">转第 5 段 · 发追问</text></a></g>
+<g data-ov-bounds="736,1040,2889,3016" data-node="image_poll"><rect x="728" y="2886" width="320" height="133" rx="13" class="ov-box ov-fill-blue"/><text x="888" y="2936.5" class="ov-node-title ov-text-blue" text-anchor="middle" font-size="26">继续查远端结果</text><text x="888" y="2966.5" class="ov-node-body" text-anchor="middle" font-size="19">用同一任务号查询</text><text x="888" y="2989.5" class="ov-node-body" text-anchor="middle" font-size="19">出图后再发给微信</text></g>
+<g data-ov-bounds="1073,1377,2889,3016" data-node="last_image"><rect x="1065" y="2886" width="320" height="133" rx="13" class="ov-box ov-fill-teal"/><text x="1225" y="2936.5" class="ov-node-title ov-text-teal" text-anchor="middle" font-size="26">记下确认发出的图</text><text x="1225" y="2966.5" class="ov-node-body" text-anchor="middle" font-size="19">关联群、请求人和原要求</text><text x="1225" y="2989.5" class="ov-node-body" text-anchor="middle" font-size="19">供同一人下一句续改</text></g>
+<g data-ov-bounds="62,366,3061,3185" data-node="ack"><rect x="54" y="3058" width="320" height="130" rx="13" class="ov-box ov-fill-gray"/><text x="214" y="3107" class="ov-node-title ov-text-gray" text-anchor="middle" font-size="26">接单回话与绘图并行</text><text x="214" y="3137" class="ov-node-body" text-anchor="middle" font-size="19">只按实际状态发一次</text><text x="214" y="3160" class="ov-node-body" text-anchor="middle" font-size="19">超时或状态变了就不发</text></g>
+<g data-ov-bounds="399,1040,3083,3215" data-node="image_fail"><rect x="391" y="3080" width="657" height="138" rx="13" class="ov-box ov-fill-red"/><text x="719.5" y="3121.5" class="ov-node-title ov-text-red" text-anchor="middle" font-size="26">失败或取消，记录实际状态</text><text x="719.5" y="3151.5" class="ov-node-body" text-anchor="middle" font-size="19">清空、连接或人格变化等可取消</text><text x="719.5" y="3174.5" class="ov-node-body" text-anchor="middle" font-size="19">拒绝、超时、失败各记原因。审核拒绝不自动重试</text><text x="719.5" y="3197.5" class="ov-node-body" text-anchor="middle" font-size="19">重启后不恢复旧任务</text></g>
+<g data-ov-bounds="1073,1377,3061,3185" data-node="delivery_unknown"><rect x="1065" y="3058" width="320" height="130" rx="13" class="ov-box ov-fill-red"/><text x="1225" y="3107" class="ov-node-title ov-text-red" text-anchor="middle" font-size="26">发图回执未确认</text><text x="1225" y="3137" class="ov-node-body" text-anchor="middle" font-size="19">停止补发和自动重新生成</text><text x="1225" y="3160" class="ov-node-body" text-anchor="middle" font-size="19">不记为可续改的最近图</text></g>
+<text x="749" y="3069" class="ov-wire-label ov-text-red" text-anchor="middle">准备或生成失败、超时、取消</text>
+<text x="1298" y="3037" class="ov-wire-label ov-text-red" text-anchor="middle">回执未确认</text>
+<text x="52" y="3281" class="ov-section-title" text-anchor="start">查进度时，回报原任务的实际状态。</text>
+<g data-ov-bounds="62,1377,3313,3423" data-node="finish-status"><rect x="54" y="3310" width="1331" height="116" rx="13" class="ov-box ov-fill-gray"/><text x="719.5" y="3363.5" class="ov-node-title ov-text-gray" text-anchor="middle" font-size="26">状态包括排队、缺素材、生成中、已发图、失败、取消或发送未确认</text><text x="719.5" y="3393.5" class="ov-node-body" text-anchor="middle" font-size="19">迟到的回话重新核对状态</text></g>
+<g class="incident-layer" data-layer="design">
+
+
+  <defs>
+    <marker id="design-layer-plan-arrow-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M1 1.5 L8.5 5 L1 8.5 Z" fill="#0F766E"/>
+    </marker>
+    <filter id="design-layer-plan-shadow" x="-6%" y="-10%" width="112%" height="124%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#134E4A" flood-opacity="0.14"/>
+    </filter>
+  </defs>
+
+  <g id="design-layer-plan-intent-highlight">
+    <rect x="434" y="1280" width="572" height="114" rx="14" fill="none" stroke="#0F766E" stroke-width="3.5" stroke-dasharray="10 6"/>
+  </g>
+
+  <g id="design-layer-plan-callout-intent" filter="url(#design-layer-plan-shadow)">
+    <rect x="47" y="1285" width="357" height="93" rx="12" fill="#F2FBF9" stroke="#0F766E" stroke-width="2.5"/>
+    <rect x="47" y="1285" width="8" height="93" rx="4" fill="#0F766E"/>
+    <text x="69" y="1313" font-family="PingFang SC, Microsoft YaHei, Noto Sans SC, sans-serif" font-size="20" font-weight="700" fill="#115E59">定向消息 · 统一意图分流</text>
+    <text x="69" y="1340" font-family="PingFang SC, Microsoft YaHei, Noto Sans SC, sans-serif" font-size="17" font-weight="500" fill="#1E3A3A">新话归入下方五个出口</text>
+    <text x="69" y="1365" font-family="PingFang SC, Microsoft YaHei, Noto Sans SC, sans-serif" font-size="17" font-weight="600" fill="#0F766E">见图 ② · 分流与语音</text>
+  </g>
+
+  <g id="design-layer-plan-connector-intent">
+    <path d="M404 1332 L431 1332" fill="none" stroke="#0F766E" stroke-width="2.5" stroke-linecap="round" marker-end="url(#design-layer-plan-arrow-teal)"/>
+  </g>
+</g><g id="v2-pending-row">
+    <path class="v2-wire" d="M 720 939 V 967"/>
+    <path class="v2-wire" d="M 210 967 H 1230"/>
+    <path class="v2-wire" d="M 210 967 V 993" marker-end="url(#v2-arrow)"/>
+    <path class="v2-wire" d="M 720 967 V 993" marker-end="url(#v2-arrow)"/>
+    <path class="v2-wire" d="M 1230 967 V 993" marker-end="url(#v2-arrow)"/>
+
+    <g data-node="pending_chat">
+      <rect x="42" y="995" width="336" height="139" rx="14" ry="14" fill="#E6F7F5" stroke="#1E9E89" stroke-width="2" filter="url(#v2-card-shadow)"/>
+      <text class="v2-title" x="210" y="1029">普通聊天补条件</text>
+      <text class="v2-body" x="210" y="1060">同一话题接回原问题</text>
+      <text class="v2-body" x="210" y="1088">他人的简短艾特也可补条件</text>
+      <a href="#design-base-overview-reply"><text class="v2-route-teal" x="210" y="1117">转第 4 段 · 普通回复</text>
+    </a></g>
+
+    <g data-node="pending_image">
+      <rect x="552" y="995" width="336" height="139" rx="14" ry="14" fill="#FEF6E4" stroke="#D99B26" stroke-width="2" filter="url(#v2-card-shadow)"/>
+      <text class="v2-title" x="720" y="1036">接回生图原要求</text>
+      <text class="v2-body-lg" x="720" y="1073">核对原请求人、任务和缺口</text>
+      <text class="v2-body-lg" x="720" y="1105">选图片或补素材续画，选文字回原问题</text>
+    </g>
+
+    <g data-node="pending_vision">
+      <rect x="1062" y="995" width="336" height="139" rx="14" ry="14" fill="#EDF3F9" stroke="#5B82A6" stroke-width="2" filter="url(#v2-card-shadow)"/>
+      <text class="v2-title" x="1230" y="1036">续看原候选图片</text>
+      <text class="v2-body-lg" x="1230" y="1073">例如『都看』，接回上轮候选图</text>
+      <a href="#design-base-overview-reply"><text class="v2-route-slate" x="1230" y="1105">转第 4 段 · 看图回复</text>
+    </a></g>
+  </g>
+
+  <g id="v2-intent-row">
+    <path class="v2-wire" d="M 720 1391 V 1415"/>
+    <path class="v2-wire" d="M 166 1415 H 1274"/>
+    <path class="v2-wire" d="M 166 1415 V 1437" marker-end="url(#v2-arrow)"/>
+    <path class="v2-wire" d="M 443 1415 V 1437" marker-end="url(#v2-arrow)"/>
+    <path class="v2-wire" d="M 720 1415 V 1437" marker-end="url(#v2-arrow)"/>
+    <path class="v2-wire" d="M 997 1415 V 1437" marker-end="url(#v2-arrow)"/>
+    <path class="v2-wire" d="M 1274 1415 V 1437" marker-end="url(#v2-arrow)"/>
+    <path class="v2-wire" d="M 443 1567 V 1595" marker-end="url(#v2-arrow)"/>
+    <path class="v2-wire" d="M 997 1567 V 1595" marker-end="url(#v2-arrow)"/>
+
+    <g data-node="text">
+      <rect x="52" y="1440" width="228" height="126" rx="14" ry="14" fill="#EAF3FE" stroke="#3B82F6" stroke-width="2" filter="url(#v2-card-shadow)"/>
+      <text class="v2-title" x="166" y="1477">普通回复</text>
+      <text class="v2-body" x="166" y="1511">聊天、看图或查资料</text>
+      <a href="#design-base-overview-reply"><text class="v2-route-blue" x="166" y="1541">转第 4 段</text>
+    </a></g>
+
+    <g data-node="status">
+      <rect x="329" y="1440" width="228" height="126" rx="14" ry="14" fill="#F3EEFD" stroke="#7C5CBF" stroke-width="2" filter="url(#v2-card-shadow)"/>
+      <text class="v2-title" x="443" y="1477">进度／重试</text>
+      <text class="v2-body" x="443" y="1511">催图查本人原任务</text>
+      <text class="v2-body" x="443" y="1541">重试按原操作分路</text>
+    </g>
+
+    <g data-node="new_image">
+      <rect x="606" y="1440" width="228" height="126" rx="14" ry="14" fill="#EAF3FE" stroke="#3B82F6" stroke-width="2" filter="url(#v2-card-shadow)"/>
+      <text class="v2-title" x="720" y="1477">新建一张图</text>
+      <text class="v2-body" x="720" y="1511">明确要新图，交给受理</text>
+      <a href="#design-base-overview-image"><text class="v2-route-blue" x="720" y="1541">转第 6 段</text>
+    </a></g>
+
+    <g data-node="edit">
+      <rect x="883" y="1440" width="228" height="126" rx="14" ry="14" fill="#E6F6EF" stroke="#1F8A70" stroke-width="2" filter="url(#v2-card-shadow)"/>
+      <text class="v2-title" x="997" y="1477">改图</text>
+      <text class="v2-body" x="997" y="1511">先确认底图</text>
+      <text class="v2-body" x="997" y="1541">或唯一在途任务</text>
+    </g>
+
+    <g data-node="wait">
+      <rect x="1160" y="1440" width="228" height="126" rx="14" ry="14" fill="#FEF5E6" stroke="#D97706" stroke-width="2" filter="url(#v2-card-shadow)"/>
+      <text class="v2-title" x="1274" y="1477">缺条件追问</text>
+      <text class="v2-body" x="1274" y="1511">目标或交付形式不清</text>
+      <a href="#design-base-overview-ask"><text class="v2-route-amber" x="1274" y="1541">转第 5 段</text>
+    </a></g>
+  </g>
+</svg>

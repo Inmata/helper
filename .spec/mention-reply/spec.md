@@ -75,6 +75,135 @@ related:
 群里真正艾特机器人时，用本群人格结合聊天上下文与记忆回复发言者。发送约束沿用
 [delivery](../delivery/spec.md)。
 
+## 现行流程总图
+
+本图覆盖定向群聊从[统一消息入口](../messages/spec.md)分发到回复、任务状态或发送回执。数字表示阅读段落，节点上的「接第几段」用于跨段承接。流程以当前实现和启用配置核对。艾特、引用机器人和同群同人明确接上文的发言共享意图判断。先匹配已发出的追问，再决定聊天、查进度或绘图。
+
+![从微信收消息、入队分流到文字、语音和图片回执的现状总图](../../docs/diagrams/mention-reply-overview.svg)
+
+<details>
+<summary>展开分支细节与回退规则</summary>
+
+<!-- diagram: ../../docs/diagrams/mention-reply-flow.mmd -->
+```mermaid
+flowchart TB
+    subgraph Ingress["1　收消息与入队分流"]
+        direction TB
+        incoming["原生事件由 ingress 编号、落库并标注档案确认<br/>再交各插件"]
+        input_gate{"启用群的合格文本？"}
+        asset_only["图片由接收层收录<br/>机器人生成、档案确认等交各自入口"]
+        command_gate{"专用命令？"}
+        direct_command["/生图 先试续办，否则申请任务 → 第 4 段<br/>/语音 原文按成员排队朗读 → 第 3 段的语音发送<br/>其他控制命令各走自己的入口"]
+        member_queue["自然语言进入成员慢队列<br/>同连接、同群、同一成员顺序处理 → 第 2 段"]
+        incoming --> input_gate
+        input_gate -->|其他事件或不符合| asset_only
+        input_gate -->|符合| command_gate
+        command_gate -->|有命令| direct_command
+        command_gate -->|无命令| member_queue
+    end
+
+    subgraph Intent["2　现行路由与意图判定"]
+        direction TB
+        turn_open["开始处理本条<br/>原生艾特优先，其次引用机器人，再识别手打艾特"]
+        old_turn["交给已合并的前轮或接龙"]
+        pending_format{"是否匹配已有回复？<br/>图文选择、缺素材、聊天补条件或续看原图"}
+        pending_result["图片沿用原要求和引用 → 第 4 段<br/>文字沿用原问题 → 第 3 段<br/>补素材接回原任务；续看沿用同一组图"]
+        image_gate{"艾特、引用机器人或同群同人明确续问？<br/>档案照名单查询仍走普通回复"}
+        image_intent["生图意图用正文、引用和本人近期往来<br/>Jev 出图分 ≥ 0.8 判新图或改图，未决时主模型补判一次<br/>整次分流最多 12 秒。补判失败时分数 ≥ 0.5 问图文，其余文字"]
+        after_intent["依次尝试：确认是催图或重试时查本人原任务<br/>再接回符合原任务的补图或明确修订<br/>仍无匹配时按本次分流继续"]
+        own_action["催图回报实际状态<br/>可恢复且有远端号的重试只继续查询<br/>有效补充接回原任务"]
+        next_image["新图、改图或图文澄清<br/>交给 ImageReply → 第 4 段"]
+        next_chat["其余继续普通回复 → 第 3 段<br/>未对机器人说话的群消息交回群聊"]
+        turn_open -->|已并入前轮或接龙| old_turn
+        turn_open -->|本条继续| pending_format
+        pending_format -->|匹配| pending_result
+        pending_format -->|未匹配| image_gate
+        image_gate -->|符合| image_intent --> after_intent
+        image_gate -->|跳过意图判断| after_intent
+        after_intent -->|查询或续办已接手| own_action
+        after_intent -->|仍有生图动作| next_image
+        after_intent -->|其余| next_chat
+    end
+
+    subgraph Chat["3　普通回复与文字/语音出口"]
+        direction TB
+        text_wait{"匹配本人上一轮普通回复的状态查询？"}
+        text_status["回报运行状态<br/>原请求被拦截时说明结果"]
+        text_gate["艾特或引用直接接话<br/>无定向限同人 30 秒内最多两次，且确实接上一轮"]
+        text_skip["对别人说、换话题留给群聊<br/>冷处理按频率回话或跳过"]
+        text_context["同人补话可改写尚未发出的旧稿<br/>引用和已判为生图的请求保留独立<br/>近期短艾特补条件可由另一位群友补"]
+        text_mode["按需看图、查档案、联网或重试原操作<br/>按固定语音、本轮要求、自动语音条件选发送方式"]
+        output_text["提交文字<br/>收到确认才记录已发正文"]
+        output_voice["合成并提交语音<br/>合成失败的未发部分回退文字<br/>提交未确认时停止补发"]
+        text_wait -->|匹配| text_status
+        text_wait -->|继续接话| text_gate
+        text_gate -->|无法接话或冷处理| text_skip
+        text_gate -->|可回复| text_context --> text_mode
+        text_mode -->|文字| output_text
+        text_mode -->|语音| output_voice
+        output_voice -.->|合成失败且能回退| output_text
+    end
+
+    subgraph Image["4　生图受理、素材规划与追问"]
+        direction TB
+        image_request["先检查停止、冷处理、同一会话与快照守卫"]
+        ask_format["要求澄清时问图片还是文字<br/>确认发出后等待本人选择 → 第 2 段"]
+        admission["按能力、请求长度、去重和容量受理<br/>同连接同群同人最多一项，总量三项"]
+        not_accepted["守卫失效、重复或无法受理<br/>按实际情况退出或回话"]
+        queued["受理入队，单 worker 按顺序处理"]
+        ack["接单回话和绘图并行<br/>超时或状态变更后跳过"]
+        acquire["按用途找底图、参考图或档案照并整理要求<br/>修改在途任务先核对归属；续改刚发的成品须有唯一底图，否则问哪张"]
+        ask_assets["缺少必要素材时只问缺口<br/>记录追问已发出或未确认，本人补齐后接回原任务 → 第 2 段"]
+        ready["信息足够，或回退后仍可用 → 第 5 段"]
+        prepare_failed["读取、规划失败或失效取消<br/>按真实状态结束"]
+        image_request -->|需确认形式| ask_format
+        image_request -->|请求绘制| admission
+        image_request -->|守卫未通过| not_accepted
+        admission -->|拒收或去重| not_accepted
+        admission -->|受理| queued
+        queued --> ack
+        queued --> acquire
+        acquire -->|缺素材| ask_assets
+        acquire -->|就绪或回退后仍可用| ready
+        acquire -->|失败或取消| prepare_failed
+    end
+
+    subgraph Result["5　生图执行、发图与状态收口"]
+        direction TB
+        dispatch_image["每个绘制版本只提交一次 generate_image"]
+        poll_image["有远端任务号时用 generation_result 查同一项"]
+        send_image["取到成品并保存，由微信提交图片<br/>关联原请求编号和版本"]
+        submitted["接口确认提交<br/>记 submitted，按守卫登记已发图索引"]
+        unconfirmed["提交未确认<br/>记 unconfirmed，停止补发，不自动重画"]
+        failed["失败、超时、审核拒绝或守卫取消<br/>按真实状态收口，重启不恢复旧任务"]
+        dispatch_image -->|异步任务| poll_image
+        dispatch_image -->|返回文件| send_image
+        poll_image -->|返回文件| send_image
+        dispatch_image -->|异常或取消| failed
+        poll_image -->|异常或取消| failed
+        send_image -->|确认| submitted
+        send_image -->|未确认| unconfirmed
+    end
+
+    Ingress ~~~ Intent ~~~ Chat ~~~ Image ~~~ Result
+    classDef reply fill:#edf4fa,stroke:#6589ab,color:#1e3b52
+    classDef image fill:#e5f3ed,stroke:#579785,color:#184c45
+    classDef wait fill:#fff3df,stroke:#ad803f,color:#653f1a
+    classDef exit fill:#f5f7f8,stroke:#8c9da8,color:#3e5060
+    classDef warn fill:#fceee9,stroke:#bd7969,color:#743b33
+    class incoming,turn_open,next_chat,text_gate,text_context,text_mode,output_text,output_voice reply
+    class image_gate,image_intent,next_image,admission,queued,acquire,ready,dispatch_image,poll_image,send_image,submitted image
+    class pending_format,pending_result,after_intent,own_action,text_status,ask_format,ask_assets wait
+    class asset_only,direct_command,old_turn,text_skip,ack exit
+    class not_accepted,prepare_failed,unconfirmed,failed warn
+```
+
+</details>
+
+**维护与验收。** 入口、判断顺序、任务归属、等待回接或发送结果变化时，同次更新受影响的总图卡片和连线（`docs/diagrams/mention-reply-overview.svg`）及分支详图（`docs/diagrams/mention-reply-flow.mmd`）。阈值、超时和回退细节放在详图，SVG 保留决定去向的条件与出口。图块从 Mermaid 图源同步。沿改动分支走到结果，再从结果反查前置判断和回执，并用相关回归或代表样本核对。查看总图时同时检查首屏能否找到主要分路，常见路径能否连续读到结果。
+
+**核对位置。** [入口和分流](../../plugins/mention_chat/__init__.py)、[生图意图](../../plugins/mention_chat/image_intent.py)、[任务和状态](../../plugins/mention_chat/image_reply.py)、[语音发送](../../plugins/mention_chat/voice_reply.py)与[发送回执](../../wxbot_framework/plugin_engine/context.py)。
+
 ## 必须成立的规则
 
 | 编号 | 规则 | 失败行为 |
@@ -180,7 +309,7 @@ related:
 
 Jev 识别出群友在核对或纠正一段群聊发言时，按当前消息向前回查同账号、同群最近 14 天、最后一次 `/清空` 之后的聊天原文。保留机器人和群友各自的原话、作者和时间，明确引用的机器人发言优先，文字和已提交语音的正文都可用。答复按证据说明谁先说过、机器人后来怎么转述；区分说过这句话和这句话本身属实。核对发现明显错误时可在正文时限内修订一次，来不及修订时提供已找到的原话。
 
-Jev 判定群友明确要求唱歌时，先自然生成文字说明只能朗读。同一会话、群和发言者在连续接话窗口内接受提议后，才按原请求生成朗读内容并尝试发语音。群友问实际做了什么时，按已提交的朗读、合成失败改发文字或语音回执未确认来回答。Jev 单独检查普通回复和状态回复中无依据的语音动作与承诺。
+群友询问已发语音时，按已提交的朗读、合成失败改发文字或语音回执未确认来回答。Jev 单独检查普通回复和状态回复中无依据的语音动作与承诺。
 
 ## 时效性事实
 
@@ -212,7 +341,7 @@ Jev 按这次答复是否依赖近期公开事实来判断搜索；现价、优�
 
 ## 群生图
 
-- `/生图` 直接受理；明确艾特（原生艾特或已识别手打称呼）的画图请求，经 Jev 一次请求判断生成意图、参考图需求，以及能否沿用同一请求人的上一次生图要求，阈值分别为 0.8、0.7、0.8。Jev 低分或不可用时交主模型选择新图、改图、普通回复或确认形式。形式不明时询问，原请求人在五分钟内回复「图片」或「文字」可承接原要求与引用。普通闲聊和单纯引用机器人消息不发起新图。
+- `/生图` 直接受理；艾特、引用机器人和明确承接上文的同群同人请求，经 Jev 一次请求判断生成意图、参考图需求，以及能否沿用同一请求人的上一次生图要求，阈值分别为 0.8、0.7、0.8。Jev 低分或不可用时交主模型选择新图、改图、普通回复或确认形式。形式不明时询问，原请求人在五分钟内回复「图片」或「文字」可承接原要求与引用。当前正文决定交付形式，引用原话用于解释指代。对其他人的发言交回群聊。
 - 艾特时先判是否要求出一张图，再考虑旧任务的进度查询。引用照片要求重画时，用该照片提交生图。意图判断和绘图规划可读本群同一请求人近 30 分钟的生图命令，用于承接原要求。分流优先使用当前原话、明确引用、近 30 分钟内与本人的近期往来及上次生图任务。单次分流限 12 秒，主模型最多补判一次；补判超时或返回无效动作时，Jev 出图分数达到 0.5 先确认形式，其余继续普通回复。意图分数、异常、最终分流、入队和图片回执均可按消息编号关联。询问「图呢」或简短要求「重试」时按已有任务的状态处理。
 - 当前群已启用、发言者非机器人本号、未被冷处理且具备群图片发送能力时才受理。请求原文为 1–2000 字，一次一张，生图模型、质量、尺寸沿用 Magpie 默认。
 - 引用图片按本群原消息编号或 MD5 取已收录图。未引用时可使用本人前 120 秒内唯一可用图，或按原请求查询本群已确认发出的旧图。无法确定时请用户引用，下载未完成最多等 6 秒。
@@ -226,7 +355,7 @@ Jev 按这次答复是否依赖近期公开事实来判断搜索；现价、优�
 - 群友直接对机器人提及「你的头像」时，聊天可使用其账号绑定的本群档案照事实，生图按对应人物选取同一张照片。引用或转述中的人称按原话的发言人和说话对象判断，照常处理明确点名的其他人物及指定群图。
 - 需要进一步构思的生图和改图使用公共工具循环。模型结合原话、引用和前文理解目标，有疑问时按需找消息、机器人原话、群友档案、参考图或本群已发图。请求点名时按本群名字或别名预取档案，按基本情况、经历、近况、兴趣和群梗从整份可见档案中挑短素材；前文给出身份时可一次按名字查档案。原话和已发回复限本群、请求前 14 天、清空边界之后。请求人可引用追问补充，继续原任务。整理和取材共用 75 秒上限。
 - 带字图片的标题、文案和画法写入同一绘图指令，由生图模型统一绘制和排版，文案允许转述和玩梗。规划超时或输出无法解析时，已明确的素材用途继续有效；无法核实指定图片时记录失败，普通文字需求带上已有素材提交。Jev 已判定承接上一轮时，提交的绘图要求包含上一轮要求和本次修改。改图缺原图时请用户补图。
-- 新图和改图取得成品后直接发送。生成期间按每条新发言独立分流，文字聊天和交付形式待确认的发言都不修改在途图片。自然语言请求须判为出图，并确认是在修改当前任务，才将补充并入并替换旧版本。`/生图` 可直接判断是否修改在途任务。原请求人引用机器人追问补充信息时继续原任务。
+- 新图和改图取得成品后直接发送。生成期间按每条新发言独立分流，文字聊天和交付形式待确认的发言都不修改在途图片。自然语言请求须判为出图，并确认是在修改当前任务，才将补充并入并替换旧版本。`/生图` 可直接判断是否修改在途任务。原请求人回答已发出的素材追问后继续原任务。机器人确认发图后，同一人 30 秒内紧接「背景换蓝」可按那张成品改图；中间出现其他候选图时请本人引用目标。
 - 每个绘制版本只调用一次 `generate_image`；`_meta.usemagpie.ai/pending` 返回任务 ID 后继续 `generation_result`。标准图片块直接解码，URL 结果仅从当前 Magpie 的文件地址下载；单图不超过 20 MiB，生图响应不超过 32 MiB。
 - 文件落在 `.runtime/generated_images/`，统一经 `ctx.reply_image` 发送；成功时直接发图片。清空、人格变化、冷处理、连接变化及停止守卫生效。任务失败不自动重新生成；重启不恢复旧任务。群回复不含下载 URL、路径或原始接口报错。
 - 提交或查询结果明确返回安全审核拒绝时，提示该原因与未生成图片；不把此类拒绝提示为稍后重试。

@@ -29,6 +29,7 @@ sequenceDiagram
                 opt personality 插件启用
                     In->>M: prepare_switch：查看或切换群人格
                 end
+                In->>M: profile_queries.prepare：标注档案确认归属
                 In->>P: dispatch：进入各插件队列
                 P->>M: 获取上下文与人格快照
                 Note over P: 艾特慢回复按群和成员串行，不同成员并行

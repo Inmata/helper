@@ -11,15 +11,16 @@ from uuid import uuid4
 
 from wxbot_framework.conversation.members import SnapshotExpired
 from wxbot_framework.conversation.mention_tools import _within
-from wxbot_framework.conversation.turns import PHOTO_TOPIC, turn_key
+from wxbot_framework.conversation.turns import FOLLOW_SECONDS, PHOTO_TOPIC, judge_turn, turn_key
 from wxbot_framework.integrations.jev import JevError
 from wxbot_framework.integrations.llm import LLMConnectionError, LLMContentBlocked, LLMFormatError
 from wxbot_framework.integrations.magpie_images import MagpieImageRejectedError, MagpieImages, REQUEST_SECONDS
 from wxbot_framework.integrations.magpie_tools import MagpieToolsError, MagpieToolsUnavailableError
 from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget
-from wxbot_framework.messaging.mentions import strip_at_labels
+from wxbot_framework.messaging.mentions import addressed_elsewhere, strip_at_labels
 from wxbot_framework.recent_images import ImageRecord, RECENT_IMAGES, READY
 from .image_intent import FORMAT_SECONDS, choose_format
+from .portraits import MAX_REFERENCES
 from .image_plan import (CHAT_PHOTO_SOURCE, ImageProfiles, fallback_image, image_sources, prepare_image,
                          select_image_sources, uses_previous_picture)
 
@@ -37,6 +38,9 @@ EDIT_HINT = re.compile(r"这[张幅个].{0,8}(?:图|照)?.{0,8}(?:改|换|调整
                        r"(?:改|换|调整|重绘|纠正|修复).{0,12}(?:这[张幅]|原图)|"
                        r"^(?:请|帮我|给我)?(?:把|给|只)?(?:改图|(?:改|换|调整)(?:一下|个)?(?:背景|画风)|"
                        r"(?:背景|画风).{0,4}(?:改|换|调整))")
+
+
+PROGRESS_WORDS = ("图呢", "图好了吗", "画好了吗", "好了没", "画不出来", "重试", "再试一次")
 
 
 @dataclass
@@ -69,6 +73,9 @@ class ImageJob:
     base_reference: str = ""
     required_references: int = 0
     edit: bool = False
+    delivered_at: float = 0
+    delivered_path: str = ""
+    bind_delivered: bool = False
     plan: object = None
     cancelled: object = field(default_factory=threading.Event)
 
@@ -100,6 +107,23 @@ class ImageReply:
         self._status.submit(message, ctx, facts, personality=job.personality, guard=guard,
                             question=question, receipt_deadline=receipt_deadline)
 
+    def recent_task(self, message):
+        with self._lock:
+            job = self._jobs.get(turn_key(message))
+            if not job:
+                return None
+            if job.stage == "complete":
+                elapsed = message.received_at - job.delivered_at
+                if not 0 <= elapsed <= FOLLOW_SECONDS:
+                    return None
+            elif not 0 <= message.received_at - job.message.received_at <= TASK_SECONDS:
+                return None
+        try:
+            with job.guard():
+                return job
+        except SnapshotExpired:
+            return None
+
     def status(self, message, ctx, text):
         member = message.session_id, message.chat_id, message.sender_id
         with self._lock:
@@ -117,12 +141,13 @@ class ImageReply:
         except SnapshotExpired:
             return False
         except (JevError, ValueError, TimeoutError):
-            related = text.strip(" ？?！!。") in ("图呢", "画好了吗", "好了没", "画不出来", "重试")
+            related = text.strip(" ？?！!。") in PROGRESS_WORDS
         if not related:
             return False
         with self._lock:
             can_resume = job.stage in ("failed", "expired") and job.task_id
-            resuming = "重试" in text and can_resume and member not in self._members and len(self._members) < 3
+            retry = text.strip(" ？?！!。") in ("重试", "再试一次") or "重试" in text
+            resuming = retry and can_resume and member not in self._members and len(self._members) < 3
             if resuming:
                 job.deadline = time.monotonic() + TASK_SECONDS
                 job.stage = "queued"
@@ -144,7 +169,7 @@ class ImageReply:
             facts = {"当前任务阶段": stages[stage]}
             if failure:
                 facts["原因与可用操作"] = failure
-            if can_resume and "重试" in text:
+            if can_resume and retry:
                 facts["排队情况"] = "当前无法加入队列，本次没有重试"
             self._notify(job, message, ctx, facts, stages=(stage,), question=text)
         return True
@@ -174,7 +199,7 @@ class ImageReply:
         if self._thread is None or not text or len(text) > 2000:
             return None
         identity = ((message.dispatch_epoch, message.dispatch_sequence) if message.dispatch_sequence
-                    else (message.session_id, id(message)))
+                    else (*turn_key(message), message.sequence, message.received_at))
         with self._intent_lock:
             if identity in self._intents:
                 return self._intents[identity]
@@ -183,9 +208,12 @@ class ImageReply:
         with self._lock:
             last_job = self._jobs.get(member)
         previous = ""
+        just_delivered = False
         if last_job and 0 < message.received_at - last_job.message.received_at <= 1800:
             try:
                 with last_job.guard():
+                    just_delivered = (last_job.stage == "complete" and
+                                      0 <= message.received_at - last_job.delivered_at <= FOLLOW_SECONDS)
                     previous = "\n".join(filter(None, (last_job.previous_prompt, last_job.prompt, *last_job.revisions)))[-2000:]
             except SnapshotExpired:
                 pass
@@ -194,7 +222,12 @@ class ImageReply:
         seconds = outer.remaining(FORMAT_SECONDS) if outer else FORMAT_SECONDS
         token = CURRENT.set(ReplyBudget(time.monotonic(), seconds))
         try:
-            decision, origin, error = choose_format(ctx, message, snapshot, text, previous, self.stopped)
+            decision, origin, error = choose_format(ctx, message, snapshot, text, previous, self.stopped,
+                                                    just_delivered=just_delivered)
+            if (decision.mode == "create" and just_delivered and not message.data.get("quote")
+                    and EDIT_HINT.match(text)):
+                decision = replace(decision, mode="edit")
+                origin += "＋刚发成品上的修改要求"
             intent = decision if decision.mode != "text" else None
             ctx.logger.info("生图分流：消息=%s 来源=%s 动作=%s 异常=%s",
                             snapshot.anchor_id, origin, decision.mode, error or "-")
@@ -256,7 +289,7 @@ class ImageReply:
                 return True
             if job.stage not in ("queued", "reference", "planning", "needs_input"):
                 return False
-            if job.stage == "needs_input" and time.monotonic() >= job.clarification_until:
+            if job.stage == "needs_input" and (not job.question_text or time.monotonic() >= job.clarification_until):
                 return False
         try:
             with job.guard():
@@ -284,17 +317,30 @@ class ImageReply:
         quote_added = (quote.get("ref_type") == "3" and text == job.prompt and not job.quoted_image
                        and job.stage in ("queued", "reference", "planning", "needs_input"))
         if quote_added:
-            if job.stage == "needs_input" and time.monotonic() >= job.clarification_until:
+            if job.stage == "needs_input" and (not job.question_text or time.monotonic() >= job.clarification_until):
                 return False
             self.request(message, ctx, job.prompt, cold=cold, prior=job)
             return True
         if job.stage == "needs_input":
-            author_is_bot = ctx.members.account in (quote.get("fromusr"), quote.get("chatusr"))
-            answered = bool(job.question_text and author_is_bot and strip_at_labels(quote.get("text") or "").strip() == job.question_text)
-            supplied_image = (addressed and quote.get("ref_type") == "3" and
-                              (job.material_question or len(job.references) < max(1, job.required_references)))
-            if time.monotonic() >= job.clarification_until or not (answered or supplied_image):
+            if not job.question_text or time.monotonic() >= job.clarification_until:
                 return False
+            author_is_bot = ctx.members.account in (quote.get("fromusr"), quote.get("chatusr"))
+            quoted_question = author_is_bot and strip_at_labels(quote.get("text") or "").strip() == job.question_text
+            picture = quote.get("ref_type") == "3"
+            missing_picture = job.material_question or len(job.references) < max(1, job.required_references)
+            if picture:
+                if not missing_picture or (not addressed and addressed_elsewhere(
+                        replace(message, data={**message.data, "quote": {}}))):
+                    return False
+            elif not quoted_question and (quote or (not addressed and addressed_elsewhere(message))):
+                return False
+            supplies_picture = picture and re.fullmatch(r"(?:就用|补上|补发|用)?这张(?:图|照片)?[。！!]*", text.strip())
+            if not supplies_picture:
+                try:
+                    if not judge_turn(ctx.jev, "clarify", job.prompt, previous=job.question_text, new=text):
+                        return False
+                except ValueError:
+                    return False
         elif can_revise and active and job.stage in ("queued", "reference", "planning", "submitting", "waiting"):
             if text in (job.prompt, *job.revisions):
                 return False
@@ -313,7 +359,7 @@ class ImageReply:
         self.request(message, ctx, job.prompt, cold=cold, prior=job, supplement=text)
         return True
 
-    def request(self, message, ctx, prompt, *, mode="command", cold=None, prior=None, supplement="", previous_prompt=""):
+    def request(self, message, ctx, prompt, *, mode="command", cold=None, prior=None, supplement="", previous_prompt="", edit_job=None):
         if message.is_self or self.stopped.is_set() or (cold is not None and cold.active(message)):
             return
         try:
@@ -401,6 +447,17 @@ class ImageReply:
                 references = recent_pictures[-1:]
             else:
                 references = candidates[-2:]
+        bind_delivered = (edit_job is not None and edit_job.stage == "complete" and not quoted and not paired)
+        if bind_delivered:
+            # 当前图和它之后出现的群图均可能被指代。只有一个目标时才固定底图。
+            later = RECENT_IMAGES.preceding(message.chat_id, before=message.received_at,
+                                            within=message.received_at - edit_job.delivered_at)
+            unique = (Path(edit_job.delivered_path).is_file()
+                      and all(record.path == edit_job.delivered_path for record in later))
+            references = (ImageRecord(message.chat_id, ctx.members.account, edit_job.filename, READY,
+                                      edit_job.delivered_at, path=edit_job.delivered_path, outgoing=True),) if unique else ()
+            recent_pictures = references
+            previous_image, missing_reference = True, not unique
         revisions = prior.revisions if prior else ()
         if supplement:
             revisions = (*revisions, supplement)
@@ -434,7 +491,7 @@ class ImageReply:
                                previous_prompt=prior.previous_prompt if prior else previous_prompt,
                                missing_reference=missing_reference,
                                quoted_image=quoted or bool(prior and prior.quoted_image),
-                               previous_image=previous_image,
+                               previous_image=previous_image, bind_delivered=bind_delivered,
                                recent_pictures=recent_pictures,
                                replacement_role=prior.material_question if prior and quoted else "",
                                material_sources=material_sources,
@@ -573,6 +630,13 @@ class ImageReply:
                 CURRENT.reset(token)
             with job.guard():
                 pass
+            if job.bind_delivered and job.plan and references:
+                base = references[0]
+                paths = (base, *(path for path in job.plan.references if path != base))
+                if len(paths) > MAX_REFERENCES:
+                    question = f"底图和参考图超过 {MAX_REFERENCES} 张，请减少素材。"
+                else:
+                    job.plan = replace(job.plan, references=paths, edit=True)
             if question:
                 job.stage = "needs_input"
                 job.failure = question
@@ -610,5 +674,8 @@ class ImageReply:
         if not job.ctx.reply_image(job.message, str(result.path), delivery_guard=job.guard,
                                    source_id=job.source_id, revision=len(job.revisions)):
             raise RuntimeError("图片未提交")
-        job.stage = "complete"
+        with self._lock:
+            job.delivered_path = str(Path(result.path).resolve())
+            job.delivered_at = time.monotonic()
+            job.stage = "complete"
         job.ctx.logger.info("生图已发送：消息=%s task=%s remote=%s", job.source_id, job.filename, job.task_id)

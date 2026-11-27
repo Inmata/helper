@@ -7,7 +7,6 @@ from ..integrations.llm import LLMError
 from ..integrations.reply_budget import CURRENT, ReplyBudget
 from .members import SnapshotExpired
 from .mention_tools import strip_links
-from .reply_review import VOICE_CAPABILITY
 from .slow_replies import SlowReplies
 
 
@@ -33,7 +32,7 @@ SYSTEM = """用一句简短中文接群友眼前这句话，像群聊里随口�
 生图受理时按当前人格自然应一声，不追问素材。刚接下或在选素材时只说收到或准备，确认已开始生成才说在画。
 按列出的能力回复，不猜档案库里有没有某张照片。
 有语音就说清在准备语音。问多久而时间未知，就直说还不知道。别拿催促打趣，别编动作或夸张比喻。
-别念阶段名称，别说后台或流程。不要猜原因、百分比或时间，不附链接或内部报错。""" + "\n" + VOICE_CAPABILITY
+别念阶段名称，别说后台或流程。不要猜原因、百分比或时间，不附链接或内部报错。"""
 STATUS_GROUNDED = {
     "instructions": "核对拟发送的中文状态回复。只以程序给出的实际状态为事实依据；群友的猜测不算证据。",
     "true": "回复交代了与提问相关的关键结果或阶段，允许自然表达。知道已拦截就明确说拦截；"
@@ -43,9 +42,8 @@ STATUS_GROUNDED = {
 }
 STATUS_ACTION = {
     "instructions": "候选是否声称、暗示或承诺一项程序未确认或没有能力执行的实际动作？",
-    "true": "说自己唱了、唱到一半、唱不出来、跑调或重试就给对方唱。"
-            "说自己已经搜索、重试、发出内容或完成某事，但实际状态没有记录。",
-    "false": "只说实际阶段和结果，或说明只能朗读。按程序允许的操作提出重试，但不声称已经重试或承诺结果。",
+    "true": "说自己已经搜索、重试、发出内容或完成某事，但实际状态没有记录。",
+    "false": "只说实际阶段和结果。按程序允许的操作提出重试，但不声称已经重试或承诺结果。",
 }
 
 
@@ -90,7 +88,7 @@ class StatusReplies:
                                                    [QUESTION_CHECK], timeout=2)[0] >= 0.7
                         else:
                             grounded, invented_action = ctx.jev.noul(
-                                {"实际状态": state, "语音能力": VOICE_CAPABILITY, "拟发送回复": text},
+                                {"实际状态": state, "拟发送回复": text},
                                 [STATUS_GROUNDED, STATUS_ACTION], timeout=2)
                             accepted = grounded >= 0.7 and invented_action < 0.7
                         if accepted and budget.clock() < budget.deadline:

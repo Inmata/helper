@@ -12,7 +12,7 @@ from .._shared import idiom_state
 from .cold_reply import COMMAND as COLD_COMMAND, ColdReply
 from .image_intent import FORMAT_SECONDS
 from .image_plan import ImageProfiles
-from .image_reply import ImageReply
+from .image_reply import EDIT_HINT, PROGRESS_WORDS, ImageReply
 from .portraits import MAX_REFERENCES, SELF_AVATAR_HINT, asks_portrait_list
 from wxbot_framework.conversation.slow_replies import SlowReplies
 from wxbot_framework.conversation.person_context import person_context
@@ -28,7 +28,7 @@ from wxbot_framework.conversation.context_tools import MentionContext, SELF_QUER
 from wxbot_framework.conversation.answer_material import gather_answer_material, material_needs, supports_current_answer
 from wxbot_framework.conversation.correction_capture import capture_corrections
 from wxbot_framework.conversation.correction_lookup import CorrectionMatches, candidates as correction_candidates, route as route_corrections
-from wxbot_framework.conversation.mention_tools import (IMAGE_WINDOW_SECONDS,
+from wxbot_framework.conversation.mention_tools import (ALL_IMAGES, IMAGE_WINDOW_SECONDS,
                                                         SEARCH_RETRY_SECONDS, MentionTools, ToolOutcome, ToolResult,
                                                         previous_question, public_search_topic, read_tool_options,
                                                         strip_links)
@@ -52,7 +52,7 @@ DETAIL_HINTS = ("详细", "详解", "细说", "展开", "具体说说", "完整"
 CATCH_UP = re.compile(r"补个?课|(?:最后|最终|后来).{0,4}(?:定|说好)|(?:刚才|刚刚|昨晚|昨天).{0,8}(?:聊|讨论)")
 MEANING_QUESTION = re.compile(r"(?:什么|啥)意思[啊呀呢嘛吧]?[？?！!。]*$")
 GROUP_ATTRIBUTION = re.compile(r"(?:群里|刚才|刚刚).{0,5}谁|谁.{0,6}(?:刚才|刚刚|说过|说的|讲过|发过|发的)")
-VOICE_ACTION_WORDS = re.compile(r"唱|跑调|\b(?:sing|sang|sung)\b", re.IGNORECASE)
+VOICE_ACTION_WORDS = re.compile(r"语音|朗读|念给")
 # 框架按已编译桥接声明的图片能力；没有时找不到图要如实说“收不到图片”，而不是让对方去引用。
 IMAGE_CAPABILITY = "group.image.receive"
 TOOL_FOLLOWUP_LIMIT = 64
@@ -280,9 +280,7 @@ class Plugin:
                                          group_context=group_context,
                                          search_date=now.astimezone(BEIJING).date().isoformat(), stop_at=stop_at)
         with self._followup_lock:
-            if outcome.image_choices:
-                _remember_tool_followup(self._image_choices, key, arrived, outcome.image_choices)
-            elif choices and any(result.image_number for result in outcome.results):
+            if choices and any(result.image_number for result in outcome.results):
                 self._image_choices.pop(key, None)
             if outcome.search_query:
                 _remember_tool_followup(self._last_searches, key, arrived,
@@ -326,22 +324,30 @@ class Plugin:
             if quote or (source is None and (incoming.data.get("at_members") or incoming.text.startswith("@"))):
                 continue
             text = self._clean_query(incoming, source)
-            if (source in ("structural", "typed") and text and not incoming.is_self
-                    and "group.image.send" in getattr(ctx, "capabilities", ())):
+            if not text or text == turn.question:
+                if source:
+                    turns.merge(incoming)
+                continue
+            merge = self._turn_judge(ctx, "merge", turn.question, new=text)
+            if not source and not merge and not self._turn_judge(ctx, "follow", turn.question, new=text):
+                continue
+            if not incoming.is_self and "group.image.send" in getattr(ctx, "capabilities", ()):
                 budget = CURRENT.get()
                 if budget and budget.deadline - budget.clock() < FORMAT_SECONDS:
-                    continue  # 留给新消息自己的预算，避免旧轮收尾时把生图要求并掉。
-                if self.image_reply.intent(incoming, ctx, text):
+                    turns.claim(incoming)
                     continue
-            if source and (not text or text == turn.question):
-                turns.merge(incoming)
-            elif text and self._turn_judge(ctx, "merge", turn.question, new=text):
+                if self.image_reply.intent(incoming, ctx, text):
+                    turns.claim(incoming)
+                    continue
+            if merge:
                 turns.merge(incoming)
                 turn.question = "\n".join(filter(None, (turn.question, text)))
                 previous_quote = turn.message.data.get("quote")
                 turn.message = (replace(incoming, data={**incoming.data, "quote": previous_quote})
                                 if previous_quote else incoming)
                 changed = True
+            elif not source:
+                turns.claim(incoming)
         return changed
 
     def on_message(self, message, ctx):
@@ -453,58 +459,89 @@ class Plugin:
                 return
             clean_query = original + "\n请写成文字。"
             source = "format"
-        image_target = not message.is_self and source in ("structural", "typed")
+        directed = source is not None
+        eligible = not message.is_self and (directed or not addressed_elsewhere(message))
         inventory = asks_portrait_list(clean_query)
-        if ((image_target or not source and not addressed_elsewhere(message)) and not inventory
-                and self.image_reply.archive_followup(message, ctx, clean_query, cold=self.cold)):
-            if turns is not None:
-                turns.claim(message)
-            return
-        image_intent = self.image_reply.intent(message, ctx, clean_query) if image_target and not inventory else None
-        if image_target and not inventory and image_intent is None and self.image_reply.status(message, ctx, clean_query):
-            return
-        can_revise = image_intent is not None and image_intent.mode in ("create", "edit")
-        if not answer and not inventory and self.image_reply.followup(message, ctx, clean_query, addressed=image_target,
-                                                    can_revise=can_revise, cold=self.cold):
-            if turns is not None:
-                turns.claim(message)
-            return
-        if image_intent is not None:
-            if turns is not None:
-                turns.claim(message)
-            self.image_reply.request(message, ctx, clean_query, mode=image_intent.mode,
-                                     previous_prompt=image_intent.previous_prompt, cold=self.cold)
-            return
-        if (not answer and not inventory and self._wait is not None and (source or not addressed_elsewhere(message)) and
-                self._wait.followup(message, ctx, clean_query, addressed=source is not None)):
-            if turns is not None:
-                turns.claim(message)
-            return
+        chat_answer = bool(answer or inventory)
         depth = 0
-        if source is None:
-            if turns is None or not clean_query or turns.active(message) or addressed_elsewhere(message):
+        if not chat_answer and not message.is_self:
+            if ((eligible and self.image_reply.archive_followup(message, ctx, clean_query, cold=self.cold))
+                    or self.image_reply.followup(message, ctx, clean_query, addressed=directed, cold=self.cold)):
+                if turns is not None:
+                    turns.claim(message)
                 return
-            previous = turns.continuation(message)
-            if previous is None or not self._turn_judge(ctx, "follow", previous.question,
+        if eligible and not chat_answer and not message.data.get("quote"):
+            if ALL_IMAGES.fullmatch(clean_query):
+                with self._followup_lock:
+                    chat_answer = bool(_tool_followup(self._image_choices, turn_key(message),
+                                                       message.received_at, IMAGE_WINDOW_SECONDS))
+                if chat_answer and not source:
+                    source = "choices"
+            elif directed and 0 < len(clean_query) <= 24 and not EDIT_HINT.search(clean_query):
+                snapshot = self.members.conversation_snapshot(message)
+                anchor, reference = recent_exchange(snapshot.history, _arrival_time(message.received_at))
+                chat_answer = (bool(anchor) and exchange_intent(clean_query, reference) == "clarify"
+                               and self._turn_judge(ctx, "clarify", anchor, previous=reference, new=clean_query))
+        recent_job = self.image_reply.recent_task(message) if eligible and not chat_answer else None
+        if eligible and not source and clean_query:
+            previous = turns.continuation(message) if turns is not None and not turns.active(message) else None
+            if turns is not None and turns.claimed(message):
+                source = "continuation"
+            elif previous and self._turn_judge(ctx, "follow", previous.question,
                     previous="\n".join(filter(None, (previous.text, previous.voice_action))), new=clean_query):
+                source, depth = "follow", previous.depth + 1
+                if exchange_intent(clean_query, previous.text) == "clarify" and not EDIT_HINT.search(clean_query):
+                    chat_answer = self._turn_judge(ctx, "clarify", previous.question, previous=previous.text,
+                                                   new=clean_query)
+            elif recent_job and (clean_query.strip(" ？?！!。") in PROGRESS_WORDS or
+                    (recent_job.stage == "complete" and EDIT_HINT.search(clean_query)) or
+                    (recent_job.stage not in ("failed", "expired", "cancelled", "delivery_unknown") and
+                     self._turn_judge(ctx, "follow", recent_job.prompt,
+                                      previous="刚已发图" if recent_job.stage == "complete" else "本人最近的绘图任务",
+                                      new=clean_query))):
+                source = "image_follow"
+        if source and turns is not None and not turns.claimed(message):
+            turns.claim(message)
+        if source and eligible and not chat_answer:
+            image_intent = self.image_reply.intent(message, ctx, clean_query)
+            if image_intent is None:
+                retry = clean_query.strip(" ？?！!。") in ("重试", "再试一次")
+                with self._followup_lock:
+                    last_chat = _tool_followup(self._retry, turn_key(message), message.received_at, 300) if retry else None
+                if ((not last_chat or (recent_job and recent_job.message.received_at >= last_chat.received_at))
+                        and self.image_reply.status(message, ctx, clean_query)):
+                    return
+            else:
+                if (image_intent.mode in ("create", "edit") and recent_job and
+                        self.image_reply.followup(message, ctx, clean_query, addressed=True, can_revise=True,
+                                                  cold=self.cold)):
+                    return
+                edit_job = (recent_job if image_intent.mode == "edit" and recent_job and
+                            (source == "image_follow" or EDIT_HINT.search(clean_query)) and
+                            not message.data.get("quote") else None)
+                self.image_reply.request(message, ctx, clean_query, mode=image_intent.mode,
+                                         previous_prompt=image_intent.previous_prompt, cold=self.cold, edit_job=edit_job)
                 return
-            source, depth = "follow", previous.depth + 1
-        elif turns is not None and not clean_query and not message.data.get("quote") and turns.active(message):
+        if (eligible and not chat_answer and self._wait is not None and
+                self._wait.followup(message, ctx, clean_query, addressed=directed)):
+            if turns is not None:
+                turns.claim(message)
+            return
+        if source is None:
+            return
+        if turns is not None and not clean_query and not message.data.get("quote") and turns.active(message):
             turns.merge(message)
             return
-        elif source is not None:
-            key = turn_key(message)
-            with self._followup_lock:
-                previous = _tool_followup(self._retry, key, message.received_at, 300)
-                retry = clean_query in ("重试", "再试一次") and previous is not None
-                if not retry:
-                    _remember_tool_followup(self._retry, key, message.received_at, message)
-            if retry:
-                message = replace(message, data={**message.data, "retry_question": previous.text,
-                                                "quote": previous.data.get("quote")})
-                clean_query = self._clean_query(message, source)
-        if turns is not None:
-            turns.claim(message)
+        key = turn_key(message)
+        with self._followup_lock:
+            previous = _tool_followup(self._retry, key, message.received_at, 300)
+            retry = clean_query in ("重试", "再试一次") and previous is not None
+            if not retry:
+                _remember_tool_followup(self._retry, key, message.received_at, message)
+        if retry:
+            message = replace(message, data={**message.data, "retry_question": previous.text,
+                                            "quote": previous.data.get("quote")})
+            clean_query = self._clean_query(message, source)
         if CURRENT.get() is None and self._wait is not None:
             try:
                 waiting = self._wait.accept(message, ctx, reply_seconds(clean_query))
@@ -657,9 +694,6 @@ class Plugin:
                 quote, missing_quote = None, ""
             else:
                 quote, missing_quote = resolve_reply_quote(raw_quote, lambda mid: self.members.context_text(message.chat_id, mid))
-            offer_reading = "sing" in intents
-            read_accepted = "read" in intents and not offer_reading and voice_supported
-            reading_offer = clean_query if offer_reading and voice_supported else ""
             voice_action = ""
             self_facts = {}
             if "photo_inventory" in intents:
@@ -679,14 +713,8 @@ class Plugin:
                         f"你自己的头像是本群照片档案里「{portrait['name']}」的档案照。"
                         "群友直接对你聊这张头像时按档案照接话。引用和转述中的人称按原话的发言者与对象理解。"
                         "这里只确认照片归属，照片内容、挑选经过和微信头像状态没有记录。")
-            if offer_reading or read_accepted or "correction" in intents or (previous and previous.voice_action and not clean_query):
-                self_facts["语音能力"] = VOICE_CAPABILITY if voice_supported else "当前连接只可发文字，不能唱歌或发语音。"
-            if offer_reading:
-                self_facts["本次动作"] = ("只用一句话说明不会唱歌，可以朗读，等对方同意。现在还未朗读。"
-                                         if voice_supported else "简短说明当前发不了语音。")
-            elif read_accepted:
-                self_facts["本次动作"] = "群友已同意朗读。直接输出适合朗读的内容，勿声称已读完或唱过。"
-                self_facts["获准朗读的原请求"] = previous.reading_offer
+            if "correction" in intents or (previous and previous.voice_action and not clean_query):
+                self_facts["语音能力"] = VOICE_CAPABILITY if voice_supported else "当前连接只可发文字。"
             if previous and previous.voice_action and not clean_query:
                 self_facts["同一发言者上一轮的语音结果"] = previous.voice_action
             if "correction" in intents:
@@ -706,7 +734,22 @@ class Plugin:
             corrections = getattr(ctx.knowledge, "corrections", None)
             matches = CorrectionMatches()
 
+            pending_choices = ()
+
+            def remember_choices():
+                nonlocal pending_choices
+                if pending_choices:
+                    with self._followup_lock:
+                        _remember_tool_followup(self._image_choices, turn_key(message), time.monotonic(), pending_choices)
+                    pending_choices = ()
+
+            def draft_sent(part):
+                remember_choices()
+                if fallback_sent is not None:
+                    fallback_sent(part)
+
             def remember_fact_use():
+                remember_choices()
                 if corrections is not None and matches.facts:
                     corrections.record_use(snapshot.room, snapshot.anchor_id, matches.facts)
 
@@ -716,7 +759,7 @@ class Plugin:
                 else:
                     delivered = dispatch(lambda: ctx.reply(message, part, delivery_guard=send_guard))
                 if delivered and sent is not None:
-                    sent(part, reading_offer=reading_offer, voice_action=voice_action)
+                    sent(part, voice_action=voice_action)
                 if delivered and active_budget is not None:
                     active_budget.submitted()
                 if delivered:
@@ -727,10 +770,10 @@ class Plugin:
                 return send_part(part, send_guard, use_at=True)
 
             def remember_draft(reply):
-                if active_budget is not None and not (offer_reading or read_accepted):
+                if active_budget is not None:
                     with active_budget.lock:
                         if not active_budget.closed and active_budget.revision == revision:
-                            active_budget.ready = ReplyDraft(revision, reply, needs_review, fallback_sent)
+                            active_budget.ready = ReplyDraft(revision, reply, needs_review, draft_sent)
 
             fixed_voice = voice_supported and self.voice_reply.fixed(message, self.room_state)
             turn_voice = False
@@ -739,8 +782,8 @@ class Plugin:
                 nonlocal voice_action
                 if self.voice_reply.text_only(message, self.room_state) and not turn_voice:
                     preference = False
-                use_voice = not offer_reading and (read_accepted or fixed_voice or (voice_supported and self.voice_reply.reserve(
-                    message, reply, preference, automatic=tier == CHAT)))
+                use_voice = fixed_voice or (voice_supported and self.voice_reply.reserve(
+                    message, reply, preference, automatic=tier == CHAT))
                 if use_voice:
                     if active_budget is not None:
                         with active_budget.lock:
@@ -763,9 +806,9 @@ class Plugin:
                             if result.sent:
                                 voice_action = "部分朗读已提交，剩余内容因合成失败改发文字"
                     remaining = yield from self.voice_reply.deliver(
-                        message, ctx, reply, voice=personality.voice, guard=guard, split=fixed_voice or read_accepted,
+                        message, ctx, reply, voice=personality.voice, guard=guard, split=fixed_voice,
                         dispatch=dispatch, on_sent=record_voice, on_outcome=record_outcome, fixed=fixed_voice,
-                        automatic=not (fixed_voice or read_accepted or turn_voice or preference))
+                        automatic=not (fixed_voice or turn_voice or preference))
                     if remaining is None:
                         return
                     reply = remaining
@@ -786,7 +829,7 @@ class Plugin:
             fresh = False
             quoted_image = raw_quote.get("ref_type") in ("3", "47")
             learned = False
-            facts = corrections.list(snapshot.room) if corrections is not None and not (offer_reading or read_accepted or inventory) else []
+            facts = corrections.list(snapshot.room) if corrections is not None and not inventory else []
             chain = ()
             quoted_text = ""
             recent = [{"消息编号": row["id"], "发言人": row.get("speaker_name"), "内容": row["text"][:300]}
@@ -820,7 +863,7 @@ class Plugin:
             except ValueError:
                 planning_model = None
             if (callable(getattr(planning_model, "complete_json", None))
-                    and not (offer_reading or read_accepted or missing_quote or quoted_image or inventory) and can_prepare()):
+                    and not (missing_quote or quoted_image or inventory) and can_prepare()):
                 target_quote = quote or quote_hint
                 if "correction" in intents and (quote_is_bot or (not target_quote and originals)):
                     target_quote = {"已核对的聊天原话": originals} if originals else None
@@ -917,7 +960,7 @@ class Plugin:
             if self.voice_reply.text_only(message, self.room_state):
                 options["turn_context"] = ("本人持续文字偏好已保存。" +
                     ("管理员固定语音仍生效，须说明该冲突，不能承诺本轮只发文字。" if fixed_voice else "后续默认文字回复。"))
-            if offer_reading or read_accepted or inventory:
+            if inventory:
                 outcome = ToolOutcome()
             elif fresh and investigation is not None:
                 outcome = ToolOutcome(results=[ToolResult("search", True, text=item["内容"])
@@ -932,6 +975,7 @@ class Plugin:
                         active_budget.stage = "看图"
                 outcome = yield from self._run_tools(message, ctx, clean_query, snapshot, resolved_quote=quote, follow=plain,
                                                      group_context=context.search_scope(snapshot.history), stop_at=prepare_until)
+            pending_choices = outcome.image_choices
             material = []
             if can_prepare():
                 with work("查群聊资料", prepare_until):
@@ -965,7 +1009,7 @@ class Plugin:
                         "直接用一句口语解释这段话想表达的意思。只谈你的本意，省去背景复述和对其他发言者言行、动机的归因。"
                     )
                     options["turn_context"] = "\n".join(filter(None, (options.get("turn_context"), explanation)))
-            can_voice = not offer_reading and (read_accepted or fixed_voice or (not detail and not outcome.used and voice_supported))
+            can_voice = fixed_voice or (not detail and not outcome.used and voice_supported)
             if can_voice:
                 options["system"] = SYSTEM + VOICE_PROMPT
                 if fixed_voice:

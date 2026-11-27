@@ -1,0 +1,110 @@
+flowchart TB
+    subgraph Ingress["1　收消息与入队分流"]
+        direction TB
+        incoming["原生事件由 ingress 编号、落库并标注档案确认<br/>再交各插件"]
+        input_gate{"启用群的合格文本？"}
+        asset_only["图片由接收层收录<br/>机器人生成、档案确认等交各自入口"]
+        command_gate{"专用命令？"}
+        direct_command["/生图 先试续办，否则申请任务 → 第 4 段<br/>/语音 原文按成员排队朗读 → 第 3 段的语音发送<br/>其他控制命令各走自己的入口"]
+        member_queue["自然语言进入成员慢队列<br/>同连接、同群、同一成员顺序处理 → 第 2 段"]
+        incoming --> input_gate
+        input_gate -->|其他事件或不符合| asset_only
+        input_gate -->|符合| command_gate
+        command_gate -->|有命令| direct_command
+        command_gate -->|无命令| member_queue
+    end
+
+    subgraph Intent["2　现行路由与意图判定"]
+        direction TB
+        turn_open["开始处理本条<br/>原生艾特优先，其次引用机器人，再识别手打艾特"]
+        old_turn["交给已合并的前轮或接龙"]
+        pending_format{"是否匹配已有回复？<br/>图文选择、缺素材、聊天补条件或续看原图"}
+        pending_result["图片沿用原要求和引用 → 第 4 段<br/>文字沿用原问题 → 第 3 段<br/>补素材接回原任务；续看沿用同一组图"]
+        image_gate{"艾特、引用机器人或同群同人明确续问？<br/>档案照名单查询仍走普通回复"}
+        image_intent["生图意图用正文、引用和本人近期往来<br/>Jev 出图分 ≥ 0.8 判新图或改图，未决时主模型补判一次<br/>整次分流最多 12 秒。补判失败时分数 ≥ 0.5 问图文，其余文字"]
+        after_intent["依次尝试：确认是催图或重试时查本人原任务<br/>再接回符合原任务的补图或明确修订<br/>仍无匹配时按本次分流继续"]
+        own_action["催图回报实际状态<br/>可恢复且有远端号的重试只继续查询<br/>有效补充接回原任务"]
+        next_image["新图、改图或图文澄清<br/>交给 ImageReply → 第 4 段"]
+        next_chat["其余继续普通回复 → 第 3 段<br/>未对机器人说话的群消息交回群聊"]
+        turn_open -->|已并入前轮或接龙| old_turn
+        turn_open -->|本条继续| pending_format
+        pending_format -->|匹配| pending_result
+        pending_format -->|未匹配| image_gate
+        image_gate -->|符合| image_intent --> after_intent
+        image_gate -->|跳过意图判断| after_intent
+        after_intent -->|查询或续办已接手| own_action
+        after_intent -->|仍有生图动作| next_image
+        after_intent -->|其余| next_chat
+    end
+
+    subgraph Chat["3　普通回复与文字/语音出口"]
+        direction TB
+        text_wait{"匹配本人上一轮普通回复的状态查询？"}
+        text_status["回报运行状态<br/>原请求被拦截时说明结果"]
+        text_gate["艾特或引用直接接话<br/>无定向限同人 30 秒内最多两次，且确实接上一轮"]
+        text_skip["对别人说、换话题留给群聊<br/>冷处理按频率回话或跳过"]
+        text_context["同人补话可改写尚未发出的旧稿<br/>引用和已判为生图的请求保留独立<br/>近期短艾特补条件可由另一位群友补"]
+        text_mode["按需看图、查档案、联网或重试原操作<br/>按固定语音、本轮要求、自动语音条件选发送方式"]
+        output_text["提交文字<br/>收到确认才记录已发正文"]
+        output_voice["合成并提交语音<br/>合成失败的未发部分回退文字<br/>提交未确认时停止补发"]
+        text_wait -->|匹配| text_status
+        text_wait -->|继续接话| text_gate
+        text_gate -->|无法接话或冷处理| text_skip
+        text_gate -->|可回复| text_context --> text_mode
+        text_mode -->|文字| output_text
+        text_mode -->|语音| output_voice
+        output_voice -.->|合成失败且能回退| output_text
+    end
+
+    subgraph Image["4　生图受理、素材规划与追问"]
+        direction TB
+        image_request["先检查停止、冷处理、同一会话与快照守卫"]
+        ask_format["要求澄清时问图片还是文字<br/>确认发出后等待本人选择 → 第 2 段"]
+        admission["按能力、请求长度、去重和容量受理<br/>同连接同群同人最多一项，总量三项"]
+        not_accepted["守卫失效、重复或无法受理<br/>按实际情况退出或回话"]
+        queued["受理入队，单 worker 按顺序处理"]
+        ack["接单回话和绘图并行<br/>超时或状态变更后跳过"]
+        acquire["按用途找底图、参考图或档案照并整理要求<br/>修改在途任务先核对归属；续改刚发的成品须有唯一底图，否则问哪张"]
+        ask_assets["缺少必要素材时只问缺口<br/>记录追问已发出或未确认，本人补齐后接回原任务 → 第 2 段"]
+        ready["信息足够，或回退后仍可用 → 第 5 段"]
+        prepare_failed["读取、规划失败或失效取消<br/>按真实状态结束"]
+        image_request -->|需确认形式| ask_format
+        image_request -->|请求绘制| admission
+        image_request -->|守卫未通过| not_accepted
+        admission -->|拒收或去重| not_accepted
+        admission -->|受理| queued
+        queued --> ack
+        queued --> acquire
+        acquire -->|缺素材| ask_assets
+        acquire -->|就绪或回退后仍可用| ready
+        acquire -->|失败或取消| prepare_failed
+    end
+
+    subgraph Result["5　生图执行、发图与状态收口"]
+        direction TB
+        dispatch_image["每个绘制版本只提交一次 generate_image"]
+        poll_image["有远端任务号时用 generation_result 查同一项"]
+        send_image["取到成品并保存，由微信提交图片<br/>关联原请求编号和版本"]
+        submitted["接口确认提交<br/>记 submitted，按守卫登记已发图索引"]
+        unconfirmed["提交未确认<br/>记 unconfirmed，停止补发，不自动重画"]
+        failed["失败、超时、审核拒绝或守卫取消<br/>按真实状态收口，重启不恢复旧任务"]
+        dispatch_image -->|异步任务| poll_image
+        dispatch_image -->|返回文件| send_image
+        poll_image -->|返回文件| send_image
+        dispatch_image -->|异常或取消| failed
+        poll_image -->|异常或取消| failed
+        send_image -->|确认| submitted
+        send_image -->|未确认| unconfirmed
+    end
+
+    Ingress ~~~ Intent ~~~ Chat ~~~ Image ~~~ Result
+    classDef reply fill:#edf4fa,stroke:#6589ab,color:#1e3b52
+    classDef image fill:#e5f3ed,stroke:#579785,color:#184c45
+    classDef wait fill:#fff3df,stroke:#ad803f,color:#653f1a
+    classDef exit fill:#f5f7f8,stroke:#8c9da8,color:#3e5060
+    classDef warn fill:#fceee9,stroke:#bd7969,color:#743b33
+    class incoming,turn_open,next_chat,text_gate,text_context,text_mode,output_text,output_voice reply
+    class image_gate,image_intent,next_image,admission,queued,acquire,ready,dispatch_image,poll_image,send_image,submitted image
+    class pending_format,pending_result,after_intent,own_action,text_status,ask_format,ask_assets wait
+    class asset_only,direct_command,old_turn,text_skip,ack exit
+    class not_accepted,prepare_failed,unconfirmed,failed warn

@@ -21,7 +21,7 @@ clarify：对方确实要你制作内容，但结合当前原话和上下文仍�
 明确给刚才那张图追加或修改画面要求也属于出图，并把“沿用上次生图要求”置为 true。仅话题相近时保持 false。"""
 
 
-def choose_format(ctx, message, snapshot, text, previous_prompt, stopped):
+def choose_format(ctx, message, snapshot, text, previous_prompt, stopped, *, just_delivered=False):
     quote = message.data.get("quote") or {}
     cutoff = ctx.members.now() - timedelta(minutes=30)
     own_ids = {r["id"] for r in snapshot.messages if parse_utc(r["received_at"]) >= cutoff}
@@ -30,6 +30,8 @@ def choose_format(ctx, message, snapshot, text, previous_prompt, stopped):
     context = {"可用操作": "可用文字或本群现有的档案照创作新图，可按人物选择或全员合影；仅询问名单与能力时回复文字。",
                "引用": {"作者": quote.get("name"), "正文": (quote.get("text") or "")[:1000],
                       "是图片": quote.get("ref_type") == "3"}, "与请求人的近期往来": recent[-4:]}
+    if just_delivered:
+        context["最近绘图回执"] = "已向本群这位请求人发出成品。对这张图换背景、改颜色等属于 edit。"
     if not previous_prompt:
         commands = recent_image_commands(ctx.members, message, snapshot)
         if commands:

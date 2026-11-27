@@ -151,6 +151,12 @@ def image_sources(job, profiles, references):
 def prepare_image(ctx, message, snapshot, sources, references, guard, profiles, *,
                   missing_reference, required_references, edit, job=None):
     request = "\n".join((sources["本轮承接的上次绘图要求"], sources["本次请求"], *sources["已收到的补充"]))
+    if job is not None and job.bind_delivered:
+        if not references:
+            return None, "你想改哪张图？请引用那张图回复「就用这张」。"
+        # 这里已锁定同一请求人的成品，按这张原图执行本轮修改。
+        if not (profiles.mentioned or SELF_AVATAR_HINT.search(request) or CHAT_PHOTO_SOURCE.search(request)):
+            return ImagePlan(request.strip(), references, True), ""
     additions = sources["已收到的补充"]
     if job is not None and (job.recent_pictures or job.quoted_image or job.previous_image or profiles.mentioned
                             or (profiles.bot_portrait and SELF_AVATAR_HINT.search(request))):

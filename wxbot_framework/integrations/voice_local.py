@@ -2,6 +2,7 @@
 from io import BytesIO
 from pathlib import Path
 from queue import Empty, Queue
+import re
 import struct
 import subprocess
 import sys
@@ -111,22 +112,57 @@ class LocalVoice:
         self._process.stdin.close()
 
 
-def _short_samples(model, text):
+_KANA = re.compile(r"[ぁ-ゖァ-ヺーｦ-ﾟ]")
+_SCRIPT = re.compile(r"(?P<english>[A-Za-z]+)|[㐀-鿿々ぁ-ヺーｦ-ﾟ]+")
+_EN_PUNCTUATION = str.maketrans("，。！？；：、’", ",.!?;:,'")
+
+
+def _xingtong_passages(text):
+    """按标点判断汉字读音。带假名的短句里，汉字随假名按日语读。"""
+    passages = []
+    language = None
+    offset = start = 0
+    for clause in re.split(r"(?<=[，,。.!！?？；;：:、\n「」『』])", text):
+        cjk = "ja" if _KANA.search(clause) else "zh"
+        for index, match in enumerate(_SCRIPT.finditer(clause)):
+            current = "en" if match.lastgroup == "english" else cjk
+            if language and current != language:
+                boundary = offset + (match.start() if index else 0)
+                passages.append((language, text[start:boundary]))
+                start = boundary
+            language = current
+        offset += len(clause)
+    if text:
+        passages.append((language or "zh", text[start:]))
+    return passages
+
+
+def _voice_samples(model, voice, text):
+    import numpy as np
     import torch
 
+    passages = _xingtong_passages(text) if voice == "星瞳" else [("zh", text)]
     max_seconds = 2 + len(text) / 4
-    decode_seconds = max_seconds + 10  # 已测到星瞳在起音前生成约 9.7 秒静音。
     rate = model.sampling_rate
-    # 这些模型每秒解码 25 个 token；parrots 将 t2s_max_sec 乘 50 作为 token 上限。
-    model.t2s_max_sec = decode_seconds / 2
-    for seed in (7, 11):
-        torch.manual_seed(seed)
-        samples = model.predict(text, text_language="zh", top_k=5)
-        if len(samples) > decode_seconds * rate:
-            continue  # 达到解码上限的语音可能没念完。
-        samples = _trim_leading_silence(samples, rate)
-        if len(samples) <= max_seconds * rate:
-            return samples
+    for attempt in range(2):
+        chunks = []
+        for language, fragment in passages:
+            fragment = fragment.strip()
+            seeds = (7, 11)
+            if language == "en":
+                fragment = fragment.translate(_EN_PUNCTUATION)
+                seeds = (11, 42)
+            torch.manual_seed(seeds[attempt])
+            # 星瞳起音前可有约 9.7 秒静音。解码器每秒 25 个 token，上限配置按 50 换算。
+            decode_seconds = 2 + len(fragment) / 4 + 10
+            model.t2s_max_sec = decode_seconds / 2
+            samples = model.predict(fragment, text_language=language, top_k=5)
+            if len(samples) > decode_seconds * rate:
+                break  # 达到解码上限的片段可能没念完，整句重试。
+            chunks.append(_trim_leading_silence(samples, rate))
+        else:
+            if chunks and sum(map(len, chunks)) <= max_seconds * rate:
+                return chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
 
 
 def _trim_leading_silence(samples, rate):
@@ -168,7 +204,7 @@ def _worker():
     current = sys.argv[1]
     model = load_voice(current)
     with torch.inference_mode():
-        _short_samples(model, "大家好。")
+        _voice_samples(model, current, "大家好。")
     print(f"本地音色已预热：{current}，{time.perf_counter() - started:.2f} 秒", file=sys.stderr)
     wire.write(_READY)
     wire.flush()
@@ -179,7 +215,7 @@ def _worker():
             model = load_voice(voice)
             current = voice
         with torch.inference_mode():
-            samples = _short_samples(model, text.strip())
+            samples = _voice_samples(model, voice, text.strip())
         if samples is None:
             wire.write(_LENGTH.pack(0))
             wire.flush()

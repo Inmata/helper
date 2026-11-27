@@ -75,6 +75,39 @@ class VoiceTests(unittest.TestCase):
         self.assertEqual(''.join(parts), text)
         self.assertTrue(all(len(part) <= 80 for part in parts))
 
+    def test_xingtong_selects_spoken_language_and_keeps_mixed_text_in_order(self):
+        for text, expected in [
+            ("晚上好。", [("zh", "晚上好。")]),
+            ("東京", [("zh", "東京")]),
+            ("今天是2026年。", [("zh", "今天是2026年。")]),
+            ("3.14", [("zh", "3.14")]),
+            ("Good morning! How's it going?", [("en", "Good morning! How's it going?")]),
+            ("今日はいい天気ですね。", [("ja", "今日はいい天気ですね。")]),
+            ("大家好，Good morning! 今日は晴れ。", [
+                ("zh", "大家好，"), ("en", "Good morning!"), ("ja", " 今日は晴れ。")]),
+            ("试试Hello World这个词", [("zh", "试试"), ("en", "Hello World"), ("zh", "这个词")]),
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(voice_local._xingtong_passages(text), expected)
+
+    def test_xingtong_joins_complete_passages_and_other_voices_use_chinese(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest('音频数组检查需要 NumPy')
+
+        chinese = np.full(300, 0.1, dtype=np.float32)
+        english = np.full(400, 0.2, dtype=np.float32)
+        model = SimpleNamespace(sampling_rate=1000, predict=Mock(side_effect=[chinese, english, chinese]))
+        with patch.dict(sys.modules, {'torch': SimpleNamespace(manual_seed=Mock())}):
+            samples = voice_local._voice_samples(model, '星瞳', '你好，Hello！')
+            np.testing.assert_array_equal(samples, np.concatenate([chinese, english]))
+            voice_local._voice_samples(model, '炫神', '你好，Hello！')
+            self.assertEqual([(c.args[0], c.kwargs['text_language']) for c in model.predict.call_args_list],
+                             [('你好，', 'zh'), ('Hello!', 'en'), ('你好，Hello！', 'zh')])
+            model.predict.side_effect = [chinese, np.ones(15000), chinese, np.ones(15000)]
+            self.assertIsNone(voice_local._voice_samples(model, '星瞳', '你好，Hello！'))
+
     def worker(self, *, delay=0, mode='audio'):
         launch = subprocess.Popen
 
@@ -128,7 +161,7 @@ class VoiceTests(unittest.TestCase):
         recording = np.concatenate((np.zeros(9700), np.full(2700, 0.2)))
         model = SimpleNamespace(sampling_rate=1000, predict=Mock(return_value=recording))
         with patch.dict(sys.modules, {'torch': SimpleNamespace(manual_seed=Mock())}):
-            samples = voice_local._short_samples(model, '蔡子辉这个扎啤 真是笑死我了')
+            samples = voice_local._voice_samples(model, '星瞳', '蔡子辉这个扎啤 真是笑死我了')
         self.assertIsNotNone(samples)
         self.assertLess(len(samples), 3000)
         self.assertAlmostEqual(float(samples[-1]), 0.2)

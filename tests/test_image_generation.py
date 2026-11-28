@@ -666,6 +666,30 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(self.server.calls[0]["arguments"]["reference_images"], [str(reference.resolve())])
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
 
+    def test_1310_quoted_continuation_keeps_base_when_source_judge_prefers_recent_pictures(self):
+        target, _ = self.reference_fixture("quoted-result", sender=self.members.account)
+        self.reference_fixture("later", sender="wxid_other")
+        message = self.message("后续图 结果一个没杀", data={"quote": {
+            "ref_type": "3", "svrid": "quoted-result", "chatusr": self.members.account,
+        }})
+        decisions = [
+            {"画面参考": {"whole": 1}, "任务范围": {"direct": 1, "plan": 0}},
+            {"画面参考": {"previous": 0.47, "quote": 0.32, "planning": 0.11}},
+        ]
+        with (patch.object(self.ctx._jev, "noul", return_value=[0.34, 0.69, 0.03, 0.17, 0.05]),
+              patch.object(self.ctx._jev, "choices", side_effect=decisions),
+              patch.object(self.ctx._llm, "complete_json", return_value={"动作": "edit"}),
+              patch.object(self.ctx.magpie, "analyze_image") as inspect):
+            self.plugin.on_message(message, self.ctx)
+            self.wait_done()
+        inspect.assert_not_called()
+        draws = [row["arguments"] for row in self.server.calls if row["name"] == "generate_image"]
+        self.assertEqual(len(draws), 1)
+        self.assertEqual(draws[0]["reference_images"], [str(target)])
+        self.assertIn("第1张是待修改的底图", draws[0]["prompt"])
+        self.assertIn("后续图 结果一个没杀", draws[0]["prompt"])
+        self.assertEqual(self.backend.images, [(ROOM, PNG)])
+
     def test_quoted_redraw_starts_new_generation_after_previous_image_was_sent(self):
         original = "/生图 画一张漫画，主角在台上领奖"
         self.plugin.on_message(self.message(original), self.ctx)
@@ -846,7 +870,7 @@ class ImageGenerationTests(unittest.TestCase):
             self.wait_done()
             self.assertIn("小栗的档案照", self.backend.texts[-1][1])
             replacement, _ = self.reference_fixture("replacement-face", sender="wxid_other")
-            self.plugin.on_message(self.message("@机器人\u2005就用这张", sender="wxid_second", data={
+            self.plugin.on_message(self.message("@机器人\u2005就用这张，脸看清一点", sender="wxid_second", data={
                 "is_at_self": True, "at_members": [self.members.account],
                 "quote": {"ref_type": "3", "svrid": "replacement-face"},
             }), self.ctx)

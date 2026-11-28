@@ -448,10 +448,9 @@ class ImageReply:
                 self._members.add(member)
                 self._pending[key] = None
                 self._pending.move_to_end(key)
-                material_sources = (prior.material_sources.copy()
-                                    if prior and prior.material_question and quoted and
-                                    (not supplement or re.fullmatch(r"(?:就用|补上|补发|用)?这张(?:图|照片)?[。！!]*", supplement))
-                                    else {})
+                replacement_role = prior.material_question if prior and prior.stage == "needs_input" and quoted else ""
+                material_sources = prior.material_sources.copy() if replacement_role else {}
+                base_reference = prior.base_reference if prior and (not quoted or replacement_role) else ""
                 job = ImageJob(message, ctx, prompt.strip(), references, snapshot, guard, key, uuid4().hex,
                                time.monotonic() + TASK_SECONDS, personality,
                                revisions=revisions, source_id=prior.source_id if prior else snapshot.anchor_id,
@@ -460,9 +459,9 @@ class ImageReply:
                                quoted_image=quoted or bool(prior and prior.quoted_image),
                                previous_image=previous_image, bind_delivered=bind_delivered,
                                recent_pictures=recent_pictures,
-                               replacement_role=prior.material_question if prior and quoted else "",
+                               replacement_role=replacement_role,
                                material_sources=material_sources,
-                               base_reference=prior.base_reference if material_sources else "",
+                               base_reference=base_reference,
                                required_references=required_references,
                                edit=edit or bool(prior and (prior.edit or (prior.plan and prior.plan.edit))))
                 if prior is not None:
@@ -544,7 +543,7 @@ class ImageReply:
                 for index, image in enumerate(job.references):
                     wait = max(0, download_deadline - time.monotonic()) if job.required_references else 0
                     record = RECENT_IMAGES.wait(image, wait, stopped=job.cancelled)
-                    if record.status == READY:
+                    if record.status == READY and record.path and Path(record.path).is_file():
                         ready_references.append(record)
                     elif index == 0 and (job.message.data.get("quote") or {}).get("ref_type") == "3":
                         job.missing_reference = True
@@ -597,8 +596,8 @@ class ImageReply:
                 CURRENT.reset(token)
             with job.guard():
                 pass
-            if job.bind_delivered and job.plan and references:
-                base = references[0]
+            base = job.base_reference or (references[0] if job.bind_delivered and references else "")
+            if base and job.plan:
                 paths = (base, *(path for path in job.plan.references if path != base))
                 if len(paths) > MAX_REFERENCES:
                     question = f"底图和参考图超过 {MAX_REFERENCES} 张，请减少素材。"

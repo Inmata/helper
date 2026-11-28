@@ -16,6 +16,7 @@ SOURCES = {
     "planning": "需要前文、人物事迹、组合多份来源，或原话不足以确定。",
 }
 EDIT_BASE = "待修改底图"
+CONTINUE_QUOTE = re.compile(r"^(?:请|帮我|给我)?(?:画|来|生成)?(?:一张|个)?(?:后续图|续图|续画|下一幕|接着画)(?:$|[\s，。！？：、,.!?:])")
 
 
 def _winner(scores):
@@ -88,7 +89,9 @@ def _role_sources(job, profiles, request):
     if "你" in request and profiles.bot:
         bot_name = profiles.bot["name"]
         roles[bot_name] = f"{bot_name}（本群机器人，群友直接对她说的你、你自己）"
-    check_edit_base = job.quoted_image and bool(roles)
+    use_quoted_base = job.quoted_image and not job.replacement_role and bool(CONTINUE_QUOTE.match(job.prompt))
+    check_edit_base = job.quoted_image and not (use_quoted_base or job.base_reference or job.replacement_role)
+    fixed_base = use_quoted_base or bool(job.base_reference)
     if not roles or re.search(r"背景|构图|风格|场景图|底图", request):
         roles["画面参考"] = "画面参考（背景、构图或整体画法，与单个人物的外貌分开）"
     if check_edit_base:
@@ -120,16 +123,25 @@ def _role_sources(job, profiles, request):
                  for role, label in roles.items() if role != EDIT_BASE}
     if check_edit_base:
         questions[EDIT_BASE] = (
-            "发言人是否要求直接修改这条消息明确引用的图片本身？",
-            {"quote": "让素材或新元素进入引用的图片，或修改引用图中的对象并保留其余画面。包括把另一个人的脸换到引用图的人身上。",
-             "absent": "引用图只提供画风、背景或人物外貌等参考，用户要创作新图，或者没有给出明确的修改对象。"})
+            "只判断本条微信引用图的用途。正文是否要求接着引用图画，或修改这张图？正文里的新画面要求是要绘制的内容。",
+            {"quote": "沿用引用图续画或修改，例如画它的下一幕、换背景、把另一个人的脸换到图中人物身上。没有点名人物也适用。",
+             "absent": "正文要求引用图只作画风、背景、人物外貌等参考来创作新图，或者明确另指定了要修改的图。"})
     answers = judge.choices(state, questions, timeout=3)
     modes = {role: _winner(scores) for role, scores in answers.items() if role != EDIT_BASE}
-    if any(mode == "planning" or (answers[role][mode] < 0.55 and mode not in ("previous", "inspect"))
-           for role, mode in modes.items()):
-        return None
-    if check_edit_base and answers[EDIT_BASE]["quote"] >= 0.80:
+    if check_edit_base:
+        use = answers.get(EDIT_BASE, {})
+        fixed_base = use.get("quote", 0) >= 0.55 or (job.edit and use.get("absent", 0) < 0.55)
+    if fixed_base and job.required_references < 2 and modes.get("画面参考") in ("quote", "previous", "inspect"):
+        modes.pop("画面参考")
+    elif (job.quoted_image and not job.replacement_role and job.required_references < 2
+          and modes.get("画面参考") in ("previous", "inspect")):
+        modes["画面参考"] = "quote"
+    if fixed_base:
         modes = {EDIT_BASE: "quote", **modes}
+        excerpts.setdefault(EDIT_BASE, job.prompt)
+    if any(mode == "planning" or (answers[role][mode] < 0.55 and mode not in ("previous", "inspect"))
+           for role, mode in modes.items() if role not in (EDIT_BASE, "画面参考") or mode != "quote"):
+        return None
     if all(mode in ("free", "absent") for mode in modes.values()):
         return None
     return {role: (mode, excerpts[role]) for role, mode in modes.items()}

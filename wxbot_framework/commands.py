@@ -1,10 +1,12 @@
 """指令识别集中在此；显示用艾特不参与指令名判断。"""
 import re
+from difflib import SequenceMatcher
 
 IMAGE_COMMAND = "/生图"
-COMMANDS = frozenset({"/管理", "/绑定", "/解绑", "/别名", "/改名", "/成员", "/人物", "/记住",
-                      "/档案", "/记忆", "/纠正", "/忘记", "/关联人物",
-                      "/总结", "/总结群聊", "/清空", "/人格", "/切换人格", "/接龙", "/冷处理", "/表情", "/想听清单", IMAGE_COMMAND, "/音色", "/语音", "/语音回复", "/help"})
+PUBLIC_COMMANDS = frozenset({"/档案", "/记忆", "/总结", "/总结群聊", "/人格", "/接龙", "/表情",
+                             IMAGE_COMMAND, "/音色", "/语音", "/语音回复", "/help"})
+COMMANDS = PUBLIC_COMMANDS | {"/管理", "/绑定", "/解绑", "/别名", "/改名", "/成员", "/人物", "/记住",
+                              "/纠正", "/忘记", "/关联人物", "/清空", "/切换人格", "/冷处理", "/想听清单"}
 GAME_COMMANDS = frozenset({"成语接龙", "合并接龙", "退出接龙", "接龙状态", "接龙提示", "接龙换题", "接龙认输"})
 PUBLIC_HELP = ("艾特机器人：对话、接梗（微信昵称自动读取）\n"
                "/档案 [昵称或本群]：查看人物或本群公共记忆\n"
@@ -45,6 +47,18 @@ def help_text(is_admin=False):
 
 def command_text(text):
     return re.sub(r"^(?:\s*@[^@\r\n\u2005]+\u2005)+", "", text).strip()
+
+
+def unknown_command_reply(command, *, is_admin=False):
+    if command in COMMANDS or not re.fullmatch(r"/[^\W\d_][\w-]*", command):
+        return ""
+    candidates = COMMANDS if is_admin else PUBLIC_COMMANDS
+    scores = sorted(((SequenceMatcher(None, command.casefold(), name).ratio(), name) for name in candidates),
+                    reverse=True)
+    (score, suggestion), (second_score, _) = scores[:2]
+    if score >= 2 / 3 and score > second_score:
+        return f"你是不是想用 {suggestion}？改好命令再发，原来的描述和引用照旧。"
+    return "这个命令我没认出来。发 /help 看看我支持哪些命令。"
 
 
 def is_control(text):

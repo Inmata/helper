@@ -421,6 +421,42 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn("/绑定", text)
         self.assertNotIn("/管理", text)
 
+    def test_unknown_image_command_suggests_the_supported_command(self):
+        plugin = KnowledgePlugin()
+        plugin.on_load(self.ctx)
+        self.addCleanup(plugin.on_unload, self.ctx)
+        for text in ("/画图 画一只橘猫", "@机器人\u2005/画图 画一只橘猫"):
+            with self.subTest(text=text):
+                self.backend.sent.clear()
+                plugin.on_message(self.record(text, sender=OTHER), self.ctx)
+                self.assertEqual(len(self.backend.sent), 1)
+                self.assertEqual(self.backend.sent[0][1],
+                                 "你是不是想用 /生图？改好命令再发，原来的描述和引用照旧。")
+
+    def test_unknown_command_uses_help_when_no_unique_visible_match(self):
+        plugin = KnowledgePlugin()
+        plugin.on_load(self.ctx)
+        self.addCleanup(plugin.on_unload, self.ctx)
+        for text in ("/语色", "/绑定人 小明", "/foobar"):
+            with self.subTest(text=text):
+                self.backend.sent.clear()
+                plugin.on_message(self.record(text, sender=OTHER), self.ctx)
+                self.assertEqual(len(self.backend.sent), 1)
+                self.assertEqual(self.backend.sent[0][1], "这个命令我没认出来。发 /help 看看我支持哪些命令。")
+        self.backend.sent.clear()
+        plugin.on_message(self.record("/绑定人 小明"), self.ctx)
+        self.assertIn("你是不是想用 /绑定？", self.backend.sent[0][1])
+
+    def test_command_help_leaves_known_commands_and_non_commands_to_existing_handlers(self):
+        plugin = KnowledgePlugin()
+        plugin.on_load(self.ctx)
+        self.addCleanup(plugin.on_unload, self.ctx)
+        for text in ("/生图 画橘猫", "/清空", "成语接龙", "帮我画图", "/path/to/image"):
+            plugin.on_message(self.record(text, sender=OTHER), self.ctx)
+        plugin.on_message(self.message("/画图", is_self=True), self.ctx)
+        plugin.on_message(self.message("/画图", data={"bot_generated": True}), self.ctx)
+        self.assertEqual(self.backend.sent, [])
+
     def test_other_members_can_look_up_a_bound_person_by_name(self):
         kb = self.kb()
         person = kb.entity(ROOM, "朱宏旭", aliases=["小朱"], pinned=True)

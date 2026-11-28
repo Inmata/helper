@@ -1,7 +1,7 @@
 """知识查询与维护；权限始终由实际消息作者判断。"""
 from contextlib import contextmanager
 
-from wxbot_framework.commands import command_text, help_text
+from wxbot_framework.commands import command_text, help_text, unknown_command_reply
 from wxbot_framework.conversation.members import MemberError, SnapshotExpired, parse_aliases
 from wxbot_framework.conversation.profiles import profile_messages, suggest_people, write_profile
 from wxbot_framework.conversation.slow_replies import SlowReplies
@@ -37,9 +37,15 @@ class Plugin:
                 if not self._slow.handoff(key, turn):
                     turn.close()
             return
-        if not parts or parts[0] not in ("/记忆", "/纠正", "/忘记", "/关联人物", "/help"):
+        if not parts:
             return
         command, argument = parts[0], parts[1].strip() if len(parts) == 2 else ""
+        if command not in ("/记忆", "/纠正", "/忘记", "/关联人物", "/help"):
+            if command.startswith("/") and not message.is_self:
+                hint = unknown_command_reply(command, is_admin=self.members.is_admin(message.sender_id))
+                if hint:
+                    ctx.reply(message, hint)
+            return
         try:
             text = self.handle(command, argument, message)
         except (MemberError, ValueError) as error:

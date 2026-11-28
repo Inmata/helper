@@ -868,7 +868,8 @@ class ImageGenerationTests(unittest.TestCase):
             self.plugin.on_message(self.message(prompt.replace("张姐", "小栗"), sender="wxid_second",
                 data={"quote": {"ref_type": "3", "svrid": "other-target"}}), self.ctx)
             self.wait_done()
-            self.assertIn("小栗的档案照", self.backend.texts[-1][1])
+            self.assertIn("小栗可用的档案照", self.backend.texts[-1][1])
+            self.assertIn("随便画吧", self.backend.texts[-1][1])
             replacement, _ = self.reference_fixture("replacement-face", sender="wxid_other")
             self.plugin.on_message(self.message("@机器人\u2005就用这张，脸看清一点", sender="wxid_second", data={
                 "is_at_self": True, "at_members": [self.members.account],
@@ -882,6 +883,58 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertIn("第2张用作小栗的参考", submissions[1]["prompt"])
         self.assertEqual(judge.call_count, 4)
         planner.assert_not_called()
+
+    def test_missing_named_portrait_allows_original_appearance_on_the_same_edit(self):
+        self.knowledge.entity(ROOM, "小栗", pinned=True)
+        target, _ = self.reference_fixture("swap-original", sender="wxid_other")
+        prompt = "/生图 把原图左边的人换成小栗的脸，保留右边的人和衣服"
+        decisions = [
+            {"小栗": {"E1": 1}, "待修改底图": {"E1": 1}, "任务范围": {"direct": 1, "plan": 0}},
+            {"小栗": {"portrait": 1}, "待修改底图": {"quote": 1, "absent": 0}},
+        ]
+        with patch.object(self.ctx._jev, "choices", side_effect=decisions) as judge:
+            first = self.message(prompt, data={"quote": {"ref_type": "3", "svrid": "swap-original"}})
+            self.plugin.on_message(first, self.ctx)
+            self.wait_done()
+            question = self.backend.texts[-1][1]
+            for word in ("小栗", "发一张照片", "随便画吧", "自创的脸"):
+                self.assertIn(word, question)
+            self.plugin.on_message(self.message("随便画吧", sender="wxid_other"), self.ctx)
+            self.plugin.on_message(self.message("不要随便画"), self.ctx)
+            self.wait_done()
+            self.assertFalse(self.server.calls)
+            self.plugin.on_message(self.message("那就随便画吧"), self.ctx)
+            self.wait_done()
+        self.assertEqual(judge.call_count, 2)
+        args = self.server.calls[0]["arguments"]
+        self.assertEqual(args["reference_images"], [str(target)])
+        self.assertIn("小栗使用自创长相", args["prompt"])
+        self.assertIn("保留右边的人和衣服", args["prompt"])
+        receipt = self.members.connection().execute(
+            "SELECT source_id FROM reply_receipts WHERE kind='image'").fetchone()
+        self.assertEqual(receipt[0], self.members.message_id(first))
+
+    def test_requesters_uploaded_portrait_resumes_frozen_plan_without_a_second_model_call(self):
+        prompt = "/生图 画叶小满坐在蓝色火车里"
+        plan = {"绘图指令": "叶小满坐在蓝色火车靠窗位置", "档案照片": ["叶小满"], "群聊参考图数": 0}
+        with patch.object(self.ctx._llm, "complete_json", return_value=plan) as planner:
+            self.plugin.on_message(self.message(prompt), self.ctx)
+            self.wait_done()
+            self.assertIn("叶小满可用的档案照", self.backend.texts[-1][1])
+            self.assertIn("发一张照片", self.backend.texts[-1][1])
+            self.assertIn("随便画吧", self.backend.texts[-1][1])
+            _, other = self.reference_fixture("other-face", sender="wxid_other")
+            self.plugin.on_message(self.message("", sender="wxid_other", type=3, data=other), self.ctx)
+            self.wait_done()
+            self.assertFalse(self.server.calls)
+            face, data = self.reference_fixture("my-face")
+            self.plugin.on_message(self.message("", type=3, data=data), self.ctx)
+            self.wait_done()
+        planner.assert_called_once()
+        args = self.server.calls[0]["arguments"]
+        self.assertEqual(args["reference_images"], [str(face)])
+        self.assertIn("第1张用作叶小满的参考", args["prompt"])
+        self.assertIn("蓝色火车靠窗位置", args["prompt"])
 
     def test_style_only_quote_stays_a_reference_instead_of_becoming_the_edit_base(self):
         face = self.portrait(self.knowledge.entity(ROOM, "张姐", pinned=True))

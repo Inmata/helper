@@ -365,7 +365,9 @@ class Plugin:
         return changed
 
     def on_message(self, message, ctx):
-        # 图片事件（type 3）由原生服务记入 RECENT_IMAGES；这里处理艾特与定向续问。
+        if message.is_image and message.is_group and message.chat_id in self.members.groups:
+            self.image_reply.portrait_upload(message, ctx, cold=self.cold)
+            return
         if (message.type != 1 or not message.is_group or message.chat_id not in self.members.groups or
                 "WXBOT_AT_CHAT_PROBE" in message.text or
                 message.data.get("bot_generated") or message.data.get("profile_confirmation")):

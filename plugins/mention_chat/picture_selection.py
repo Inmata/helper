@@ -164,9 +164,6 @@ def resolve_materials(job, profiles):
             if role == "画面参考":
                 job.material_sources = {}
                 return None
-            if profiles.portraits.portrait_id(role) is None:
-                job.material_question = role
-                return (), (), "", f"我缺少能确定是{role}的档案照，能引用要给{role}用的图吗？"
             names.append(role)
         elif mode in ("quote", "previous", "inspect"):
             if mode == "quote":

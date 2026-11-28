@@ -4,6 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 import json
 import re
+import time
 
 from wxbot_framework.commands import IMAGE_COMMAND, command_text
 from wxbot_framework.conversation.context_tools import ContextToolError
@@ -15,6 +16,7 @@ from wxbot_framework.integrations.llm import LLMFormatError
 from wxbot_framework.integrations.jev import JevError
 from wxbot_framework.integrations.magpie_tools import MagpieToolsError
 from wxbot_framework.integrations.reply_budget import remaining
+from wxbot_framework.recent_images import READY, RECENT_IMAGES
 from wxbot_framework.timeutil import parse_utc
 from .portraits import MAX_REFERENCES, SELF_AVATAR_HINT, RoomPortraits, wants_room_cast
 from .picture_selection import resolve_materials
@@ -23,6 +25,7 @@ from .picture_selection import resolve_materials
 SOURCE_RULES = """根据原话、最新补充、引用和实际清单决定素材。群聊图片和本群档案照可以单独使用，也可以组合。修改素材来源时以最新补充为准。
 输出“群聊参考图数”(0、1或2)，只数任务需要的群聊图片，包括要沿用的旧成品。近期有图不表示用户要用。要从几张候选里选一张时在“参考图”填它的编号，无法区分则提问。人物档案照由程序直接提供，不计入这个数。
 输出“档案照片”：要求有照片的所有人出镜时填字符串“全部”；指定部分人或有排除条件时填所选人物的名字数组；无须参照库中人物长相时填空数组。区分要入镜的人、题字和仅被提及的人。名单含主名和别名。
+点名要画现实人物或群友，且没有另外指定外貌来源或允许自由发挥时，把该名字原样填入“档案照片”，即使可用名单里没有。程序会按名字核实照片并提供选择，照常输出原请求的绘图指令。
 点名主角、让本群众人参与场景时，主角按点名分配角色，其他入镜群友从可用档案照中取；没有排除或限量要求就取全部。本群的别称见任务，群友说“库里”是在选档案来源。
 名单已验证有照片，每人可直接取一张，无需查询文字档案来确认照片。可以给库中人物合影、给指定人物换背景，或以群友另发的图作场景。用户在补充中明确放弃先前指定的群图、改为只用档案照片时，加“替换先前群图”:true。只在所需素材确实缺少或指代无法确定时给出“澄清问题”。
 群友直接对机器人说“用你的头像”时，按任务中机器人本人的档案照选取。转述或引用里的“你”按原话的说话对象理解，明确点名或指定了其他图片时按原话分配。"""
@@ -150,6 +153,20 @@ def image_sources(job, profiles, references):
 
 def prepare_image(ctx, message, snapshot, sources, references, guard, profiles, *,
                   missing_reference, required_references, edit, job=None):
+    if job is not None and job.portrait_question:
+        pending = job.portrait_question
+        if any(not Path(path).is_file() for path in pending.plan.references):
+            return None, "原先确定的参考图已找不到，能重新发一下吗？"
+        answers = {}
+        deadline = time.monotonic() + 6
+        for name, photo in job.portrait_answers.items():
+            if photo is None:
+                answers[name] = None
+                continue
+            record = RECENT_IMAGES.wait(photo, max(0, deadline - time.monotonic()), stopped=job.cancelled)
+            if record.status == READY and record.path and Path(record.path).is_file():
+                answers[name] = record.path
+        return profiles.portraits.apply(pending.plan, pending.names, request=pending.request, portrait_answers=answers)
     request = "\n".join((sources["本轮承接的上次绘图要求"], sources["本次请求"], *sources["已收到的补充"]))
     if job is not None and job.bind_delivered:
         if not references:

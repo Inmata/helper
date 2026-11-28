@@ -1,5 +1,5 @@
 """按本群档案编号关联管理员放入的照片，固定参考图顺序与人物对应关系。"""
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 import random
 import re
@@ -49,6 +49,20 @@ def _name_pattern(name):
     left = r"(?<![a-z0-9_])" if name[0].isascii() and name[0].isalnum() else ""
     right = r"(?![a-z0-9_])" if name[-1].isascii() and name[-1].isalnum() else ""
     return left + re.escape(name) + right
+
+
+@dataclass(frozen=True)
+class MissingPortrait:
+    name: str
+    plan: object
+    names: tuple[str, ...]
+    request: str
+
+    def question(self, *, receives_pictures):
+        free = ("用一张自创的脸完成换脸" if self.plan.edit and "脸" in self.request
+                else "按原要求画，长相由我自由发挥")
+        photo = "你可以发一张照片给我参考，也可以" if receives_pictures else "当前收不到图片，你可以"
+        return f"没找到{self.name}可用的档案照。{photo}回「随便画吧」，我就{free}。"
 
 
 class RoomPortraits:
@@ -108,19 +122,30 @@ class RoomPortraits:
             return None
         return next(iter(ids)) if len(ids) == 1 else None
 
-    def apply(self, plan, names, *, request=""):
+    def apply(self, plan, names, *, request="", portrait_answers=None):
         selected = {}
+        supplied, invented = {}, []
+        portrait_answers = portrait_answers or {}
         if names == "全部":
             if not self.people:
                 return None, "本群档案库里还没有可用的人物照片。能发来要入镜的人的照片吗？"
             selected = {pid: person["name"] for pid, person in self.people.items()}
         else:
             for label in names:
+                if label in portrait_answers:
+                    photo = portrait_answers[label]
+                    if photo:
+                        supplied[label] = photo
+                    else:
+                        invented.append(label)
+                    continue
                 person_id = self.portrait_id(label)
                 if person_id is None:
-                    return None, "这个称呼没有唯一可用的档案照。要用哪位的照片？也可以直接引用一张。"
+                    return None, MissingPortrait(label, plan, tuple(names), request)
                 selected.setdefault(person_id, label)
-        slots = MAX_REFERENCES - len(plan.references)
+        slots = MAX_REFERENCES - len(plan.references) - len(supplied)
+        if slots < 0:
+            return None, f"底图和参考图超过 {MAX_REFERENCES} 张，请减少素材。"
         if len(selected) > slots:
             named = [pid for pid in selected if any(re.search(_name_pattern(label), request, re.I)
                      for label in (self.people[pid]["name"], *self.people[pid]["aliases"]))]
@@ -129,9 +154,13 @@ class RoomPortraits:
             else:
                 chosen = named + random.sample([pid for pid in selected if pid not in named], slots - len(named))
             selected = {pid: selected[pid] for pid in chosen}
-        if not selected:
+        if not (selected or supplied or invented):
             return plan, ""
         paths = list(plan.references)
+        guide = "".join(f"按群友最新确认，{label}使用自创长相。\n" for label in dict.fromkeys(invented))
+        for label, photo in supplied.items():
+            paths.append(photo)
+            guide += f"第{len(paths)}张用作{label}的参考。\n"
         notes = []
         for person_id, label in selected.items():
             person = self.people[person_id]
@@ -140,5 +169,6 @@ class RoomPortraits:
             labels.extend(alias for alias in person["aliases"] if alias.casefold() in plan.instruction.casefold()
                           or alias.casefold() == label.casefold())
             notes.append(f"第{len(paths)}张是{' / '.join(labels)}")
-        guide = "人物外貌参考：" + "；".join(notes) + "。按对应照片保留人物长相，姿势和场景按绘图要求。\n"
+        if notes:
+            guide += "人物外貌参考：" + "；".join(notes) + "。按对应照片保留人物长相，姿势和场景按绘图要求。\n"
         return replace(plan, instruction=guide + plan.instruction[:2000 - len(guide)], references=tuple(paths)), ""

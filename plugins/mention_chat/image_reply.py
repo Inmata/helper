@@ -19,7 +19,7 @@ from wxbot_framework.integrations.magpie_tools import MagpieToolsError, MagpieTo
 from wxbot_framework.integrations.reply_budget import CURRENT, ReplyBudget
 from wxbot_framework.messaging.mentions import addressed_elsewhere, strip_at_labels
 from wxbot_framework.recent_images import ImageRecord, RECENT_IMAGES, READY
-from .portraits import MAX_REFERENCES
+from .portraits import MAX_REFERENCES, MissingPortrait
 from .image_plan import (CHAT_PHOTO_SOURCE, ImageProfiles, fallback_image, image_sources, prepare_image,
                          select_image_sources, uses_previous_picture)
 
@@ -40,6 +40,10 @@ EDIT_HINT = re.compile(r"这[张幅个].{0,8}(?:图|照)?.{0,8}(?:改|换|调整
 
 
 PROGRESS_WORDS = ("图呢", "图好了吗", "画好了吗", "好了没", "画不出来", "重试", "再试一次")
+FREE_PORTRAIT = re.compile(
+    r"(?:不用(?:参考)?照片[，,\s]*)?(?:(?:那|那就|就|直接|你)\s*)?"
+    r"(?:随便画(?:一张)?|自由发挥|看着画|长相(?:随便画|自由发挥)|用自创的脸|原创长相)"
+    r"(?:吧|就行|也行|可以)?[\s。！!]*")
 
 
 @dataclass
@@ -67,6 +71,9 @@ class ImageJob:
     previous_image: bool = False
     recent_pictures: tuple[ImageRecord, ...] = ()
     material_question: str = ""
+    portrait_question: MissingPortrait | None = None
+    portrait_answers: dict = field(default_factory=dict)
+    question_sent_at: float = 0
     replacement_role: str = ""
     material_sources: dict = field(default_factory=dict)
     base_reference: str = ""
@@ -281,7 +288,7 @@ class ImageReply:
                 pass
         except SnapshotExpired:
             return False
-        quote_added = (quote.get("ref_type") == "3" and text == job.prompt and not job.quoted_image
+        quote_added = (quote.get("ref_type") == "3" and text == job.prompt and not job.quoted_image and not job.portrait_question
                        and job.stage in ("queued", "reference", "planning", "needs_input"))
         if quote_added:
             if job.stage == "needs_input" and (not job.question_text or time.monotonic() >= job.clarification_until):
@@ -294,7 +301,8 @@ class ImageReply:
             author_is_bot = ctx.members.account in (quote.get("fromusr"), quote.get("chatusr"))
             quoted_question = author_is_bot and strip_at_labels(quote.get("text") or "").strip() == job.question_text
             picture = quote.get("ref_type") == "3"
-            missing_picture = job.material_question or len(job.references) < max(1, job.required_references)
+            missing_picture = (job.portrait_question or job.material_question
+                               or len(job.references) < max(1, job.required_references))
             if picture:
                 if not missing_picture or (not addressed and addressed_elsewhere(
                         replace(message, data={**message.data, "quote": {}}))):
@@ -302,12 +310,27 @@ class ImageReply:
             elif not quoted_question and (quote or (not addressed and addressed_elsewhere(message))):
                 return False
             supplies_picture = picture and re.fullmatch(r"(?:就用|补上|补发|用)?这张(?:图|照片)?[。！!]*", text.strip())
+            if job.portrait_question and not picture:
+                if not FREE_PORTRAIT.fullmatch(text.strip()):
+                    return False
+                self.request(message, ctx, job.prompt, cold=cold, prior=job, supplement=text,
+                             portrait_answer=(job.portrait_question.name, None))
+                return True
             if not supplies_picture:
                 try:
                     if not judge_turn(ctx.jev, "clarify", job.prompt, previous=job.question_text, new=text):
                         return False
                 except ValueError:
                     return False
+            if job.portrait_question:
+                RECENT_IMAGES.restore_sent(ctx.members, message.chat_id, quote=quote,
+                                           source_id=ctx.members.message_id(message))
+                record = RECENT_IMAGES.quoted(message.chat_id, svrid=quote.get("svrid") or "",
+                                              md5=quote.get("image_md5") or "", members=ctx.members)
+                if record is not None:
+                    self.request(message, ctx, job.prompt, cold=cold, prior=job, supplement=text,
+                                 portrait_answer=(job.portrait_question.name, record))
+                return True
         elif can_revise and active and job.stage in ("queued", "reference", "planning", "submitting", "waiting"):
             if text in (job.prompt, *job.revisions):
                 return False
@@ -326,7 +349,29 @@ class ImageReply:
         self.request(message, ctx, job.prompt, cold=cold, prior=job, supplement=text)
         return True
 
-    def request(self, message, ctx, prompt, *, mode="command", cold=None, prior=None, supplement="", previous_prompt="", edit_job=None):
+    def portrait_upload(self, message, ctx, *, cold=None):
+        if message.is_self or message.image_status != READY:
+            return
+        with self._lock:
+            job = self._jobs.get(turn_key(message))
+        if not (job and job.stage == "needs_input" and job.portrait_question and job.question_text
+                and job.question_sent_at <= message.received_at <= job.clarification_until):
+            return
+        record = RECENT_IMAGES.quoted(message.chat_id, svrid=message.data.get("native_message_id") or "")
+        if not (record and record.sender == message.sender_id and record.seen_at >= job.question_sent_at
+                and record.status == READY and record.path == message.image_path
+                and record not in job.portrait_answers.values()):
+            return
+        try:
+            with job.guard():
+                pass
+        except SnapshotExpired:
+            return
+        self.request(replace(job.message, received_at=message.received_at), ctx, job.prompt, cold=cold, prior=job,
+                     supplement="已补发照片", portrait_answer=(job.portrait_question.name, record))
+
+    def request(self, message, ctx, prompt, *, mode="command", cold=None, prior=None, supplement="", previous_prompt="",
+                edit_job=None, portrait_answer=None):
         if message.is_self or self.stopped.is_set() or (cold is not None and cold.active(message)):
             return
         try:
@@ -377,7 +422,7 @@ class ImageReply:
         if "group.image.send" not in ctx.capabilities:
             inform({"原因": "当前微信连接不支持发图，本次未受理"})
             return
-        quote = message.data.get("quote") or {}
+        quote = (prior.message if portrait_answer is not None else message).data.get("quote") or {}
         if prior and prior.required_references == 2 and prior.stage == "needs_input" and quote.get("ref_type") != "3":
             original_quote = prior.message.data.get("quote") or {}
             if original_quote.get("ref_type") == "3":
@@ -398,7 +443,7 @@ class ImageReply:
         if quoted and "group.image.receive" not in ctx.capabilities:
             inform({"原因": "当前连接收不到引用的群图", "可用操作": "可使用本群档案照或文字描述"})
             return
-        if ("group.image.receive" in ctx.capabilities
+        if (portrait_answer is None and "group.image.receive" in ctx.capabilities
                 and (prior is None or quoted or (required_references == 2 and prior.stage == "needs_input"))):
             candidates = RECENT_IMAGES.recent(message.chat_id, message.sender_id, before=message.received_at,
                                                within=120) if required_references == 2 or not quoted else ()
@@ -450,7 +495,11 @@ class ImageReply:
                 self._pending.move_to_end(key)
                 replacement_role = prior.material_question if prior and prior.stage == "needs_input" and quoted else ""
                 material_sources = prior.material_sources.copy() if replacement_role else {}
-                base_reference = prior.base_reference if prior and (not quoted or replacement_role) else ""
+                base_reference = prior.base_reference if prior and (not quoted or replacement_role or portrait_answer) else ""
+                portrait_answers = prior.portrait_answers.copy() if portrait_answer is not None else {}
+                if portrait_answer is not None:
+                    name, record = portrait_answer
+                    portrait_answers[name] = record
                 job = ImageJob(message, ctx, prompt.strip(), references, snapshot, guard, key, uuid4().hex,
                                time.monotonic() + TASK_SECONDS, personality,
                                revisions=revisions, source_id=prior.source_id if prior else snapshot.anchor_id,
@@ -460,6 +509,8 @@ class ImageReply:
                                previous_image=previous_image, bind_delivered=bind_delivered,
                                recent_pictures=recent_pictures,
                                replacement_role=replacement_role,
+                               portrait_question=prior.portrait_question if portrait_answer is not None else None,
+                               portrait_answers=portrait_answers,
                                material_sources=material_sources,
                                base_reference=base_reference,
                                required_references=required_references,
@@ -605,11 +656,17 @@ class ImageReply:
                     job.plan = replace(job.plan, references=paths, edit=True)
             if question:
                 job.stage = "needs_input"
-                job.failure = question
+                job.portrait_question = question if isinstance(question, MissingPortrait) else None
                 job.clarification_until = time.monotonic() + TASK_SECONDS
-                text = self._status.compose(job.message, job.ctx, {"待确认": question},
-                                            personality=job.personality, guard=job.guard)
+                if job.portrait_question:
+                    text = question.question(receives_pictures="group.image.receive" in job.ctx.capabilities)
+                    job.failure = text
+                else:
+                    job.failure = question
+                    text = self._status.compose(job.message, job.ctx, {"待确认": question},
+                                                personality=job.personality, guard=job.guard)
                 if text and job.ctx.reply_at(job.message, text, delivery_guard=job.guard):
+                    job.question_sent_at = time.monotonic()
                     job.question_text = text
                 else:
                     job.ctx.logger.info("生图追问未确认发出：消息=%s", job.source_id)

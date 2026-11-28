@@ -22,6 +22,7 @@ flowchart TB
         pending_result["图片沿用原要求和引用 → 第 4 段<br/>文字沿用原问题 → 第 3 段<br/>补素材接回原任务；续看沿用同一组图"]
         image_gate{"当面叫她、艾特、引用机器人或同人定向续问？<br/>档案照名单查询仍走普通回复"}
         image_intent["正文、引用和本人近期往来进入同次动作判断<br/>Jev 判断点唱、歌单与出图，未决由主模型补判<br/>整次分流最多 12 秒"]
+        image_review["主模型补判为出图时由 Jev 复核本轮委托<br/>出图 ≥ 0.7 受理；形式不明 ≥ 0.8 追问；其余继续普通回复"]
         after_intent["依次尝试：确认是催图或重试时查本人原任务<br/>再接回符合原任务的补图或明确修订<br/>仍无匹配时按本次分流继续"]
         own_action["催图回报实际状态<br/>可恢复且有远端号的重试只继续查询<br/>有效补充接回原任务"]
         next_image["新图、改图或图文澄清<br/>交给 ImageReply → 第 4 段"]
@@ -30,7 +31,8 @@ flowchart TB
         turn_open -->|本条继续| pending_format
         pending_format -->|匹配| pending_result
         pending_format -->|未匹配| image_gate
-        image_gate -->|符合| image_intent -->|聊天或生图| after_intent
+        image_gate -->|符合且有正文| image_intent -->|普通回复、直判出图或确认形式| after_intent
+        image_intent -->|主模型补判为出图| image_review --> after_intent
         image_intent -->|点歌或问歌单| songs["歌单查正式曲库；任选或指定歌曲发微信语音条<br/>仅确认缺歌时写想听清单；歧义先问歌名或歌手"]
         image_gate -->|跳过意图判断| after_intent
         after_intent -->|查询或续办已接手| own_action
@@ -105,7 +107,7 @@ flowchart TB
     classDef exit fill:#f5f7f8,stroke:#8c9da8,color:#3e5060
     classDef warn fill:#fceee9,stroke:#bd7969,color:#743b33
     class incoming,turn_open,next_chat,text_gate,text_context,text_mode,output_text,output_voice reply
-    class image_gate,image_intent,next_image,admission,queued,acquire,ready,dispatch_image,poll_image,send_image,submitted image
+    class image_gate,image_intent,image_review,next_image,admission,queued,acquire,ready,dispatch_image,poll_image,send_image,submitted image
     class pending_format,pending_result,after_intent,own_action,text_status,ask_format,ask_assets wait
     class asset_only,direct_command,old_turn,text_skip,ack exit
     class not_accepted,prepare_failed,unconfirmed,failed warn

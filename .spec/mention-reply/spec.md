@@ -115,6 +115,7 @@ flowchart TB
         pending_result["图片沿用原要求和引用 → 第 4 段<br/>文字沿用原问题 → 第 3 段<br/>补素材接回原任务；续看沿用同一组图"]
         image_gate{"当面叫她、艾特、引用机器人或同人定向续问？<br/>档案照名单查询仍走普通回复"}
         image_intent["正文、引用和本人近期往来进入同次动作判断<br/>Jev 判断点唱、歌单与出图，未决由主模型补判<br/>整次分流最多 12 秒"]
+        image_review["主模型补判为出图时由 Jev 复核本轮委托<br/>出图 ≥ 0.7 受理；形式不明 ≥ 0.8 追问；其余继续普通回复"]
         after_intent["依次尝试：确认是催图或重试时查本人原任务<br/>再接回符合原任务的补图或明确修订<br/>仍无匹配时按本次分流继续"]
         own_action["催图回报实际状态<br/>可恢复且有远端号的重试只继续查询<br/>有效补充接回原任务"]
         next_image["新图、改图或图文澄清<br/>交给 ImageReply → 第 4 段"]
@@ -123,7 +124,8 @@ flowchart TB
         turn_open -->|本条继续| pending_format
         pending_format -->|匹配| pending_result
         pending_format -->|未匹配| image_gate
-        image_gate -->|符合| image_intent -->|聊天或生图| after_intent
+        image_gate -->|符合且有正文| image_intent -->|普通回复、直判出图或确认形式| after_intent
+        image_intent -->|主模型补判为出图| image_review --> after_intent
         image_intent -->|点歌或问歌单| songs["歌单查正式曲库；任选或指定歌曲发微信语音条<br/>仅确认缺歌时写想听清单；歧义先问歌名或歌手"]
         image_gate -->|跳过意图判断| after_intent
         after_intent -->|查询或续办已接手| own_action
@@ -198,7 +200,7 @@ flowchart TB
     classDef exit fill:#f5f7f8,stroke:#8c9da8,color:#3e5060
     classDef warn fill:#fceee9,stroke:#bd7969,color:#743b33
     class incoming,turn_open,next_chat,text_gate,text_context,text_mode,output_text,output_voice reply
-    class image_gate,image_intent,next_image,admission,queued,acquire,ready,dispatch_image,poll_image,send_image,submitted image
+    class image_gate,image_intent,image_review,next_image,admission,queued,acquire,ready,dispatch_image,poll_image,send_image,submitted image
     class pending_format,pending_result,after_intent,own_action,text_status,ask_format,ask_assets wait
     class asset_only,direct_command,old_turn,text_skip,ack exit
     class not_accepted,prepare_failed,unconfirmed,failed warn
@@ -348,6 +350,7 @@ Jev 按这次答复是否依赖近期公开事实来判断搜索；现价、优�
 ## 群生图
 
 - `/生图` 直接受理；艾特、引用机器人和明确承接上文的同群同人请求，经 Jev 一次请求判断生成意图、参考图需求，以及能否沿用同一请求人的上一次生图要求，阈值分别为 0.8、0.7、0.8。Jev 低分或不可用时交主模型选择新图、改图、普通回复或确认形式。形式不明时询问，原请求人在五分钟内回复「图片」或「文字」可承接原要求与引用。当前正文决定交付形式，引用原话用于解释指代。对其他人的发言交回群聊。
+- 主模型补判为新图或改图时，Jev 在同次分流预算内复核一次，仅看当前正文、明确引用和已确认的近期发图事实。出图分达到 0.7 才受理，形式不明分达到 0.8 才追问，其余或复核失败走普通回复。只有艾特称呼的正文按空正文处理，可继续普通引用回复。
 - 艾特时先判是否要求出一张图，再考虑旧任务的进度查询。引用照片要求重画时，用该照片提交生图。意图判断和绘图规划可读本群同一请求人近 30 分钟的生图命令，用于承接原要求。分流优先使用当前原话、明确引用、近 30 分钟内与本人的近期往来及上次生图任务。单次分流限 12 秒，主模型最多补判一次；补判超时或返回无效动作时，Jev 出图分数达到 0.5 先确认形式，其余继续普通回复。意图分数、异常、最终分流、入队和图片回执均可按消息编号关联。询问「图呢」或简短要求「重试」时按已有任务的状态处理。
 - 当前群已启用、发言者非机器人本号、未被冷处理且具备群图片发送能力时才受理。请求原文为 1–2000 字，一次一张，生图模型、质量、尺寸沿用 Magpie 默认。
 - 引用图片按本群原消息编号或 MD5 取已收录图。未引用时可使用本人前 120 秒内唯一可用图，或按原请求查询本群已确认发出的旧图。无法确定时请用户引用，下载未完成最多等 6 秒。

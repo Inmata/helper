@@ -12,6 +12,7 @@ from wxbot_framework.conversation.dialogue import resolve_reply_quote
 from wxbot_framework.commands import command_text
 from wxbot_framework.conversation.mention_tools import _within
 from wxbot_framework.conversation.tool_router import ActionDecision, JevToolRouter
+from wxbot_framework.integrations.jev import JevError
 from wxbot_framework.integrations.llm import LLMError, LLMFormatError
 from wxbot_framework.timeutil import parse_utc
 
@@ -30,6 +31,29 @@ song：要求现在唱特定歌曲，包括按引用或上轮点歌澄清接着�
 text：继续普通回复，包括要故事、分镜脚本、教程、提示词、分析图片、禁止出图、转述别人要求、询问旧图进度。
 clarify：对方确实要你制作内容，但结合当前原话和上下文仍分不清要成图还是文字。例如只说“生成”并贴一段现成素材。
 明确给刚才那张图追加或修改画面要求也属于出图，并把“沿用上次生图要求”置为 true。仅话题相近时保持 false。"""
+
+IMAGE_REVIEW_INSTRUCTIONS = "判断当前发言有没有委托机器人现在绘制或修改一张图片。明确引用只用于解释指代，引用里的旧要求不算本轮委托。"
+IMAGE_REVIEW_CRITERIA = {
+    "image": "当前发言明确要求出图或修改画面。例如做个四格漫画、照引用图再画一张后续图。已确认刚发成品时，背景换蓝等简短改画面指令也是委托。",
+    "clarify": "当前发言确实委托机器人制作内容，但仍分不清成品要图片还是文字，例如只说生成并给出内容。",
+    "text": "评论画面或战况、指出一个人物或题材、接梗、呼叫机器人、索要教程或提示词、问进度，或缺少本轮委托依据。",
+}
+
+
+def _review_image_intent(judge, text, quote, *, just_delivered, stopped):
+    if judge is None:
+        return "text", {}, "not-configured"
+    state = {"当前发言": text, "明确引用": quote}
+    if just_delivered:
+        state["已确认刚发成品"] = True
+    try:
+        scores = _within(lambda: judge.choice(state, IMAGE_REVIEW_INSTRUCTIONS, IMAGE_REVIEW_CRITERIA, timeout=2),
+                         2, stopped)
+    except (JevError, TimeoutError, ValueError) as exc:
+        return "text", {}, type(exc).__name__
+    if scores["image"] >= 0.7:
+        return "image", scores, ""
+    return ("clarify" if scores["clarify"] >= 0.8 else "text"), scores, ""
 
 
 def choose_format(ctx, message, snapshot, text, previous_prompt, stopped, *, just_delivered=False):
@@ -79,6 +103,14 @@ def choose_format(ctx, message, snapshot, text, previous_prompt, stopped, *, jus
             # 补判服务故障时，对仍偏向要图的请求先确认形式，避免普通聊天直接接梗。
             mode = "clarify" if decision.probability is not None and decision.probability >= 0.5 else "text"
             decision = ActionDecision(mode, probability=decision.probability)
+        if decision.mode in ("create", "edit"):
+            mode, scores, error = _review_image_intent(judge, text, context["引用"],
+                                                       just_delivered=just_delivered, stopped=stopped)
+            if mode != "image":
+                decision = ActionDecision(mode, probability=decision.probability)
+            origin = "主模型＋Jev复核"
+            ctx.logger.info("生图委托复核：消息=%s 出图=%s 确认形式=%s 动作=%s 异常=%s", snapshot.anchor_id,
+                            scores.get("image"), scores.get("clarify"), decision.mode, error or "-")
     if decision.mode == "song":
         evidence = [text, context["引用"]["正文"], *(r["内容"] for r in recent[-4:])]
         title, artist, version = resolve_song_request(ctx, evidence, stopped)

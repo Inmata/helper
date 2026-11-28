@@ -303,9 +303,11 @@ class Plugin:
         text = strip_at_labels(message.data.get("retry_question", message.text))
         if source == "nickname":
             text = nickname_call(text, self.aliases)
-        if source == "typed":
+        if source == "typed" or (source and text.startswith("@")):
             label = typed_at(text, self._bot_names(message.chat_id))
-            if label:
+            if label and text[1:].casefold() == label.casefold():
+                return ""
+            if label and source == "typed":
                 text = text.replace("@" + label, "")
         return text.strip()
 

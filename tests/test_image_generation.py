@@ -482,9 +482,16 @@ class ImageGenerationTests(unittest.TestCase):
         def judge(state, questions, **options):
             if "当前艾特正文" in state:
                 self.assertIn("最近绘图回执", state["前文与引用"])
-                return [0.99, 0.10, 0.99, 0.01, 0.01, 0.01]
+                return [0.65, 0.10, 0.99, 0.01, 0.01, 0.01]
             return [0.99] * len(questions)
-        with patch.object(self.ctx._jev, "noul", side_effect=judge):
+
+        def review(state, *args, **options):
+            self.assertTrue(state["已确认刚发成品"])
+            return {"image": 0.73, "text": 0.26, "clarify": 0.01}
+
+        with (patch.object(self.ctx._jev, "noul", side_effect=judge),
+              patch.object(self.ctx._jev, "choice", create=True, side_effect=review),
+              patch.object(self.ctx._llm, "complete_json", return_value={"动作": "create"})):
             self.plugin.on_message(self.message("背景换蓝", sender="wxid_other"), self.ctx)
             self.plugin.on_message(self.message("背景换蓝"), self.ctx)
             self.wait_done()
@@ -560,6 +567,47 @@ class ImageGenerationTests(unittest.TestCase):
         self.wait_done()
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
 
+    def test_disputed_drawing_checks_this_message_before_routing(self):
+        cases = (
+            ("伺服颅骨！", "1", False, 0.16, "create", "text"),
+            ("机械神教大贤者——老张", "1", False, 0.41, "create", "text"),
+            ("后续图 结果一个没杀", "3", False, 0.34, "edit", "text"),
+            ("@a姐", "3", True, 0.44, "edit", "text"),
+            ("生成", "1", False, 0.56, "create", "clarify"),
+            ("帮我画张猫", "1", False, 0.49, "create", "unavailable"),
+        )
+        for text, quote_type, at, score, candidate, outcome in cases:
+            with self.subTest(text=text):
+                data = {"quote": {"ref_type": quote_type, "text": "上一句", "chatusr": self.members.account},
+                        "is_at_self": at, "at_members": [self.members.account] if at else []}
+                message = self.message(text, data=data, dispatch_epoch="replay", dispatch_sequence=self.sequence + 1)
+                scores = {"image": 0.03, "clarify": 0.92 if outcome == "clarify" else 0.02}
+                scores["text"] = 1 - sum(scores.values())
+                with (patch.object(self.plugin.image_reply, "routing_history", return_value=("旧绘图要求", False)),
+                      patch.object(self.ctx._jev, "noul", return_value=[score, 0.01, 0.01, 0.01, 0.01, 0.01]),
+                      patch.object(self.ctx._jev, "choice", create=True, return_value=scores,
+                                   side_effect=JevError("本机测试复核不可用") if outcome == "unavailable" else None) as review,
+                      patch.object(self.ctx._llm, "complete_json", return_value={"动作": candidate}) as model,
+                      patch.object(self.plugin.image_reply, "request") as draw,
+                      patch.object(self.plugin, "_reply_turn", return_value=iter(())) as chat):
+                    self.plugin.on_message(message, self.ctx)
+                    self.wait_done()
+                if at:
+                    model.assert_not_called()
+                    review.assert_not_called()
+                else:
+                    review.assert_called_once()
+                    state = review.call_args.args[0]
+                    self.assertEqual(state["当前发言"], text)
+                    self.assertEqual(state["明确引用"]["是图片"], quote_type == "3")
+                    self.assertNotIn("旧绘图要求", json.dumps(state, ensure_ascii=False))
+                if outcome == "clarify":
+                    self.assertEqual(draw.call_args.kwargs["mode"], "clarify")
+                    chat.assert_not_called()
+                else:
+                    draw.assert_not_called()
+                    chat.assert_called_once()
+
     def test_low_image_score_routes_comic_once_and_keeps_only_requester_context(self):
         prior = self.message("我想做侦探题材")
         self.message("今晚练二头", sender="wxid_other")
@@ -577,6 +625,8 @@ class ImageGenerationTests(unittest.TestCase):
             return plan(system, user, **options)
 
         with (patch.object(self.ctx._jev, "noul", return_value=[0.60, 0.05, 0.01, 0.01, 0.01]),
+              patch.object(self.ctx._jev, "choice", create=True,
+                           return_value={"image": 0.97, "text": 0.02, "clarify": 0.01}),
               patch.object(self.ctx._llm, "complete_json", side_effect=model),
               self.assertLogs(self.ctx.logger, level="INFO") as log):
             turns = self.members.turns
@@ -590,7 +640,7 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
         source = self.members.message_id(msg)
         self.assertTrue(any(f"消息={source} Jev=0.6" in row for row in log.output))
-        self.assertTrue(any(f"消息={source} 来源=主模型 动作=create" in row for row in log.output))
+        self.assertTrue(any(f"消息={source} 来源=主模型＋Jev复核 动作=create" in row for row in log.output))
         receipt = self.members.connection().execute("SELECT source_id,status FROM reply_receipts WHERE kind='image'").fetchone()
         self.assertEqual(tuple(receipt), (source, "submitted"))
 
@@ -669,7 +719,7 @@ class ImageGenerationTests(unittest.TestCase):
     def test_1310_quoted_continuation_keeps_base_when_source_judge_prefers_recent_pictures(self):
         target, _ = self.reference_fixture("quoted-result", sender=self.members.account)
         self.reference_fixture("later", sender="wxid_other")
-        message = self.message("后续图 结果一个没杀", data={"quote": {
+        message = self.message("帮我画一张后续图，结果一个没杀", data={"quote": {
             "ref_type": "3", "svrid": "quoted-result", "chatusr": self.members.account,
         }})
         decisions = [
@@ -677,6 +727,8 @@ class ImageGenerationTests(unittest.TestCase):
             {"画面参考": {"previous": 0.47, "quote": 0.32, "planning": 0.11}},
         ]
         with (patch.object(self.ctx._jev, "noul", return_value=[0.34, 0.69, 0.03, 0.17, 0.05]),
+              patch.object(self.ctx._jev, "choice", create=True,
+                           return_value={"image": 0.98, "text": 0.01, "clarify": 0.01}),
               patch.object(self.ctx._jev, "choices", side_effect=decisions),
               patch.object(self.ctx._llm, "complete_json", return_value={"动作": "edit"}),
               patch.object(self.ctx.magpie, "analyze_image") as inspect):
@@ -687,7 +739,7 @@ class ImageGenerationTests(unittest.TestCase):
         self.assertEqual(len(draws), 1)
         self.assertEqual(draws[0]["reference_images"], [str(target)])
         self.assertIn("第1张是待修改的底图", draws[0]["prompt"])
-        self.assertIn("后续图 结果一个没杀", draws[0]["prompt"])
+        self.assertIn("帮我画一张后续图，结果一个没杀", draws[0]["prompt"])
         self.assertEqual(self.backend.images, [(ROOM, PNG)])
 
     def test_quoted_redraw_starts_new_generation_after_previous_image_was_sent(self):
